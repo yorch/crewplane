@@ -101,6 +101,7 @@ export function projectHeadless(
       const processAlive = r?.pid ? alive(r.pid) : null;
       const runs = records
         .flatMap((r) => r.runs)
+        .concat(value?.retiredRuns?.[lane] ?? [])
         .filter((at) => at <= now && at > now - 3600000)
         .sort((a, b) => a - b);
       const entry = value?.queue?.queue.find((q) => q.lane === lane);
@@ -168,8 +169,10 @@ export function projectHeadless(
           : (r?.reason?.slice(0, 500) ??
             (enabled ? "No run recorded" : "Lane disabled / on demand")),
         usage: {
-          inputTokens: count(r?.inputTokens),
-          outputTokens: count(r?.outputTokens),
+          inputTokens:
+            r?.inputTokensKnown === true ? count(r.inputTokens) : null,
+          outputTokens:
+            r?.outputTokensKnown === true ? count(r.outputTokens) : null,
           runsLastHour: records
             .flatMap((record) => record.runs)
             .filter((at) => at <= now && at > now - 3600000).length,

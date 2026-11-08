@@ -287,6 +287,8 @@ try {
     "request",
     "--task",
     "CP-101",
+    "--commit",
+    first.status.commit,
     "--text",
     "Apply the synthetic correction",
   );

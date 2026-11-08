@@ -46,6 +46,8 @@ const state: State = {
       noProgress: 0,
       inputTokens: 120,
       outputTokens: 30,
+      inputTokensKnown: true,
+      outputTokensKnown: true,
       summary: "private-summary",
     },
   },
@@ -249,4 +251,28 @@ it("shows loaded budgets and a precise hourly wait instead of implying the confi
     code: "RATE_LIMITED",
     nextEligibleAt: new Date(now - 20000 + 3600000).toISOString(),
   });
+});
+
+it("keeps unreported and legacy usage unknown while preserving explicitly reported zero", () => {
+  const missing = structuredClone(state);
+  const record = missing.records.b;
+  if (!record) throw Error("Missing fixture");
+  delete record.inputTokensKnown;
+  delete record.outputTokensKnown;
+  record.inputTokens = 0;
+  record.outputTokens = 0;
+  const unknown = projectHeadless(config, missing, now, () => true).lanes.find(
+    (r) => r.lane === "B",
+  );
+  expect(unknown?.usage).toMatchObject({
+    inputTokens: null,
+    outputTokens: null,
+  });
+  record.inputTokensKnown = true;
+  record.outputTokensKnown = true;
+  expect(
+    projectHeadless(config, missing, now, () => true).lanes.find(
+      (r) => r.lane === "B",
+    )?.usage,
+  ).toMatchObject({ inputTokens: 0, outputTokens: 0 });
 });

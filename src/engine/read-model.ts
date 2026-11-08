@@ -165,7 +165,7 @@ export async function snapshot(root: string) {
     task.scheduling = schedulingReason(task, runtime, configured);
   const headless = await headlessStatus(
     board.store,
-    board.tasks.map((t) => t.assignment.owner),
+    board.tasks.filter((t) => !t.accepted).map((t) => t.assignment.owner),
   );
   const worktrees = execFileSync("git", ["worktree", "list", "--porcelain"], {
     cwd: root,
@@ -203,6 +203,12 @@ export async function snapshot(root: string) {
     version: 1,
     tasks: tasks
       .filter((t) => t.live?.assignment)
+      .sort(
+        (a, b) =>
+          Number(Boolean(a.live?.accepted)) -
+            Number(Boolean(b.live?.accepted)) || a.id.localeCompare(b.id),
+      )
+      .slice(0, 1000)
       .map((t) => ({
         id: t.id,
         label: t.title.slice(0, 256),
@@ -216,23 +222,31 @@ export async function snapshot(root: string) {
             require: dep.require,
           })) ?? [],
       })),
-    lanes: agents.map((lane) => ({
-      id: lane.lane,
-      role:
-        lane.lane === coordinatorOf(configured ?? policy)
-          ? "Coordinator"
-          : reviewersOf(configured ?? policy).includes(lane.lane)
-            ? reviewerRoleOf(configured ?? policy, lane.lane) === "visual"
-              ? "Browser QA"
-              : "Code review"
-            : "Implementation",
-      harness: lane.observedHarness,
-      observedModel: lane.observedModel,
-      taskId: lane.task,
-      processStatus: lane.status,
-      taskStatus: lane.taskStatus,
-      accepted: Boolean(lane.acceptedCommit),
-    })),
+    lanes: [...agents]
+      .sort(
+        (a, b) =>
+          Number(b.status === "running") - Number(a.status === "running") ||
+          Number(Boolean(configured?.lanes[b.lane])) -
+            Number(Boolean(configured?.lanes[a.lane])),
+      )
+      .slice(0, 64)
+      .map((lane) => ({
+        id: lane.lane,
+        role:
+          lane.lane === coordinatorOf(configured ?? policy)
+            ? "Coordinator"
+            : reviewersOf(configured ?? policy).includes(lane.lane)
+              ? reviewerRoleOf(configured ?? policy, lane.lane) === "visual"
+                ? "Browser QA"
+                : "Code review"
+              : "Implementation",
+        harness: lane.observedHarness,
+        observedModel: lane.observedModel,
+        taskId: lane.task,
+        processStatus: lane.status,
+        taskStatus: lane.taskStatus,
+        accepted: Boolean(lane.acceptedCommit),
+      })),
     messages: board.messages
       .slice(-1000)
       .filter((m) =>
@@ -255,6 +269,10 @@ export async function snapshot(root: string) {
       communication: buildGraph(graphInput, "communication"),
     },
     graphCoverage: {
+      lanesTotal: agents.length,
+      lanesIncluded: graphInput.lanes.length,
+      tasksTotal: tasks.filter((t) => t.live?.assignment).length,
+      tasksIncluded: graphInput.tasks.length,
       messagesTotal: board.messages.length,
       messagesIncluded: graphInput.messages.length,
       dependencyMetadata: `${tasks.filter((t) => t.live?.scheduling).length} structured schedules; legacy dependencies unavailable`,

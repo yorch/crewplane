@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun run build && node node_modules/vitest/vitest.mjs run",
     "verify": "bun run check && bun run typecheck && bun run test && bun run test:binary",
-    "test:binary": "bun tests/binary.ts"
+    "test:binary": "bun tests/binary.ts && bun tests/lifecycle-binary.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
