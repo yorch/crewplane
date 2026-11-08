@@ -25,6 +25,14 @@ jobs:
           node-version: 26.11.1
       - run: bun install --frozen-lockfile
       - run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      # Allow namespaces only for downloaded headless Chromium in this runner's cache.
+      # https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md
+      - name: Configure sandboxed Chromium on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile crewplane-chromium "%s/.cache/ms-playwright/**/chrome-headless-shell" flags=(unconfined) {\n  userns,\n}\n' "$HOME" > /tmp/crewplane-chromium.apparmor
+          sudo install -m 0644 /tmp/crewplane-chromium.apparmor /etc/apparmor.d/crewplane-chromium
+          sudo apparmor_parser -r /etc/apparmor.d/crewplane-chromium
       - run: bun run verify
         env:
           TMPDIR: /tmp
