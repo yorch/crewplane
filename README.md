@@ -38,3 +38,5 @@ crewplane watchdog start
 Codex and restrictive no-tools pi adapters are extracted and covered with synthetic native events. Real harness/provider acceptance is separate; Claude/OpenCode, Windows, signing and automatic updates are not delivered. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
 
 See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extraction provenance](docs/PROVENANCE.md), and [plan](docs/PLAN.md). See [operating guide](docs/USAGE.md) for configuration and workflow examples, and [validation status](docs/STATUS.md) for evidence and limits.
+
+Native Linux and macOS executables with SHA-256 checksums are uploaded as artifacts of successful [Verify runs](https://github.com/yorch/crewplane/actions). Signed releases and installers are deferred.
