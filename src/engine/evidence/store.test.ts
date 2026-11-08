@@ -210,6 +210,10 @@ it("ignores crash partial files and orphan bytes while rejecting oversized or ma
   expect(
     (await (await createEvidenceStore(p)).manifest(m.runId))?.artifacts,
   ).toHaveLength(0);
+  expect(readdirSync(join(p, m.task, m.runId, m.testedCommit))).toContain(
+    ".partial-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  );
+  await store.append(m.runId, capture, png);
   expect(readdirSync(join(p, m.task, m.runId, m.testedCommit))).not.toContain(
     ".partial-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   );
@@ -253,4 +257,25 @@ it("rejects a first recheck under global byte pressure while preserving its orig
     omittedArtifacts: 1,
     reason: "global-cap",
   });
+});
+
+it("isolates a missing payload while preserving healthy runs and permits subsequent writes", async () => {
+  const p = root();
+  const store = await createEvidenceStore(p);
+  const broken = await store.createRun(run);
+  const artifact = await store.append(broken.runId, capture, png);
+  rmSync(artifactPath(p, broken, artifact.artifactId));
+  const reopened = await createEvidenceStore(p);
+  const healthy = await reopened.createRun(run);
+  await reopened.append(healthy.runId, capture, png);
+  expect((await reopened.list()).unavailableRuns).toBe(1);
+  expect((await reopened.list()).runs.map((m) => m.runId)).toEqual(
+    expect.arrayContaining([healthy.runId, broken.runId]),
+  );
+  expect((await reopened.list()).unavailableRunIds).toEqual([broken.runId]);
+  expect((await reopened.manifest(broken.runId))?.artifacts).toHaveLength(1);
+  await expect(reopened.read(artifact.artifactId)).rejects.toThrow(
+    "Evidence rejected",
+  );
+  expect((await reopened.manifest(healthy.runId))?.artifacts).toHaveLength(1);
 });

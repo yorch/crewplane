@@ -4,11 +4,13 @@ import {
   mkdir,
   open,
   readdir,
-  rename,
+  realpath,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { publishJson } from "../io.ts";
+import { withProcessLock } from "../process-lock.ts";
 import { validId, validTaskId } from "../project.ts";
 import type { Harness } from "./harness.ts";
 
@@ -285,7 +287,7 @@ export async function createTraceStore(
   directory: string,
   overrides: Partial<TraceLimits> = {},
 ) {
-  const root = resolve(directory);
+  let root = resolve(directory);
   const limits = { ...traceLimits, ...overrides };
   for (const [k, v] of Object.entries(limits))
     if (
@@ -296,6 +298,7 @@ export async function createTraceStore(
       throw Error("Invalid trace limit");
   await mkdir(root, { recursive: true, mode: 0o700 });
   if ((await lstat(root)).isSymbolicLink()) throw Error("Unsafe trace root");
+  root = await realpath(root);
   const path = (id: string, suffix: string) => {
     if (!traceIdPattern.test(id)) throw Error("Invalid run ID");
     return join(root, `${id}.${suffix}`);
@@ -314,9 +317,7 @@ export async function createTraceStore(
     }
   }
   async function atomic(meta: TraceMeta) {
-    const tmp = path(meta.runId, "meta.tmp");
-    await writeFile(tmp, JSON.stringify(meta), { flag: "wx", mode: 0o600 });
-    await rename(tmp, path(meta.runId, "meta.json"));
+    await publishJson(path(meta.runId, "meta.json"), meta);
   }
   function cleanMeta(v: unknown): TraceMeta {
     const m = v as TraceMeta;
@@ -539,81 +540,94 @@ export async function createTraceStore(
       task: string | null;
       harness: Harness;
     }) {
-      const meta = cleanMeta({
-        ...input,
-        version: 1,
-        sessionId: null,
-        startedAt: new Date().toISOString(),
-        status: "running",
-        events: 0,
-        bytes: 0,
-        truncated: false,
-        omitted: 0,
-        finalState: null,
-      });
-      const capacity = await prune(1);
-      if (
-        capacity.runs >= limits.maxRuns ||
-        capacity.bytes + 8192 > limits.maxTotalBytes
-      )
-        throw Error("Trace capacity unavailable");
-      await writeFile(path(meta.runId, "events.jsonl"), "", {
-        flag: "wx",
-        mode: 0o600,
-      });
-      await atomic(meta);
-      await prune();
-      let queue = Promise.resolve();
-      const emit = (event: TraceInput) => {
-        queue = queue.then(async () => {
-          const e = project(meta, event, meta.events + 1);
-          const line = `${JSON.stringify(e)}\n`;
-          const capacity = await prune();
-          if (
-            capacity.bytes + Buffer.byteLength(line) > limits.maxTotalBytes ||
-            meta.events >= limits.maxEvents ||
-            meta.bytes + Buffer.byteLength(line) > limits.maxRunBytes ||
-            Buffer.byteLength(line) > 4096
-          ) {
-            meta.truncated = true;
-            meta.omitted++;
-            await atomic(meta);
-            return;
-          }
-          const h = await open(
-            path(meta.runId, "events.jsonl"),
-            constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW,
-          );
-          try {
-            await h.writeFile(line);
-          } finally {
-            await h.close();
-          }
-          meta.events++;
-          meta.bytes += Buffer.byteLength(line);
-          await atomic(meta);
+      return await withProcessLock(`${root}.lock`, async () => {
+        const meta = cleanMeta({
+          ...input,
+          version: 1,
+          sessionId: null,
+          startedAt: new Date().toISOString(),
+          status: "running",
+          events: 0,
+          bytes: 0,
+          truncated: false,
+          omitted: 0,
+          finalState: null,
         });
-        return queue;
-      };
-      return {
-        emit,
-        session(id: string) {
-          if (/^[a-f0-9-]{36}$/.test(id)) meta.sessionId = id;
-        },
-        async finish(status: "finished" | "paused", finalState: unknown) {
-          meta.status = status;
-          meta.finalState =
-            typeof finalState === "string" && states.includes(finalState)
-              ? finalState
-              : null;
-          await emit({
-            kind: status === "paused" ? "error" : "finished",
-            status,
-          });
-          await queue;
-          await prune();
-        },
-      };
+        const capacity = await prune(1);
+        if (
+          capacity.runs >= limits.maxRuns ||
+          capacity.bytes + 8192 > limits.maxTotalBytes
+        )
+          throw Error("Trace capacity unavailable");
+        await writeFile(path(meta.runId, "events.jsonl"), "", {
+          flag: "wx",
+          mode: 0o600,
+        });
+        await atomic(meta);
+        await prune();
+        let queue = Promise.resolve();
+        const emit = (event: TraceInput) => {
+          queue = queue
+            .catch(() => {})
+            .then(() =>
+              withProcessLock(`${root}.lock`, async () => {
+                const e = project(meta, event, meta.events + 1);
+                const line = `${JSON.stringify(e)}\n`;
+                const capacity = await prune();
+                if (
+                  capacity.bytes + Buffer.byteLength(line) >
+                    limits.maxTotalBytes ||
+                  meta.events >= limits.maxEvents ||
+                  meta.bytes + Buffer.byteLength(line) > limits.maxRunBytes ||
+                  Buffer.byteLength(line) > 4096
+                ) {
+                  meta.truncated = true;
+                  meta.omitted++;
+                  await atomic(meta);
+                  return;
+                }
+                const h = await open(
+                  path(meta.runId, "events.jsonl"),
+                  constants.O_APPEND |
+                    constants.O_WRONLY |
+                    constants.O_NOFOLLOW,
+                );
+                try {
+                  await h.writeFile(line);
+                  await h.sync();
+                } finally {
+                  await h.close();
+                }
+                meta.events++;
+                meta.bytes += Buffer.byteLength(line);
+                await atomic(meta);
+              }),
+            );
+          return queue;
+        };
+        return {
+          emit,
+          session(id: string) {
+            if (/^[a-f0-9-]{36}$/.test(id)) meta.sessionId = id;
+          },
+          async finish(status: "finished" | "paused", finalState: unknown) {
+            await emit({
+              kind: status === "paused" ? "error" : "finished",
+              status,
+            });
+            await queue;
+            await withProcessLock(`${root}.lock`, async () => {
+              meta.status = status;
+              meta.finalState =
+                typeof finalState === "string" && states.includes(finalState)
+                  ? finalState
+                  : null;
+              await atomic(meta);
+              await prune();
+            });
+          },
+        };
+      });
     },
   };
 }

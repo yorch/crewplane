@@ -114,6 +114,15 @@ it("serves fresh tasks/messages without exposing files or allowing mutations/cro
     ])
       expect((await fetch(`${url}/${asset}`)).status).toBe(200);
     const traceId = "1794100000001-00000000-0000-4000-8000-000000000001";
+    const evidenceRoot = join(root, ".crewplane-state/evidence");
+    await writeFile(evidenceRoot, "synthetic initialization obstruction", {
+      mode: 0o600,
+    });
+    expect((await fetch(`${url}/api/evidence`)).status).toBe(503);
+    await rm(evidenceRoot);
+    const evidenceResponse = await fetch(`${url}/api/evidence`);
+    expect(evidenceResponse.status).toBe(200);
+    expect((await evidenceResponse.json()).runs).toEqual([]);
     const traces = await createTraceStore(
       join(root, ".crewplane-state/operational-traces"),
     );

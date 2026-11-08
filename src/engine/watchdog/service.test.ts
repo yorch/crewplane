@@ -207,7 +207,19 @@ describe("private watchdog service", () => {
       await first;
     }
   });
-  it.each(["dead", "unknown", "incomplete"])(
+  it("recovers a verified dead watchdog owner without stealing a live owner", async () => {
+    const { options } = await setup();
+    const lease = join(options.directory, "lease");
+    await mkdir(lease, { mode: 0o700 });
+    await writeFile(
+      join(lease, "owner.json"),
+      JSON.stringify({ pid: 2147483647, identity: "dead" }),
+      { mode: 0o600 },
+    );
+    expect(await checkWatchdog(options)).not.toBeNull();
+    await expect(stat(lease)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it.each(["unknown", "incomplete"])(
     "never automatically steals a %s lease",
     async (kind) => {
       const { options } = await setup();
@@ -217,7 +229,7 @@ describe("private watchdog service", () => {
         await writeFile(
           join(lease, "owner.json"),
           JSON.stringify({
-            pid: kind === "dead" ? 2147483647 : null,
+            pid: null,
             identity: kind,
           }),
           { mode: 0o600 },

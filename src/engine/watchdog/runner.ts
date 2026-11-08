@@ -1,15 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  rename,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { publishJson } from "../../io.ts";
 import {
   coordinatorOf,
   discoverProject,
@@ -42,7 +35,7 @@ async function privateJson(path: string, maxBytes = 2097152): Promise<unknown> {
   }
 }
 function liveness(pid: number | null): Liveness {
-  if (!pid || !Number.isSafeInteger(pid) || pid < 1) return "unknown";
+  if (!pid || !Number.isSafeInteger(pid)) return "unknown";
   try {
     process.kill(pid, 0);
     return "alive";
@@ -74,7 +67,7 @@ async function operations(
   now: number,
 ): Promise<WatchdogInput["pendingOperations"]> {
   try {
-    const directory = join(store, "operations");
+    const directory = join(store, "supervisor/commands");
     const stat = await lstat(directory);
     if (
       !stat.isDirectory() ||
@@ -92,13 +85,13 @@ async function operations(
     const pending: NonNullable<WatchdogInput["pendingOperations"]> = [];
     for (const file of files) {
       const value = object(await privateJson(join(directory, file), 65536));
-      const requestedAt = time(value?.requestedAt);
+      const requestedAt = time(value?.at);
+      if (value && !["rollout", "stop"].includes(value.action as string))
+        continue;
       if (
-        value?.version !== 1 ||
-        value.id !== file.slice(0, -5) ||
-        !["rollout", "restart", "stop"].includes(value.kind as string) ||
-        !["queued", "blocked", "handled", "completed"].includes(
-          value.state as string,
+        !value ||
+        !["rollout", "stop", "hold", "release", "retry", "nudge"].includes(
+          value?.action as string,
         ) ||
         requestedAt === null ||
         requestedAt < 0 ||
@@ -106,12 +99,9 @@ async function operations(
       )
         return undefined;
       pending.push({
-        id: value.id as string,
-        kind: value.kind as "rollout" | "restart" | "stop",
-        state:
-          value.state === "completed"
-            ? "handled"
-            : (value.state as "queued" | "blocked" | "handled"),
+        id: file.slice(0, -5),
+        kind: value.action as "rollout" | "stop",
+        state: "queued",
         requestedAt,
       });
     }
@@ -139,7 +129,12 @@ const queueState = (
   if (reason === "RATE_LIMITED") return "rate";
   if (
     reason.startsWith("DEPENDENCY_") ||
-    ["REVISION_PENDING", "BASE_UNACCEPTED", "TASK_FROZEN"].includes(reason)
+    [
+      "REVISION_PENDING",
+      "REVISION_NOT_READY",
+      "BASE_UNACCEPTED",
+      "TASK_FROZEN",
+    ].includes(reason)
   )
     return "dependency";
   if (reason === "PHASE_DISALLOWED") return "phase";
@@ -152,6 +147,7 @@ const queueState = (
       "OWNERSHIP_INVALID",
       "PATH_OVERLAP",
       "TASK_MISSING",
+      "SCHEDULE_INPUT_OVERFLOW",
     ].includes(reason)
   )
     return "config";
@@ -352,10 +348,16 @@ export async function readHealth(
         supervisorAlive === "alive",
     },
     children: records
-      .filter((r) => r.status === "running" && pidValue(r.pid) !== null)
+      .filter(
+        (r) =>
+          r.status === "running" &&
+          (pidValue(r.processGroupId) !== null || pidValue(r.pid) !== null),
+      )
       .map((r) => ({
-        pid: pidValue(r.pid) as number,
-        alive: observe(pidValue(r.pid)),
+        pid: (pidValue(r.pid) ?? pidValue(r.processGroupId)) as number,
+        alive: pidValue(r.processGroupId)
+          ? observe(-(pidValue(r.processGroupId) as number))
+          : observe(pidValue(r.pid)),
       })),
     config: {
       loaded: fingerprint(object(state?.scheduling)?.fingerprint),
@@ -429,19 +431,7 @@ export async function deliverNotice(
     if (!st.isDirectory() || st.isSymbolicLink())
       throw Error("Unsafe notice directory");
   };
-  const atomicNotice = async (path: string, value: unknown) => {
-    const temp = `${path}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(temp, JSON.stringify(value), {
-        mode: 0o600,
-        flag: "wx",
-        flush: true,
-      });
-      await rename(temp, path);
-    } finally {
-      await unlink(temp).catch(() => {});
-    }
-  };
+  const atomicNotice = publishJson;
   const directory = join(store, "watchdog");
   await safeDirectory(directory);
   await atomicNotice(join(directory, "notice.json"), {
@@ -455,13 +445,20 @@ export async function deliverNotice(
   const intent = object(
     await privateJson(join(store, "supervisor/desired.json")),
   );
-  if (intent?.desiredRunning !== true) return;
+  const state = object(await privateJson(join(store, "supervisor/state.json")));
+  if (
+    intent?.desiredRunning !== true ||
+    state?.running !== true ||
+    typeof state.generation !== "string"
+  )
+    return;
   await safeDirectory(join(store, "supervisor"));
   await safeDirectory(join(store, "supervisor/commands"));
   await atomicNotice(
     join(store, "supervisor/commands", `${randomUUID()}.json`),
     {
       action: "nudge",
+      generation: state.generation,
       lane: coordinatorOf(
         (await privateJson(join(store, "supervisor/config.json"))) as Config,
       ),

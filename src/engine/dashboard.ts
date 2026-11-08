@@ -22,7 +22,10 @@ export function createDashboard(root: string) {
         store: string;
       };
       return createTraceStore(join(store, "operational-traces"));
-    })());
+    })().catch((error) => {
+      traces = undefined;
+      throw error;
+    }));
   let evidence: ReturnType<typeof createEvidenceStore> | undefined;
   const getEvidence = () =>
     (evidence ??= (async () => {
@@ -30,7 +33,10 @@ export function createDashboard(root: string) {
         store: string;
       };
       return createEvidenceStore(join(store, "evidence"));
-    })());
+    })().catch((error) => {
+      evidence = undefined;
+      throw error;
+    }));
   return createServer(async (request, response) => {
     const address = response.socket?.localPort;
     const expectedHost = `127.0.0.1:${address}`;

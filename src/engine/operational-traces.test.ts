@@ -241,3 +241,48 @@ it("protects active runs and recovers a private first-rename crash without follo
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("serializes concurrent emit reservations and finalization against retention", async () => {
+  const root = await mkdtemp(join(tmpdir(), "trace-concurrent-"));
+  try {
+    const store = await createTraceStore(root, {
+      maxTotalBytes: 17000,
+      maxRuns: 2,
+    });
+    const first = await store.begin({
+      runId: run(1),
+      lane: "impl",
+      task: "CP-06",
+      harness: "codex",
+    });
+    const secondStore = await createTraceStore(root, {
+      maxTotalBytes: 17000,
+      maxRuns: 2,
+    });
+    const second = await secondStore.begin({
+      runId: run(2),
+      lane: "reviewer",
+      task: "CP-06",
+      harness: "codex",
+    });
+    await Promise.all(
+      Array.from({ length: 8 }, () => [
+        first.emit({ kind: "usage" }),
+        second.emit({ kind: "usage" }),
+      ]).flat(),
+    );
+    const entries = (await store.list()).runs;
+    expect(
+      entries.reduce((sum, meta) => sum + meta.bytes + 8192, 0),
+    ).toBeLessThanOrEqual(17000);
+    await Promise.all([
+      first.finish("finished", "ready"),
+      second.finish("finished", "ready"),
+    ]);
+    expect(
+      (await store.list()).runs.every((meta) => meta.status === "finished"),
+    ).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

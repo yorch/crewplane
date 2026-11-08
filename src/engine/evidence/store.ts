@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { withProcessLock } from "../../process-lock.ts";
 import { validId as validAgentId } from "../../project.ts";
 import {
   defaultEvidenceLimits,
@@ -236,7 +237,9 @@ async function openStore(
     );
   const save = (m: EvidenceManifest) =>
     atomic(join(runPath(m), "manifest.json"), Buffer.from(JSON.stringify(m)));
-  function load(): EvidenceManifest[] {
+  const unavailableRuns = new Set<string>();
+  function load(recover = false): EvidenceManifest[] {
+    unavailableRuns.clear();
     const result: EvidenceManifest[] = [];
     for (const task of readdirSync(absolute)) {
       if (!evidenceTaskPattern.test(task)) fail();
@@ -248,7 +251,7 @@ async function openStore(
         safe(rp, true);
         const commits = readdirSync(rp);
         if (commits.length === 0) {
-          rmSync(rp, { recursive: true });
+          if (recover) rmSync(rp, { recursive: true });
           continue;
         }
         if (
@@ -266,9 +269,9 @@ async function openStore(
             const p = join(cp, entry);
             safe(p, false);
             if (!/^\.partial-[a-f0-9-]+$/.test(entry)) fail();
-            rmSync(p);
+            if (recover) rmSync(p);
           }
-          rmSync(rp, { recursive: true });
+          if (recover) rmSync(rp, { recursive: true });
           continue;
         }
         const m = JSON.parse(
@@ -346,14 +349,28 @@ async function openStore(
               safe(child, false);
               if (child === file) continue;
               if (expected.has(child)) continue;
-              if (/^\.partial-[a-f0-9-]+$/.test(entry) || validId(entry, "ev"))
-                rmSync(child);
-              else fail();
+              if (
+                /^\.partial-[a-f0-9-]+$/.test(entry) ||
+                validId(entry, "ev")
+              ) {
+                if (recover) rmSync(child);
+              } else fail();
             }
           }
         }
         inspect(cp, 0);
-        for (const a of m.artifacts) content(m, a);
+        // Metadata/listing never rehashes every payload. Verify content on explicit read.
+        // Missing or damaged payloads isolate their run; retain bytes for inspection.
+        for (const a of m.artifacts) {
+          try {
+            if (safe(artifactPath(m, a), false).size !== a.bytes)
+              unavailableRuns.add(m.runId);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT")
+              unavailableRuns.add(m.runId);
+            else throw error;
+          }
+        }
         result.push(m);
         if (result.length > 1000) fail();
       }
@@ -381,7 +398,20 @@ async function openStore(
     return bytes;
   }
   const total = (runs: EvidenceManifest[]) =>
-    runs.reduce((n, m) => n + m.artifacts.reduce((s, a) => s + a.bytes, 0), 0);
+    runs.reduce(
+      (n, m) =>
+        n +
+        m.artifacts.reduce((sum, a) => {
+          let actual = 0;
+          try {
+            actual = safe(artifactPath(m, a), false).size;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+          return sum + Math.max(a.bytes, actual);
+        }, 0),
+      0,
+    );
   function trim(
     runs: EvidenceManifest[],
     current: EvidenceManifest,
@@ -391,6 +421,7 @@ async function openStore(
   ) {
     // Prefer successful oldest video, retaining findings and original rechecks.
     for (const m of [...runs].reverse()) {
+      if (unavailableRuns.has(m.runId)) continue;
       for (const a of [...m.artifacts]) {
         if (total(runs) + extra <= limits.maxTotalBytes) break;
         if (
@@ -413,6 +444,7 @@ async function openStore(
       }
     }
     for (const m of [...runs].reverse()) {
+      if (unavailableRuns.has(m.runId)) continue;
       if (
         total(runs) + extra <= limits.maxTotalBytes &&
         runs.length + Number(extraRun) <= limits.maxRuns
@@ -450,7 +482,8 @@ async function openStore(
     async createRun(input) {
       keys(input, runKeys);
       runValid(input);
-      const runs = load();
+      const runs = load(true);
+
       const m: EvidenceManifest = {
         ...input,
         version: 1,
@@ -478,8 +511,10 @@ async function openStore(
         !mimeValid(input.mime, contentBytes)
       )
         fail();
-      const runs = load();
+      const runs = load(true);
+
       const m = runs.find((r) => r.runId === runId);
+      if (unavailableRuns.has(runId)) fail();
       if (!m) fail();
       if (
         input.recheckOf &&
@@ -528,7 +563,8 @@ async function openStore(
     },
     async manifest(runId) {
       if (!validId(runId, "qa")) fail();
-      return structuredClone(load().find((m) => m.runId === runId) ?? null);
+      const result = load().find((m) => m.runId === runId);
+      return structuredClone(result ?? null);
     },
     async list(options = {}) {
       keys(options, ["task", "cursor", "limit"]);
@@ -553,12 +589,15 @@ async function openStore(
         nextCursor:
           start + limit < runs.length ? (page.at(-1)?.runId ?? null) : null,
         retentionLimited: runs.some((m) => m.truncated),
+        unavailableRuns: unavailableRuns.size,
+        unavailableRunIds: [...unavailableRuns],
       };
     },
     async read(artifactId) {
       if (!validId(artifactId, "ev")) fail();
       for (const m of load()) {
         const a = m.artifacts.find((x) => x.artifactId === artifactId);
+        if (a && unavailableRuns.has(m.runId)) fail();
         if (a) return { artifact: structuredClone(a), content: content(m, a) };
       }
       return null;
@@ -572,19 +611,24 @@ export async function createEvidenceStore(
   limits: Partial<EvidenceLimits> = {},
 ): Promise<EvidenceStore> {
   try {
-    const store = await openStore(root, limits);
-    return new Proxy(store, {
-      get(target, key: keyof EvidenceStore) {
-        const method = target[key];
-        if (typeof method !== "function") return undefined;
-        return async (...args: unknown[]) => {
-          try {
-            return await Reflect.apply(method, target, args);
-          } catch {
-            return fail();
-          }
-        };
-      },
+    const lock = `${resolve(root)}.lock`;
+    return await withProcessLock(lock, async () => {
+      const store = await openStore(root, limits);
+      return new Proxy(store, {
+        get(target, key: keyof EvidenceStore) {
+          const method = target[key];
+          if (typeof method !== "function") return undefined;
+          return async (...args: unknown[]) => {
+            try {
+              return await withProcessLock(lock, () =>
+                Reflect.apply(method, target, args),
+              );
+            } catch {
+              return fail();
+            }
+          };
+        },
+      });
     });
   } catch {
     return fail();

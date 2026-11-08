@@ -80,6 +80,8 @@ export interface EvidenceStore {
     runs: EvidenceManifest[];
     nextCursor: string | null;
     retentionLimited: boolean;
+    unavailableRuns?: number;
+    unavailableRunIds?: string[];
   }>;
   manifest(runId: string): Promise<EvidenceManifest | null>;
   read(

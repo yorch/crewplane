@@ -6,12 +6,14 @@ import {
   mkdir,
   open,
   readFile,
-  rename,
+  realpath,
   rmdir,
   unlink,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { publishJson } from "../../io.ts";
+import { withProcessLock } from "../../process-lock.ts";
 import type {
   WatchdogInput,
   WatchdogNotice,
@@ -58,19 +60,7 @@ async function atomic(path: string, value: unknown): Promise<void> {
   const data = `${JSON.stringify(value)}\n`;
   if (Buffer.byteLength(data) > 65536)
     throw new Error("Watchdog state too large");
-  const temporary = `${path}.tmp`;
-  const handle = await open(temporary, "wx", 0o600);
-  try {
-    try {
-      await handle.writeFile(data);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, path);
-  } finally {
-    await unlink(temporary).catch(() => {});
-  }
+  await publishJson(path, value);
 }
 async function run(
   options: WatchdogOptions,
@@ -88,17 +78,49 @@ async function run(
     throw new Error("Invalid watchdog directory");
   await chmod(options.directory, 0o700);
   const lease = join(options.directory, "lease");
-  // Existing leases are never reclaimed automatically, including dead or unreadable owners.
-  try {
-    await mkdir(lease, { mode: 0o700 });
-  } catch {
-    throw new Error("Watchdog lease unavailable");
-  }
   const owner = { version: 1, pid: process.pid, identity: randomUUID() };
   const ownerPath = join(lease, "owner.json");
+  await withProcessLock(
+    join(await realpath(options.directory), "lease-acquire.lock"),
+    async () => {
+      try {
+        await mkdir(lease, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const leaseStat = await lstat(lease);
+        if (
+          !leaseStat.isDirectory() ||
+          leaseStat.isSymbolicLink() ||
+          leaseStat.uid !== process.getuid?.() ||
+          (leaseStat.mode & 0o077) !== 0
+        )
+          throw Error("Watchdog lease unavailable");
+        const previous = await readPrivate(ownerPath)
+          .then(JSON.parse)
+          .catch(() => {
+            throw Error("Watchdog lease unavailable");
+          });
+        if (
+          !Number.isSafeInteger(previous.pid) ||
+          previous.pid < 1 ||
+          typeof previous.identity !== "string"
+        )
+          throw Error("Watchdog lease unavailable");
+        try {
+          process.kill(previous.pid, 0);
+          throw Error("Watchdog lease unavailable");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+        await unlink(ownerPath);
+        await rmdir(lease);
+        await mkdir(lease, { mode: 0o700 });
+      }
+      await atomic(ownerPath, owner);
+    },
+  );
   let ownsLease = false;
   try {
-    await atomic(ownerPath, owner);
     ownsLease = true;
     let previous: WatchdogState | null = null;
     const latestPath = join(options.directory, "latest.json");
