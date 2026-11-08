@@ -39,4 +39,10 @@ Codex and restrictive no-tools pi adapters are extracted and covered with synthe
 
 See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extraction provenance](docs/PROVENANCE.md), and [plan](docs/PLAN.md). See [operating guide](docs/USAGE.md) for configuration and workflow examples, and [validation status](docs/STATUS.md) for evidence and limits.
 
-Native Linux and macOS executables with SHA-256 checksums are uploaded as artifacts of successful [Verify runs](https://github.com/yorch/crewplane/actions). Signed releases and installers are deferred.
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
+```
+
+This downloads the latest [release](https://github.com/yorch/crewplane/releases) binary for Linux or macOS, verifies its SHA-256 checksum and installs it to `~/.local/bin` (override with `CREWPLANE_INSTALL_DIR`; pin with `CREWPLANE_VERSION=v0.2.0`). Binaries are published per tag by `bun run release <patch|minor|major>`. Signing and automatic updates are deferred.
