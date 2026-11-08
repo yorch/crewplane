@@ -199,7 +199,27 @@ export function evaluateOrchestration(
         ["question", "request", "answer", "handoff"].includes(m.kind),
     );
     if (lane === coordinator) {
-      const events = incoming.map((m) => `message:${m.id}`);
+      const peerQuestions = board.unanswered.filter((m) => {
+        if (
+          m.kind !== "question" ||
+          !m.task ||
+          m.from === coordinator ||
+          m.to === coordinator
+        )
+          return false;
+        const task = active.find((task) => task.id === m.task);
+        return (
+          task?.live?.assignment.owner === m.from &&
+          (!m.assignmentId ||
+            m.assignmentId ===
+              (task.live.assignment.id ?? task.live.assignment.at))
+        );
+      });
+      const events = [
+        ...new Set(
+          [...incoming, ...peerQuestions].map((m) => `message:${m.id}`),
+        ),
+      ];
       for (const t of active)
         if (["ready", "blocked"].includes(t.live?.status?.state ?? ""))
           events.push(
@@ -230,9 +250,13 @@ export function evaluateOrchestration(
           key: `${coordinator}:control${suffix}`,
           task: null,
           events,
-          reason: planningId
-            ? "Triage actionable events and scope the next gate-eligible backlog; no task is automatically authorized"
-            : "Handle questions, ready handoffs and lane failures",
+          reason:
+            (peerQuestions.length
+              ? "Triage unanswered peer dependency questions via agents brief; a peer question does not authorize peer work. "
+              : "") +
+            (planningId
+              ? "Triage actionable events and scope the next gate-eligible backlog; no task is automatically authorized"
+              : "Handle questions, ready handoffs and lane failures"),
         },
         "control",
         now,
@@ -413,8 +437,11 @@ export function evaluateOrchestration(
     if (
       Object.values(state.records).some(
         (r) =>
-          r.status === "running" &&
-          workKey(r.key) !== candidate.key &&
+          (r.status === "running" ||
+            !!r.pid ||
+            !!r.processGroupId ||
+            !!r.cleanupUnverified) &&
+          (workKey(r.key) !== candidate.key || r.status !== "running") &&
           (r.task === candidate.taskId ||
             overlaps(scope(r.task), scope(candidate.taskId))),
       )

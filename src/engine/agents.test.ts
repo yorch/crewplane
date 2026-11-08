@@ -1896,9 +1896,9 @@ it("inherits threaded answer task and assignment scope while constraining recipi
       b,
       "send",
       "--agent",
-      "B",
-      "--to",
       "C",
+      "--to",
+      "D",
       "--kind",
       "question",
       "--text",
@@ -1909,9 +1909,9 @@ it("inherits threaded answer task and assignment scope while constraining recipi
         root,
         "send",
         "--agent",
-        "C",
+        "D",
         "--to",
-        "B",
+        "C",
         "--kind",
         "answer",
         "--reply-to",
@@ -1949,5 +1949,215 @@ it("inherits threaded answer task and assignment scope while constraining recipi
     );
     expect(stale.assignmentId).toBe(assignment.id);
     expect(stale.assignmentId).not.toBe(replacement.id);
+  });
+});
+it("allows checkpoint and blocked resume with a third unclaimed or checkpointed sibling", async () => {
+  for (const checkpointThird of [false, true])
+    await fixture(({ root, b, b2, dir }) => {
+      writeFileSync(
+        join(root, "tasks/P1-03.md"),
+        "Owner lane: B.\nSynthetic third independent slice.\n",
+      );
+      git(root, "add", ".");
+      git(root, "commit", "-qm", "test(tasks): define third sibling");
+      for (const worktree of [b, b2])
+        git(worktree, "merge", "--ff-only", git(root, "rev-parse", "HEAD"));
+      assign(root);
+      scope(root, "P1-01", ["first"]);
+      scope(root, "P1-02", ["second"]);
+      scope(root, "P1-03", ["third"]);
+      ok(b, ...claim);
+      ok(b, ...ready);
+      expect(second(root).code).toBe(0);
+      ok(b2, ...claimSecond);
+      ok(b2, ...ready.map((v) => (v === "P1-01" ? "P1-02" : v)));
+      ok(
+        root,
+        "assign",
+        "--agent",
+        "coordinator",
+        "--task",
+        "P1-03",
+        "--owner",
+        "B",
+        "--ref",
+        "HEAD",
+        "--text",
+        "Synthetic third task",
+      );
+      if (checkpointThird) {
+        const b3 = join(dir, "B3");
+        git(root, "worktree", "add", "-qb", "worker-B3", b3, "HEAD");
+        ok(b3, "claim", "--agent", "B", "--task", "P1-03");
+        ok(
+          b3,
+          "checkpoint",
+          "--agent",
+          "B",
+          "--task",
+          "P1-03",
+          "--text",
+          "Safe third checkpoint",
+        );
+      }
+      revisionRequest(root, "P1-02");
+      ok(b2, ...working.map((v) => (v === "P1-01" ? "P1-02" : v)));
+      ok(
+        b2,
+        "status",
+        "--agent",
+        "B",
+        "--task",
+        "P1-02",
+        "--state",
+        "blocked",
+        "--text",
+        "Synthetic blocker",
+      );
+      revisionRequest(root);
+      ok(
+        b2,
+        "checkpoint",
+        "--agent",
+        "B",
+        "--task",
+        "P1-02",
+        "--text",
+        "Yield second task",
+      );
+      ok(b, ...working);
+      ok(b, ...ready);
+      ok(b2, ...working.map((v) => (v === "P1-01" ? "P1-02" : v)));
+    });
+});
+it("requires task owners to scope questions and refuses release for retained identities", async () => {
+  await fixture(({ root, b }) => {
+    assign(root);
+    expect(
+      cli(
+        b,
+        "send",
+        "--agent",
+        "B",
+        "--to",
+        "C",
+        "--kind",
+        "question",
+        "--text",
+        "Unscoped blocker",
+      ).error,
+    ).toContain("--task");
+    expect(
+      ok(
+        b,
+        "send",
+        "--agent",
+        "B",
+        "--to",
+        "C",
+        "--kind",
+        "question",
+        "--task",
+        "P1-01",
+        "--text",
+        "Scoped blocker",
+      ).task,
+    ).toBe("P1-01");
+    const store = ok(root, "init").store;
+    mkdirSync(join(store, "supervisor"), { recursive: true });
+    for (const identity of [
+      { pid: 123 },
+      { processGroupId: 123 },
+      { cleanupUnverified: true },
+    ]) {
+      writeFileSync(
+        join(store, "supervisor/state.json"),
+        JSON.stringify({
+          records: {
+            old: { task: "P1-01", lane: "B", status: "paused", ...identity },
+          },
+        }),
+      );
+      expect(
+        cli(
+          root,
+          "release",
+          "--agent",
+          "coordinator",
+          "--task",
+          "P1-01",
+          "--text",
+          "Unsafe replacement",
+        ).code,
+      ).toBe(1);
+      expect(ok(root, "board").tasks).toHaveLength(1);
+    }
+  });
+});
+it("respects a live board mutation owner and recovers a killed lock holder", async () => {
+  await fixture(async ({ root }) => {
+    const store = ok(root, "init").store;
+    const lock = join(store, "board-mutation.lock");
+    const module = new URL("../process-lock.ts", import.meta.url).href;
+    const hold = async () => {
+      const child = spawn(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import { withProcessLock } from ${JSON.stringify(module)}; await withProcessLock(${JSON.stringify(lock)}, async () => { console.log("LOCKED"); await new Promise(resolve => process.stdin.once("data", resolve)); process.stdin.destroy(); });`,
+        ],
+        { cwd: root, env },
+      );
+      const closed = new Promise<number | null>((resolve) =>
+        child.once("close", resolve),
+      );
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      return { child, closed };
+    };
+    const live = await hold();
+    try {
+      let completed = false;
+      const command = race(
+        root,
+        "scope",
+        "--agent",
+        "coordinator",
+        "--task",
+        "P1-01",
+        "--paths-json",
+        '["first"]',
+      ).then((result) => {
+        completed = true;
+        return result;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(completed).toBe(false);
+      expect(readFileSync(lock, "utf8")).toContain(String(live.child.pid));
+      live.child.stdin.write("release");
+      expect(await live.closed).toBe(0);
+      expect((await command).code).toBe(0);
+    } finally {
+      live.child.kill("SIGKILL");
+    }
+    const dead = await hold();
+    dead.child.kill("SIGKILL");
+    await dead.closed;
+    expect(readFileSync(lock, "utf8")).toContain(String(dead.child.pid));
+    expect(
+      ok(
+        root,
+        "scope",
+        "--agent",
+        "coordinator",
+        "--task",
+        "P1-01",
+        "--paths-json",
+        '["second"]',
+      ).paths,
+    ).toEqual(["second"]);
   });
 });

@@ -238,6 +238,7 @@ import {writeFileSync,mkdirSync,readFileSync,existsSync} from 'node:fs';
 let input='';for await(const chunk of process.stdin)input+=chunk;
 if(!/Crewplane agent (coordinator|reviewer)/.test(input))process.exit(2);
 const args=process.argv.slice(2);const out=args[args.indexOf('--output-last-message')+1];
+if (${JSON.stringify(harness)} === 'pi') {const dir=args[args.indexOf('--session-dir')+1];if(dir!==${JSON.stringify(join(root, ".crewplane-state/supervisor/pi-sessions"))}||!existsSync(dir))process.exit(9);}
 mkdirSync('.crewplane-local',{recursive:true});const file='.crewplane-local/args.json';const history=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):[];history.push(args);writeFileSync(file,JSON.stringify(history));
 console.log(JSON.stringify({type:'thread.started',thread_id:'00000000-0000-4000-8000-000000000001'}));
 console.log(JSON.stringify({type:'item.completed',item:{type:'reasoning',text:'PRIVATE_THOUGHT_SENTINEL'}}));

@@ -718,3 +718,100 @@ it("resumes a blocked owner only from a valid scoped peer answer or coordinator 
     ),
   ).toBe(true);
 });
+it("routes an unanswered peer dependency question to coordinator triage without authorizing peer work", () => {
+  const b = board([task("P1-01", "B", "blocked")]);
+  const s = state();
+  remember(
+    s,
+    must(
+      evaluateOrchestration(b, s, config, now).work.find(
+        (work) => work.lane === "coordinator",
+      ),
+    ),
+    { finalState: "waiting", waitingForEvent: true },
+  );
+  const question = {
+    ...message("peer-blocker", "P1-01", "C", "question"),
+    from: "B",
+  };
+  b.messages.push(question);
+  b.unanswered.push(question);
+  const result = evaluateOrchestration(b, s, config, now);
+  expect(
+    result.work.find((work) => work.lane === "coordinator")?.events,
+  ).toContain("message:peer-blocker");
+  expect(result.work.some((work) => work.lane === "C")).toBe(false);
+  question.assignmentId = "previous-assignment";
+  expect(
+    evaluateOrchestration(b, s, config, now).work.some(
+      (work) => work.lane === "coordinator",
+    ),
+  ).toBe(false);
+});
+it("blocks task replacement and overlapping scopes for retained process ownership", () => {
+  for (const identity of [
+    { pid: 123 },
+    { processGroupId: 123 },
+    { cleanupUnverified: true },
+  ]) {
+    for (const sameTask of [false, true]) {
+      const b = board([task("P1-01", "C")]);
+      if (!sameTask) {
+        b.tasks.push(
+          task("P1-02", "B", "ready") as unknown as Board["tasks"][number],
+        );
+        must(must(b.tasks[1]).live).scope = { version: 1, paths: ["src"] };
+      }
+      must(must(b.tasks[0]).live).scope = { version: 1, paths: ["src"] };
+      const s = state();
+      s.records.old = {
+        key: "old",
+        lane: "B",
+        task: sameTask ? "P1-01" : "P1-02",
+        cwd: "/old",
+        status: "paused",
+        reason: "cleanup pending",
+        seen: [],
+        runs: [],
+        noProgress: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        ...identity,
+      };
+      expect(
+        evaluateOrchestration(b, s, config, now).queue.queue.find(
+          (row) => row.lane === "C",
+        )?.reason,
+      ).toBe("PATH_OVERLAP");
+    }
+  }
+});
+it("checkpoints the blocked writer ahead of a correction with a third unclaimed or checkpointed sibling", () => {
+  for (const checkpointed of [false, true]) {
+    const third = task("P1-03", "B", checkpointed ? "blocked" : "assigned");
+    if (third.live.status)
+      third.live.status = {
+        ...third.live.status,
+        checkpointed: true,
+      } as typeof third.live.status;
+    const b = board([
+      task("P1-01", "B", "ready"),
+      task("P1-02", "B", "blocked"),
+      third,
+    ]);
+    const request = message("three-sibling-correction", "P1-01");
+    b.messages.push(request);
+    b.unanswered.push(request);
+    expect(
+      evaluateOrchestration(b, state(), config, now).work.find(
+        (work) => work.lane === "B",
+      )?.task,
+    ).toBe("P1-02");
+    must(must(must(b.tasks[1]).live).status).checkpointed = true;
+    expect(
+      evaluateOrchestration(b, state(), config, now).work.find(
+        (work) => work.lane === "B",
+      )?.task,
+    ).toBe("P1-01");
+  }
+});

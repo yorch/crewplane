@@ -13,6 +13,7 @@ const config = {
   root: process.cwd(),
   binary: process.execPath,
   binaries: { pi: process.execPath },
+  piSessionDirectory: "/private/synthetic/pi-sessions",
 };
 const id = "00000000-0000-4000-8000-000000000001";
 const lane = {
@@ -78,6 +79,18 @@ it("preserves Codex legacy argv and binds exact native resume to harness and epo
     "/output",
   );
   expect(pi.args.slice(-2)).toEqual(["--session", id]);
+  expect(pi.args[pi.args.indexOf("--session-dir") + 1]).toBe(
+    config.piSessionDirectory,
+  );
+  expect(() =>
+    harnessCommand(
+      { ...config, piSessionDirectory: undefined } as never,
+      lane,
+      { harness: "pi", sessionEpoch: "test" },
+      "/schema",
+      "/unrelated/runs/pi-sessions/run.result.json",
+    ),
+  ).toThrow("explicit absolute session directory");
   for (const forbidden of [
     "--continue",
     "--resume",

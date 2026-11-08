@@ -114,7 +114,7 @@ it("accepts the source only after it is integrated into primary and serializes a
     const { store } = (await main(["init"], root)) as { store: string };
     mkdirSync(join(store, "board-mutation.lock"));
     await expect(main(accept("ff", base), root)).rejects.toThrow(
-      "Board mutation busy",
+      "Process lock unavailable; inspect ownership before retry",
     );
     rmSync(join(store, "board-mutation.lock"), { recursive: true });
     const accepted = (await main(accept("ff", base), root)) as {

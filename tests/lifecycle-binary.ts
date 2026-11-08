@@ -11,6 +11,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -181,7 +182,18 @@ function setup(name: string, mode: string, interval = 1) {
     for (const r of records())
       if (r.processGroupId) groups.add(r.processGroupId);
   };
-  return { root, cli, state, records, start, pids, collect };
+  return {
+    root,
+    cli,
+    state,
+    records,
+    start,
+    pids,
+    collect,
+    setMode: (mode: string) => {
+      env.CREWPLANE_FIXTURE_MODE = mode;
+    },
+  };
 }
 try {
   // An enabled coordinator receives a prompt only after durable launch identity.
@@ -202,6 +214,70 @@ try {
   assert(
     !existsSync(join(idle.root, ".crewplane-state/supervisor/watcher.lock")),
   );
+  // An in-flight drain retains the lease until native completion and trace settlement.
+  const drain = setup("drain", "drain"),
+    draining = drain.start();
+  await until(() => !!drain.pids(), "running drain fixture");
+  drain.collect();
+  draining.kill("SIGTERM");
+  await until(() => drain.state()?.draining === true, "drain intent");
+  assert(
+    existsSync(join(drain.root, ".crewplane-state/supervisor/watcher.lock")),
+  );
+  await exit(draining);
+  assert(
+    drain
+      .records()
+      .every((r) => r.status !== "running" && !r.pid && !r.processGroupId),
+  );
+  assert(
+    !existsSync(join(drain.root, ".crewplane-state/supervisor/watcher.lock")),
+  );
+  const traceDirectory = join(
+    drain.root,
+    ".crewplane-state/operational-traces",
+  );
+  const settled = readdirSync(traceDirectory)
+    .filter((f) => f.endsWith(".meta.json"))
+    .map((f) => JSON.parse(readFileSync(join(traceDirectory, f), "utf8")));
+  assert(settled.length > 0 && settled.every((t) => t.status !== "running"));
+  // Once a crashed native group is actually dead, restart pauses and explicit retry resumes its session.
+  const recovery = setup("recovery", "hold-nochild"),
+    crashed = recovery.start();
+  await until(
+    () => !!recovery.pids() && recovery.records().some((r) => !!r.sessionId),
+    "recoverable session",
+  );
+  recovery.collect();
+  const interrupted = recovery.pids();
+  assert(interrupted);
+  const originalSession = recovery.records()[0]?.sessionId;
+  crashed.kill("SIGKILL");
+  await exit(crashed);
+  process.kill(-interrupted.leader, "SIGKILL");
+  await until(() => !alive(-interrupted.leader), "dead recoverable group");
+  recovery.setMode("recovery-idle");
+  const recovered = recovery.start();
+  await until(
+    () =>
+      recovery
+        .records()
+        .some(
+          (r) => r.status === "paused" && /interrupted/.test(r.reason ?? ""),
+        ),
+    "restart pauses interrupted run",
+  );
+  assert.equal(recovery.records()[0]?.sessionId, originalSession);
+  recovery.cli("retry", "--lane", "captain");
+  await until(
+    () =>
+      recovery
+        .records()
+        .some((r) => r.status === "idle" && r.sessionId === originalSession),
+    "explicit same-session recovery",
+  );
+  recovery.cli("stop");
+  await exit(recovered);
   // A normal leader exit must not leave its background group writing behind it.
   const background = setup("background", "normal-background"),
     bgController = background.start();
@@ -276,10 +352,14 @@ try {
     "SIGTERM-ignoring group killed",
     20000,
   );
+  assert(
+    deadline.records().every((r) => r.cleanupUnverified !== true),
+    "verified deadline cleanup must not require acknowledgement",
+  );
   deadline.cli("stop");
   await exit(deadlineController);
   console.log(
-    "Native lifecycle acceptance passed: enabled coordinator, durable prompt/PID/session handshake, prompt SIGTERM drain, process-group cleanup, live-group restart refusal, bounded escaped-stdio failure and real production deadline.",
+    "Native lifecycle acceptance passed: enabled coordinator, durable prompt/PID/session handshake, prompt SIGTERM drain, process-group cleanup, in-flight drain, dead-group session recovery, live-group restart refusal, bounded escaped-stdio failure and real production deadline.",
   );
 } catch (error) {
   console.error(logs);

@@ -38,8 +38,31 @@ if (process.argv[2] === "child") {
         summary: "Synthetic lifecycle fixture",
       }),
     );
-  if (mode === "idle") {
+  if (mode === "recovery-idle") {
+    const resume = args.indexOf("resume");
+    if (
+      resume < 0 ||
+      args[resume + 1] !== "11111111-1111-4111-8111-111111111111"
+    )
+      throw Error("Recovery did not explicitly resume the preserved session");
     result();
+  } else if (mode === "idle") {
+    result();
+  } else if (mode === "drain") {
+    writeFileSync(
+      pidFile,
+      JSON.stringify({ leader: process.pid, child: process.pid }),
+    );
+    setTimeout(() => {
+      result();
+      process.exit(0);
+    }, 2000);
+  } else if (mode === "hold-nochild") {
+    writeFileSync(
+      pidFile,
+      JSON.stringify({ leader: process.pid, child: process.pid }),
+    );
+    setInterval(() => {}, 1000);
   } else {
     const escaped = mode === "escaped-stdio";
     const child = spawn(

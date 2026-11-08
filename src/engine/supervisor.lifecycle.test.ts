@@ -386,16 +386,59 @@ it("recovers a transient state write failure without abandoning final persistenc
     const f = await fixture();
     const { publishJson } = await import("../io.ts");
     const controller = new AbortController();
-    let writes = 0;
+    let writes = 0,
+      injected = false,
+      traceSettledBeforeRelease = false;
     const running = serve(f.config, f.directory, controller.signal, {
       writeState: async (path, value) => {
-        if (++writes === 2) throw new Error("Synthetic EIO");
+        writes++;
+        const snapshot = value as State;
+        const launching = Object.values(snapshot.records).find(
+          (record) =>
+            record.status === "running" && record.runId && !record.pid,
+        );
+        if (!injected && launching) {
+          injected = true;
+          throw new Error("Synthetic EIO");
+        }
+        if (injected && !snapshot.running) {
+          await access(join(f.directory, "watcher.lock"));
+          const failed = snapshot.records["coordinator:control"];
+          const trace = JSON.parse(
+            await readFile(
+              join(
+                f.root,
+                ".crewplane-state/operational-traces",
+                `${failed?.runId}.meta.json`,
+              ),
+              "utf8",
+            ),
+          );
+          expect(trace.status).toBe("paused");
+          traceSettledBeforeRelease = true;
+        }
         await publishJson(path, value);
       },
     });
     await expect(running).rejects.toThrow("Synthetic EIO");
+    expect(traceSettledBeforeRelease).toBe(true);
+    expect(injected).toBe(true);
     expect(writes).toBeGreaterThan(2);
-    expect((await f.load()).running).toBe(false);
+    const stopped = await f.load();
+    expect(stopped.running).toBe(false);
+    const failed = stopped.records["coordinator:control"];
+    expect(failed?.status).toBe("paused");
+    expect(failed?.pid).toBeUndefined();
+    const tracePath = join(
+      f.root,
+      ".crewplane-state/operational-traces",
+      `${failed?.runId}.meta.json`,
+    );
+    const trace = JSON.parse(await readFile(tracePath, "utf8"));
+    expect(trace.status).toBe("paused");
+    const before = await readFile(tracePath, "utf8");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(await readFile(tracePath, "utf8")).toBe(before);
     await expect(access(join(f.directory, "watcher.lock"))).rejects.toThrow();
     await rm(f.root, { recursive: true, force: true });
   }));
@@ -723,6 +766,210 @@ it("keeps distinct notice-only coordinator waiting turns idle", () =>
     } finally {
       controller.abort();
       await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("honors a stop submitted with the previous generation during the first startup save", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    const old = initialState();
+    old.generation = "previous-generation";
+    await writeFile(join(f.directory, "state.json"), JSON.stringify(old));
+    const { publishJson } = await import("../io.ts");
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false,
+      writes = 0,
+      reads = 0;
+    const running = serve(f.config, f.directory, new AbortController().signal, {
+      writeState: async (path, value) => {
+        if (++writes === 1) {
+          entered = true;
+          await barrier;
+        }
+        await publishJson(path, value);
+      },
+      readBoard: async (root) => {
+        reads++;
+        return snapshot(root);
+      },
+    });
+    try {
+      await until(async () => entered);
+      expect(reads).toBe(0);
+      await mkdir(join(f.directory, "commands"), { recursive: true });
+      await writeFile(
+        join(f.directory, "commands/33333333-3333-4333-8333-333333333333.json"),
+        JSON.stringify({
+          action: "stop",
+          generation: old.generation,
+          at: new Date().toISOString(),
+        }),
+      );
+      release();
+      await running;
+      const stopped = await f.load();
+      expect(stopped.running).toBe(false);
+      expect(stopped.draining).toBe(true);
+      expect(Object.keys(stopped.records)).toHaveLength(0);
+    } finally {
+      release();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("keeps verified deadline cleanup retryable after a TERM-ignoring leader requires KILL", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    await writeFile(
+      f.config.binary,
+      `#!/usr/bin/env node
+process.on('SIGTERM',()=>{});
+for await(const chunk of process.stdin){}
+console.log(JSON.stringify({type:'thread.started',thread_id:'00000000-0000-4000-8000-000000000001'}));
+setInterval(()=>{},1000);
+`,
+      { mode: 0o700 },
+    );
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal, {
+      runTimeoutMs: 750,
+      cleanupGraceMs: 80,
+      stdioGraceMs: 80,
+    });
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "paused"
+          );
+        } catch {
+          return false;
+        }
+      });
+      const record = (await f.load()).records["coordinator:control"];
+      expect(record?.sessionId).toBe("00000000-0000-4000-8000-000000000001");
+      expect(record?.reason).toBe("Time budget reached");
+      expect(record?.cleanupUnverified).toBeUndefined();
+      expect(record?.pid).toBeUndefined();
+      expect(record?.processGroupId).toBeUndefined();
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("blocks a replacement lane while the same task retains unverified native ownership", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    f.config.allowedTasks = ["T1"];
+    f.config.lanes = {
+      coordinator: { enabled: false },
+      replacement: { enabled: true },
+    };
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(f.config));
+    const initial = initialState();
+    initial.records.former = {
+      key: "former",
+      lane: "former",
+      task: "T1",
+      cwd: f.root,
+      status: "paused",
+      pauseKind: "failure",
+      reason: "Unverified prior descendants",
+      cleanupUnverified: true,
+      seen: [],
+      runs: [],
+      noProgress: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    await writeFile(join(f.directory, "state.json"), JSON.stringify(initial));
+    let reads = 0;
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal, {
+      readBoard: async (root) => {
+        const board = await snapshot(root);
+        reads++;
+        board.tasks.push({
+          id: "T1",
+          title: "Synthetic reassignment",
+          owner: "replacement",
+          phase: "test",
+          state: "assigned",
+          documentedStatus: "assigned",
+          goal: "Preserve old ownership",
+          dependencies: "",
+          scheduling: { code: "ready", label: "ready" },
+          markdown: "Synthetic",
+          live: {
+            task: "T1",
+            assignment: {
+              owner: "replacement",
+              baseCommit: "b".repeat(40),
+              at: new Date().toISOString(),
+              text: "Synthetic replacement",
+            },
+            claim: null,
+            status: null,
+            accepted: null,
+          },
+        });
+        return board;
+      },
+    });
+    try {
+      await until(async () => reads >= 3);
+      expect(
+        Object.values((await f.load()).records).some(
+          (record) => record.lane === "replacement",
+        ),
+      ).toBe(false);
+      expect((await f.load()).records.former?.cleanupUnverified).toBe(true);
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("settles the trace and restores the private mask when native spawn throws synchronously", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    f.config.lanes.coordinator = {
+      enabled: true,
+      model: "synthetic\0invalid-argv",
+    };
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(f.config));
+    const priorMask = process.umask();
+    try {
+      await expect(
+        serve(f.config, f.directory, new AbortController().signal),
+      ).rejects.toThrow();
+      expect(process.umask()).toBe(priorMask);
+      const stopped = await f.load();
+      const failed = stopped.records["coordinator:control"];
+      expect(failed?.status).toBe("paused");
+      expect(failed?.pid).toBeUndefined();
+      const trace = JSON.parse(
+        await readFile(
+          join(
+            f.root,
+            ".crewplane-state/operational-traces",
+            `${failed?.runId}.meta.json`,
+          ),
+          "utf8",
+        ),
+      );
+      expect(trace.status).toBe("paused");
+      await expect(access(join(f.directory, "watcher.lock"))).rejects.toThrow();
+    } finally {
+      process.umask(priorMask);
       await rm(f.root, { recursive: true, force: true });
     }
   }));

@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rmdir } from "node:fs/promises";
+import { readdir, readFile, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { gitEnvironment } from "../environment.ts";
-import { publishJson, syncDirectory } from "../io.ts";
+import { durableMkdir, publishJson, syncDirectory } from "../io.ts";
+import { withProcessLock } from "../process-lock.ts";
 import {
   coordinatorOf,
   discoverProject,
@@ -35,8 +36,11 @@ async function read(path, fallback) {
     throw error;
   }
 }
-const put = (path, value, exclusive = false) =>
-  publishJson(path, value, { exclusive });
+const put = (ctx, path, value, exclusive = false) =>
+  publishJson(path, value, {
+    exclusive,
+    directoryRoot: path.startsWith(`${ctx.store}/`) ? ctx.store : ctx.common,
+  });
 
 function options(args) {
   const result = {};
@@ -86,11 +90,13 @@ function taskPath(ctx, id, file) {
   return join(ctx.store, "tasks", task(id), file);
 }
 async function prepare(ctx) {
-  await mkdir(join(ctx.store, "messages"), { recursive: true, mode: 0o700 });
-  await mkdir(join(ctx.store, "tasks"), { recursive: true, mode: 0o700 });
+  await durableMkdir(ctx.store);
+  await durableMkdir(join(ctx.store, "messages"), { root: ctx.store });
+  await durableMkdir(join(ctx.store, "tasks"), { root: ctx.store });
   const path = join(ctx.store, "repository.json");
   try {
     await put(
+      ctx,
       path,
       { application: "crewplane", schemaVersion: 1, gitCommonDir: ctx.common },
       true,
@@ -111,6 +117,7 @@ async function prepare(ctx) {
     if (!binding) {
       try {
         await put(
+          ctx,
           bindingPath,
           { version: 1, root: ctx.primary, common: ctx.common },
           true,
@@ -145,7 +152,12 @@ async function send(ctx, value) {
     at: new Date().toISOString(),
     ...value,
   };
-  await put(join(ctx.store, "messages", `${message.id}.json`), message, true);
+  await put(
+    ctx,
+    join(ctx.store, "messages", `${message.id}.json`),
+    message,
+    true,
+  );
   return message;
 }
 async function claimed(ctx, id, agent) {
@@ -297,7 +309,13 @@ async function taskEntries(ctx) {
   }
   return result;
 }
-async function executionGuard(ctx, id, agent, revision = false) {
+async function executionGuard(
+  ctx,
+  id,
+  agent,
+  revision = false,
+  checkpoint = false,
+) {
   const state = await read(join(ctx.store, "supervisor", "state.json"), null);
   for (const record of Object.values(state?.records ?? {})) {
     ensure(
@@ -313,7 +331,8 @@ async function executionGuard(ctx, id, agent, revision = false) {
       entry.claim?.worktree !== ctx.root,
       `Worktree already claimed by ${entry.id}; preserve frozen resources`,
     );
-    if (entry.accepted || entry.assignment.owner !== agent) continue;
+    if (checkpoint || entry.accepted || entry.assignment.owner !== agent)
+      continue;
     ensure(
       entry.status?.state === "ready" ||
         (revision &&
@@ -389,22 +408,9 @@ export async function main(args = process.argv.slice(2), cwd = process.cwd()) {
     "release",
     "send",
   ].includes(command);
-  if (mutating) {
-    try {
-      await mkdir(lock, { mode: 0o700 });
-    } catch (error) {
-      if (error.code === "EEXIST")
-        throw new Error(
-          "Board mutation busy; retry after current command finishes (inspect stale lock before recovery)",
-        );
-      throw error;
-    }
-  }
-  try {
-    return await execute(command, o, ctx);
-  } finally {
-    if (mutating) await rmdir(lock);
-  }
+  return mutating
+    ? withProcessLock(lock, () => execute(command, o, ctx))
+    : execute(command, o, ctx);
 }
 async function execute(command, o, ctx) {
   if (command === "init")
@@ -493,6 +499,13 @@ async function execute(command, o, ctx) {
     ensure(kinds.includes(o.kind), "Unknown message kind");
     if (o.task) task(o.task);
     let messageTask = o.task ?? null;
+    if (o.kind === "question" && !messageTask)
+      ensure(
+        !(await taskEntries(ctx)).some(
+          (entry) => entry.assignment.owner === agent && !entry.accepted,
+        ),
+        "Task owners must scope blocking questions with --task",
+      );
     let parent;
     if (o.kind === "answer")
       ensure(
@@ -667,7 +680,7 @@ async function execute(command, o, ctx) {
       enqueuedAt,
       updatedBy: coordinatorOf(ctx.policy),
     };
-    await put(taskPath(ctx, id, "metadata.json"), metadata);
+    await put(ctx, taskPath(ctx, id, "metadata.json"), metadata);
     return metadata;
   }
   if (command === "scope") {
@@ -699,7 +712,7 @@ async function execute(command, o, ctx) {
       at: new Date().toISOString(),
       by: coordinatorOf(ctx.policy),
     };
-    await put(taskPath(ctx, id, "scope.json"), scope);
+    await put(ctx, taskPath(ctx, id, "scope.json"), scope);
     return scope;
   }
   if (command === "assign") {
@@ -763,7 +776,7 @@ async function execute(command, o, ctx) {
       at: new Date().toISOString(),
       text: await text(o, ctx.root),
     };
-    await put(taskPath(ctx, id, "assignment.json"), assignment, true);
+    await put(ctx, taskPath(ctx, id, "assignment.json"), assignment, true);
     return assignment;
   }
   const assignment = await read(taskPath(ctx, id, "assignment.json"));
@@ -787,7 +800,7 @@ async function execute(command, o, ctx) {
       branch,
       at: new Date().toISOString(),
     };
-    await put(taskPath(ctx, id, "claim.json"), claim, true);
+    await put(ctx, taskPath(ctx, id, "claim.json"), claim, true);
     return claim;
   }
   if (command === "release") {
@@ -805,9 +818,14 @@ async function execute(command, o, ctx) {
     );
     ensure(
       !Object.values(runtime?.records ?? {}).some(
-        (r) => r.task === id && r.status === "running",
+        (r) =>
+          r.task === id &&
+          (r.status === "running" ||
+            r.pid ||
+            r.processGroupId ||
+            r.cleanupUnverified),
       ),
-      "Cannot release task with a running native record",
+      "Cannot release task with a running native record or retained native ownership",
     );
     const note = await text(o, ctx.root);
     const all = await messages(ctx);
@@ -836,7 +854,7 @@ async function execute(command, o, ctx) {
       }
     }
     const archive = join(ctx.store, "archive", `${id}-${randomUUID()}`);
-    await mkdir(dirname(archive), { recursive: true, mode: 0o700 });
+    await durableMkdir(dirname(archive), { root: ctx.store });
     await rename(dirname(taskPath(ctx, id, "assignment.json")), archive);
     await syncDirectory(join(ctx.store, "tasks"));
     await syncDirectory(dirname(archive));
@@ -953,7 +971,7 @@ async function execute(command, o, ctx) {
       at: new Date().toISOString(),
       text: await text(o, ctx.root),
     };
-    await put(taskPath(ctx, id, "accepted.json"), accepted, true);
+    await put(ctx, taskPath(ctx, id, "accepted.json"), accepted, true);
     return accepted;
   }
   ensure(["status", "checkpoint"].includes(command), "Unknown task action");
@@ -974,7 +992,14 @@ async function execute(command, o, ctx) {
   const revising = previous?.state === "ready" && o.state === "working";
   let revision;
   if (o.state === "working") {
-    await executionGuard(ctx, id, agent, revising);
+    await executionGuard(
+      ctx,
+      id,
+      agent,
+      revising ||
+        previous?.state === "blocked" ||
+        !!previous?.revisionRequestId,
+    );
     if (revising) {
       revision = await outstandingRevision(ctx, id, agent);
       ensure(
@@ -988,7 +1013,7 @@ async function execute(command, o, ctx) {
       previous?.state !== "ready",
       "Frozen submission requires an explicit working revision transition through its original claim",
     );
-    await executionGuard(ctx, id, agent);
+    await executionGuard(ctx, id, agent, false, true);
   }
   let commit = null;
   if (o.state === "ready") {
@@ -1044,7 +1069,7 @@ async function execute(command, o, ctx) {
     ...(checkpointing ? { checkpointed: true } : {}),
     commit,
   });
-  await put(taskPath(ctx, id, "status.json"), {
+  await put(ctx, taskPath(ctx, id, "status.json"), {
     ...status,
     messageId: event.id,
   });

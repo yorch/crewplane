@@ -1,19 +1,12 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import {
-  lstat,
-  mkdir,
-  readdir,
-  readFile,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { adapters } from "../adapters.ts";
 import type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
 import { gitEnvironment } from "../environment.ts";
-import { publishJson } from "../io.ts";
+import { durableMkdir, publishJson } from "../io.ts";
 import {
   coordinatorOf,
   projectPolicy,
@@ -136,9 +129,10 @@ export function command(
   record: RecordState,
   schema: string,
   output: string,
+  piSessionDirectory?: string,
 ) {
   return adapters[harnessName(config.lanes[record.lane])].invoke(
-    config,
+    { ...config, ...(piSessionDirectory ? { piSessionDirectory } : {}) },
     config.lanes[record.lane] ?? {},
     record,
     schema,
@@ -152,7 +146,7 @@ async function workdir(work: Work, board: Board, config: Config) {
       config.root,
       `.crewplane-local/headless/control/${work.lane}`,
     );
-    await mkdir(path, { recursive: true, mode: 0o700 });
+    await durableMkdir(path, { root: config.root });
     return path;
   }
   const task = board.tasks.find((t) => t.id === work.task);
@@ -189,7 +183,7 @@ async function workdir(work: Work, board: Board, config: Config) {
   const path = join(config.root, ".crewplane-local/headless/worktrees", name);
   const branch = `headless/${name}`;
   if (!existsSync(path)) {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await durableMkdir(dirname(path), { root: config.root });
     let existingBranch = false;
     try {
       git(config.root, ["show-ref", "--verify", `refs/heads/${branch}`]);
@@ -295,8 +289,10 @@ export async function serve(
     stdioGraceMs?: number;
   } = {},
 ) {
+  const startedAt = new Date().toISOString();
   const readBoard = options.readBoard ?? snapshot;
   let config = validateConfig(initialConfig);
+  await durableMkdir(directory);
   const release = await acquire(directory);
   const statePath = join(directory, "state.json");
   let state: State;
@@ -381,13 +377,14 @@ export async function serve(
       reason: "start",
       at: new Date().toISOString(),
     });
-    const startedAt = new Date().toISOString();
+    const previousGeneration = state.generation;
     state.generation = randomUUID();
     state.running = true;
     state.pid = process.pid;
     state.draining = false;
+    await save(); // Publish the active generation before slow startup projections.
     const commandsDir = join(directory, "commands");
-    await mkdir(commandsDir, { recursive: true, mode: 0o700 });
+    await durableMkdir(commandsDir, { root: directory });
     const schema = join(directory, "result-schema.json");
     await atomic(schema, {
       type: "object",
@@ -438,7 +435,12 @@ export async function serve(
       for (const { file, value: c } of pendingCommands) {
         if (
           c.generation
-            ? c.generation !== state.generation
+            ? c.generation !== state.generation &&
+              !(
+                c.generation === previousGeneration &&
+                c.at &&
+                c.at >= startedAt
+              )
             : !c.at || c.at < startedAt
         ) {
           await unlink(join(commandsDir, file)).catch(() => {});
@@ -606,8 +608,11 @@ export async function serve(
             continue;
           const prior = Object.values(state.records).find(
             (r) =>
-              r.lane === work.lane &&
-              (r.pid || r.processGroupId || r.cleanupUnverified),
+              (r.pid || r.processGroupId || r.cleanupUnverified) &&
+              (r.lane === work.lane ||
+                (r.status !== "running" &&
+                  work.task !== null &&
+                  occupiedTaskScope(board, r.task, work.task))),
           );
           if (prior?.pid || prior?.processGroupId || prior?.cleanupUnverified) {
             prior.status = "paused";
@@ -697,7 +702,7 @@ export async function serve(
           state.records[work.key] = record;
           const runId = `${Date.now()}-${randomUUID()}`;
           const logs = join(directory, "runs", work.lane);
-          await mkdir(logs, { recursive: true, mode: 0o700 });
+          await durableMkdir(logs, { root: directory });
           const output = join(logs, `${runId}.result.json`);
           await writeFile(output, "", { flag: "wx", mode: 0o600 });
           record.runId = runId;
@@ -725,41 +730,56 @@ export async function serve(
               record.traceLimited = true;
             });
           };
-          emitTrace({ kind: "started" });
           let invocation: ReturnType<typeof command>;
-          try {
-            invocation = command(config, record, schema, output);
-          } catch {
-            record.status = "paused";
-            record.pauseKind = "failure";
-            record.reason = "Native invocation configuration rejected";
-            record.finishedAt = new Date().toISOString();
-            await trace.finish("paused", null);
-            await save();
-            continue;
-          }
-          if (invocation.harness === "pi")
-            await mkdir(join(directory, "pi-sessions"), {
-              recursive: true,
-              mode: 0o700,
-            });
-          await save(); // Write-ahead ownership before a detached process exists.
-          // Native session files inherit a private mask; restore before yielding.
-          const previousMask = process.umask(0o077);
           let child: ChildProcess;
           try {
-            child = spawn(invocation.binary, invocation.args, {
-              cwd,
-              env: {
-                ...gitEnvironment(),
-                CREWPLANE_COORD_DIR: dirname(directory),
-                CREWPLANE_HEADLESS_LANE: work.lane,
-              },
-              stdio: ["pipe", "pipe", "pipe"],
-              detached: process.platform !== "win32",
-            });
-          } finally {
-            process.umask(previousMask);
+            await trace.emit({ kind: "started" });
+            try {
+              invocation = command(
+                config,
+                record,
+                schema,
+                output,
+                join(directory, "pi-sessions"),
+              );
+            } catch {
+              record.status = "paused";
+              record.pauseKind = "failure";
+              record.reason = "Native invocation configuration rejected";
+              record.finishedAt = new Date().toISOString();
+              await trace.finish("paused", null);
+              await save();
+              continue;
+            }
+            if (invocation.harness === "pi")
+              await durableMkdir(join(directory, "pi-sessions"), {
+                root: directory,
+              });
+            await save(); // Write-ahead ownership before a detached process exists.
+            // Native session files inherit a private mask; restore before yielding.
+            const previousMask = process.umask(0o077);
+            try {
+              child = spawn(invocation.binary, invocation.args, {
+                cwd,
+                env: {
+                  ...gitEnvironment(),
+                  CREWPLANE_COORD_DIR: dirname(directory),
+                  CREWPLANE_HEADLESS_LANE: work.lane,
+                },
+                stdio: ["pipe", "pipe", "pipe"],
+                detached: process.platform !== "win32",
+              });
+            } finally {
+              process.umask(previousMask);
+            }
+          } catch (error) {
+            record.status = "paused";
+            record.pauseKind = "failure";
+            record.reason =
+              "Native launch preparation failed; inspect storage and retry";
+            record.finishedAt = new Date().toISOString();
+            await trace.finish("paused", null);
+            throw error;
           }
           if (child.pid !== undefined) {
             record.pid = child.pid;
@@ -867,21 +887,24 @@ export async function serve(
             }
           };
           let forcedDrain = false;
-          let drainTimer: ReturnType<typeof setTimeout> | undefined;
+          let closed = false;
+          let deadlineDrainTimer: ReturnType<typeof setTimeout> | undefined;
+          let exitDrainTimer: ReturnType<typeof setTimeout> | undefined;
           const timer = setTimeout(
             () => {
               timedOut = true;
               killGroup("SIGTERM");
-              drainTimer = setTimeout(() => {
-                forcedDrain = true;
-                done(1);
-              }, options.cleanupGraceMs ?? 1000);
+              deadlineDrainTimer = setTimeout(
+                () => done(1),
+                options.cleanupGraceMs ?? 1000,
+              );
             },
             options.runTimeoutMs ?? config.maxRunMinutes * 60000,
           );
           const finish = async (code: number | null) => {
             clearTimeout(timer);
-            clearTimeout(drainTimer);
+            clearTimeout(deadlineDrainTimer);
+            clearTimeout(exitDrainTimer);
             if (groupAlive()) {
               killGroup("SIGTERM");
               const until = Date.now() + (options.cleanupGraceMs ?? 1000);
@@ -894,6 +917,10 @@ export async function serve(
               if (groupAlive())
                 throw new Error("Process group cleanup unverified");
             }
+            const stdioDeadline = Date.now() + (options.stdioGraceMs ?? 1000);
+            while (!closed && Date.now() < stdioDeadline)
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            forcedDrain = !closed;
             if (forcedDrain) record.cleanupUnverified = true;
             child.stdout?.destroy();
             child.stderr?.destroy();
@@ -1064,12 +1091,18 @@ export async function serve(
             void completion.catch(() => {});
           };
           child.on("error", () => done(1));
-          child.on("close", done);
+          child.on("close", (code) => {
+            closed = true;
+            clearTimeout(deadlineDrainTimer);
+            clearTimeout(exitDrainTimer);
+            done(code);
+          });
           child.on("exit", (code) => {
-            drainTimer = setTimeout(() => {
-              forcedDrain = true;
-              done(code);
-            }, options.stdioGraceMs ?? 1000);
+            if (finished) return;
+            exitDrainTimer = setTimeout(
+              () => done(code),
+              options.stdioGraceMs ?? 1000,
+            );
           });
           child.stdin?.on("error", () => {});
           try {
@@ -1194,4 +1227,26 @@ export function compactHistory(
   for (const [lane, runs] of Object.entries(retired))
     if (runs) retired[lane] = runs.sort((a, b) => a - b).slice(-60);
   state.retiredRuns = retired;
+}
+
+function occupiedTaskScope(
+  board: Board,
+  occupiedTask: string | null,
+  candidateTask: string,
+) {
+  if (occupiedTask === candidateTask) return true;
+  const left = board.tasks.find((task) => task.id === occupiedTask)?.live?.scope
+    ?.paths;
+  const right = board.tasks.find((task) => task.id === candidateTask)?.live
+    ?.scope?.paths;
+  // Unknown retained ownership cannot establish disjoint writable scopes.
+  if (!left || !right) return true;
+  return left.some((path) =>
+    right.some(
+      (other) =>
+        path === other ||
+        path.startsWith(`${other}/`) ||
+        other.startsWith(`${path}/`),
+    ),
+  );
 }

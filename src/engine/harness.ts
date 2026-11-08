@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 
 export type Harness = "codex" | "pi";
 export interface LaneHarness {
@@ -14,6 +14,7 @@ export interface HarnessConfig {
   root: string;
   binary: string;
   binaries?: Partial<Record<Harness, string>>;
+  piSessionDirectory?: string;
 }
 export interface NativeSession {
   harness?: Harness;
@@ -129,6 +130,8 @@ export function harnessCommand(
     args.push("-");
     return { binary, args, harness };
   }
+  if (!config.piSessionDirectory || !isAbsolute(config.piSessionDirectory))
+    throw new Error("Pi requires an explicit absolute session directory");
   const args = [
     "--mode",
     "json",
@@ -142,7 +145,7 @@ export function harnessCommand(
     "--no-context-files",
     "--no-approve",
     "--session-dir",
-    join(dirname(dirname(output)), "pi-sessions"),
+    config.piSessionDirectory,
   ];
   if (lane.piModel)
     args.push("--provider", lane.piModel.provider, "--model", lane.piModel.id);
