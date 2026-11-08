@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!bun.lock", "!**/dist"]
+    "includes": ["**", "!bun.lock", "!**/dist", "!CHANGELOG.md"]
   },
   "formatter": {
     "enabled": true,
