@@ -6,23 +6,12 @@ const note = document.getElementById("graph-note");
 let latest;
 let renderer;
 function select({ kind, id }) {
-  let target;
-  if (kind === "thread") target = document.getElementById(`message-${id}`);
-  if (kind === "task")
-    target = [...document.querySelectorAll("[data-task-id]")].find(
-      (node) => node.dataset.taskId === id,
-    );
-  if (kind === "lane")
-    target = [...document.querySelectorAll("[data-lane]")].find(
-      (node) => node.dataset.lane === id,
-    );
-  if (target) {
-    target.tabIndex = -1;
-    target.focus({ preventScroll: true });
-    target.scrollIntoView({ block: "center" });
-  } else
-    note.textContent =
-      "Selected context is outside the current task/message filters. Clear filters to locate it.";
+  const nav = window.crewplane;
+  if (!nav) return;
+  if (kind === "thread")
+    nav.navigate(nav.hrefFor("messages", { filter: "all", thread: id }));
+  if (kind === "task") nav.navigate(nav.hrefFor("tasks", { task: id }));
+  if (kind === "lane") nav.navigate(nav.hrefFor("agents", { agent: id }));
 }
 function update(value) {
   latest = value;
@@ -35,6 +24,16 @@ function update(value) {
   if (renderer) renderer.update(graph);
   else renderer = renderGraph(document, host, graph, { onSelect: select });
 }
-view.addEventListener("change", () => update(latest));
+view.addEventListener("change", () => {
+  window.crewplane?.setParams({ graph: view.value });
+  update(latest);
+});
 window.addEventListener("crewplane-graphs", (event) => update(event.detail));
+window.addEventListener("crewplane-route", (event) => {
+  if (event.detail.view !== "relationships") return;
+  const next = event.detail.params.graph ?? "communication";
+  if (view.value === next) return;
+  view.value = next;
+  update(latest);
+});
 if (window.crewplaneGraphSnapshot) update(window.crewplaneGraphSnapshot);

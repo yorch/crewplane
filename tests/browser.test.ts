@@ -81,13 +81,16 @@ it("renders the embedded dashboard with custom agents, narrow layouts and safe r
       }
     }
     await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+    // Tasks is a separate view now; the old single-page layout showed it up front.
+    await page.locator('a[data-nav="tasks"]').click();
+    await page.locator("#view-title").filter({ hasText: "Tasks" }).waitFor();
     await page.locator("#tasks .card").first().waitFor();
     const options = await page.locator("#agent option").allTextContents();
     expect(options).toContain("custom-builder");
     expect(options).not.toContain("A");
     const shots = resolve(".crewplane-local/qa");
     await mkdir(shots, { recursive: true });
-    for (const width of [1440, 390, 320]) {
+    for (const width of [1440, 1024, 390, 320]) {
       await page.setViewportSize({ width, height: 900 });
       expect(
         await page.evaluate(
