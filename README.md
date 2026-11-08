@@ -2,20 +2,39 @@
 
 Local orchestration for coding agents across harnesses: tasks, isolated worktrees, messages, review, supervision and a dashboard in one executable.
 
-Status: architecture and extraction foundation. The executable currently provides help and version only. No agent processes or services are launched.
+Crewplane extracts the audited Volunteer Relay orchestration tooling into a separate MIT project. It uses configurable agent roles, task IDs and document paths. Git and agent harness executables remain external; the compiled application includes its Bun runtime and dashboard assets.
 
-## Development
+## Build and verify
 
-Use Bun 1.4.1 for the initial reproducible build. No dependencies are required for this bootstrap.
+Use Bun 1.4.1. Development verification also uses Node 26.11.1 for Vitest, and Playwright Chromium for browser checks. Running the resulting executable requires neither Node nor Bun installed.
 
 ```sh
-bun run dev --help
-bun run build
-./dist/crewplane --version
+bun install --frozen-lockfile
+node node_modules/@playwright/test/cli.js install chromium
+bun run verify
+./dist/crewplane --help
 ```
 
-The compiled executable embeds its runtime; Bun is needed to build, not to run it. Future agent execution will require Git and the configured external harnesses. Initial supported targets are macOS and Linux; platform support requires native lifecycle tests.
+## Use in a project
 
-See [architecture](docs/ARCHITECTURE.md), [extraction inventory](docs/EXTRACTION.md), and [implementation plan](docs/PLAN.md).
+```sh
+crewplane --project /path/to/repo init
+crewplane configure --file /private/path/runtime.json
+crewplane doctor
+crewplane task list
+crewplane start
+```
 
-MIT licensed. Extracted source will retain provenance from Volunteer Relay.
+Configure committed task cards and explicitly approved assignments before execution. `start` runs in the foreground. Start observation independently:
+
+```sh
+crewplane dashboard --port 4310
+crewplane monitor
+crewplane watchdog start
+```
+
+`crewplane stop` requests intentional drain; `status` reports persistence and process observations. Inspection does not launch agents. No automatic integration, controller replacement, budget increase or legacy-state adoption occurs.
+
+Codex and restrictive no-tools pi adapters are extracted and covered with synthetic native events. Real harness/provider acceptance is separate; Claude/OpenCode, Windows, signing and automatic updates are not delivered. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
+
+See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extraction provenance](docs/PROVENANCE.md), and [plan](docs/PLAN.md). The operating guide and validation evidence accompany the extraction handoff.

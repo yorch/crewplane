@@ -1,0 +1,134 @@
+import { execFileSync } from "node:child_process";
+import { readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+export const validId = (value: unknown): value is string =>
+  typeof value === "string" &&
+  /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value) &&
+  !["__proto__", "constructor", "prototype", "all"].includes(value);
+export const validTaskId = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
+export interface Roles {
+  coordinator?: string;
+  reviewers?: string[];
+}
+export const coordinatorOf = (config?: Roles | null) =>
+  config?.coordinator ?? "coordinator";
+export const reviewersOf = (config?: Roles | null) =>
+  config?.reviewers ?? ["reviewer", "visual"];
+export interface ProjectPolicy extends Roles {
+  version: 1;
+  tasksPath: string;
+  planPath: string;
+  statusPath: string;
+  instructionsPath: string;
+  roadmapFormat?: "none" | "relay";
+}
+export const defaultPolicy: ProjectPolicy = {
+  version: 1,
+  roadmapFormat: "none",
+  coordinator: "coordinator",
+  reviewers: ["reviewer", "visual"],
+  tasksPath: "tasks",
+  planPath: "PLAN.md",
+  statusPath: "STATUS.md",
+  instructionsPath: "AGENTS.md",
+};
+export function projectPolicy(root: string): ProjectPolicy {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(`${root}/crewplane.json`, "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return { ...defaultPolicy };
+    throw new Error("Invalid crewplane.json");
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    throw new Error("Invalid project policy");
+  const p = { ...defaultPolicy, ...raw } as ProjectPolicy;
+  if (
+    p.version !== 1 ||
+    !["none", "relay"].includes(p.roadmapFormat ?? "none") ||
+    !validId(p.coordinator) ||
+    !Array.isArray(p.reviewers) ||
+    !p.reviewers.every(validId) ||
+    new Set([p.coordinator, ...p.reviewers]).size !== p.reviewers.length + 1
+  )
+    throw new Error("Invalid project roles");
+  for (const path of [
+    p.tasksPath,
+    p.planPath,
+    p.statusPath,
+    p.instructionsPath,
+  ]) {
+    if (
+      typeof path !== "string" ||
+      !path ||
+      isAbsolute(path) ||
+      path.includes("\\") ||
+      path.split("/").some((x) => [".", "..", ".git"].includes(x)) ||
+      /[\r\n\0]/.test(path)
+    )
+      throw new Error("Project document paths must be safe relative paths");
+  }
+  return p;
+}
+
+export function discoverProject(cwd: string) {
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  if (git("rev-parse", "--is-bare-repository") === "true")
+    throw new Error("Crewplane requires a non-bare Git project");
+  const root = realpathSync(git("rev-parse", "--show-toplevel"));
+  const common = realpathSync(
+    git("rev-parse", "--path-format=absolute", "--git-common-dir"),
+  );
+  const gitDir = realpathSync(git("rev-parse", "--absolute-git-dir"));
+  const reportedPrimary = git("worktree", "list", "--porcelain", "-z")
+    .split("\0")[0]
+    ?.slice("worktree ".length);
+  let primary = gitDir === common ? root : reportedPrimary;
+  if (reportedPrimary === common && gitDir !== common) {
+    try {
+      const binding = JSON.parse(
+        readFileSync(join(common, "crewplane-project.json"), "utf8"),
+      ) as { version: number; root: string; common: string };
+      if (
+        binding.version !== 1 ||
+        binding.common !== common ||
+        typeof binding.root !== "string"
+      )
+        throw new Error("Invalid primary binding");
+      primary = realpathSync(binding.root);
+      const actualCommon = execFileSync(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        { cwd: primary, encoding: "utf8" },
+      ).trim();
+      if (realpathSync(actualCommon) !== common)
+        throw new Error("Primary binding belongs to another repository");
+    } catch {
+      throw new Error(
+        "Initialize Crewplane in the primary checkout before using a linked worktree with a separate Git directory",
+      );
+    }
+  }
+  if (!primary || !isAbsolute(primary))
+    throw new Error("Cannot resolve primary worktree");
+  if (
+    process.env.CREWPLANE_COORD_DIR &&
+    !isAbsolute(process.env.CREWPLANE_COORD_DIR)
+  )
+    throw new Error("CREWPLANE_COORD_DIR must be an absolute shared path");
+  return {
+    root,
+    common,
+    primary: realpathSync(primary),
+    store:
+      process.env.CREWPLANE_COORD_DIR ||
+      join(realpathSync(primary), ".crewplane-state"),
+  };
+}

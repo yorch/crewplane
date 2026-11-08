@@ -1,0 +1,7 @@
+.git
+node_modules
+dist
+.crewplane-state
+.crewplane-local
+.env
+.env.*

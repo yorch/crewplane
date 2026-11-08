@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "coordinator": "A",
+  "reviewers": ["R", "V"],
+  "tasksPath": "docs/tasks",
+  "planPath": "IMPLEMENTATION-PLAN.md",
+  "statusPath": "docs/STATUS.md",
+  "instructionsPath": "AGENTS.md",
+  "roadmapFormat": "relay"
+}

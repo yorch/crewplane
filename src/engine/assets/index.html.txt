@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crewplane · Coordination</title>
+    <link rel="stylesheet" href="/dashboard.css" /><link rel="stylesheet" href="/graph-renderer.css" /><script type="module" src="/graph-viewer.js"></script>
+    <script src="/dashboard.js" defer></script><script src="/runs.js" defer></script>
+  </head>
+  <body>
+    <header><div><p class="eyebrow">CREWPLANE / LOCAL OPERATIONS</p><h1>Agent coordination</h1><p class="subtitle">One view of the plan, the work, and the conversation.</p></div><div class="connection"><span id="connection" role="status">Connecting…</span><button id="refresh" type="button">Refresh now</button></div></header>
+    <main>
+      <div id="error" role="alert" hidden></div>
+      <div id="metrics" class="metrics"></div>
+      <section class="monitor" aria-labelledby="monitor-heading"><div class="section-heading"><h2 id="monitor-heading">Coordination watcher</h2><span id="monitor-status" role="status">Checking…</span></div><p id="monitor-note" class="note"></p><div id="monitor-alerts"></div></section>
+      <section class="monitor" aria-labelledby="headless-heading"><div class="section-heading"><h2 id="headless-heading">Headless supervisor</h2><span id="headless-status" role="status">Checking…</span></div><p id="headless-note" class="note"></p><p id="headless-budgets" class="note"></p><p class="note">Process liveness is a point-in-time observation, not model activity. Heartbeats belong to the supervisor. Usage covers retained records, not billing. Task reports and verified acceptance are separate.</p><div id="headless-lanes" class="agents"></div></section>
+      <section aria-labelledby="graph-heading"><h2 id="graph-heading">Operational relationships</h2><label>Graph view<select id="graph-view"><option value="communication">Communication</option><option value="dependencies">Task dependencies</option></select></label><p id="graph-note" class="note">Waiting for bounded graph data.</p><div id="graph-host"></div></section>
+      <section class="monitor" aria-labelledby="runs-heading"><div class="section-heading"><h2 id="runs-heading">Operational runs</h2><span id="runs-status" role="status">Checking…</span></div><p class="note">Allowlisted operational metadata only. Raw stdout/stderr, private reasoning and unclassified model/tool text are omitted. Historical native logs are never exposed.</p><div class="filters"><label>Run lane<select id="run-lane"><option value="">All lanes</option></select></label><label>Run harness<select id="run-harness"><option value="">All harnesses</option><option>codex</option><option>pi</option></select></label><label>Run task<input id="run-task" placeholder="Task ID" /></label></div><fieldset id="run-history" class="run-history" aria-label="Run history"></fieldset><button id="run-more" type="button">Older runs</button><p id="run-note" class="note"></p><div class="run-controls"><label><input id="run-follow" type="checkbox" checked /> Follow latest events</label><button id="run-copy" type="button">Copy safe excerpt</button></div><textarea id="run-events" readonly aria-label="Sanitized chronological run timeline"></textarea></section>
+      <section aria-labelledby="tasks-heading"><div class="section-heading"><h2 id="tasks-heading">Task board</h2><span id="task-count"></span></div><div class="filters"><label>Search<input id="search" type="search" placeholder="Task, goal, or message…" /></label><label>Agent<select id="agent"><option value="">All agents</option></select></label><label>Phase<select id="phase"><option value="">All phases</option></select></label><label>Status<select id="state"><option value="">All statuses</option><option value="todo">To do</option><option value="assigned">Assigned</option><option value="working">In progress</option><option value="blocked">Blocked</option><option value="review">Submitted / disposition</option><option value="completed">Completed / accepted slice</option></select></label></div><p class="note">Acceptance can cover a bounded slice. Task notes and milestone gates retain the remaining scope. Updates reflect reported progress; they do not prove a harness is running.</p><div id="tasks" class="board"></div></section>
+      <div class="lower"><section aria-labelledby="questions-heading"><div class="section-heading"><h2 id="questions-heading">Open questions</h2><span id="question-count"></span></div><div id="questions"></div></section><section aria-labelledby="messages-heading"><div class="section-heading"><h2 id="messages-heading">Messages &amp; handoffs</h2><span id="message-count"></span></div><div id="messages"></div></section></div>
+      <section><details><summary>Milestone status &amp; verification notes</summary><pre id="milestones"></pre></details></section>
+      <footer>Read-only · Reloads task cards, configured project notes and the shared local board every 5 seconds · No external services</footer>
+    </main>
+  </body>
+</html>

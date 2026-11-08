@@ -1,0 +1,87 @@
+.relay-graph {
+  color: #182635;
+  background: #fff;
+  padding: 1rem;
+  font:
+    1rem / 1.5 system-ui,
+    sans-serif;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.relay-graph * {
+  box-sizing: border-box;
+}
+.relay-graph-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.relay-graph label {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.relay-graph input,
+.relay-graph select {
+  max-width: 100%;
+  min-height: 2.75rem;
+  font: inherit;
+}
+.relay-graph-nodes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: 0.6rem;
+  margin-block: 1rem;
+}
+.relay-graph button {
+  font: inherit;
+  color: #182635;
+  background: #f0f5fa;
+  border: 1px solid #526980;
+  border-radius: 0.35rem;
+  padding: 0.6rem;
+  min-height: 2.75rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+  cursor: pointer;
+}
+.relay-graph button[aria-pressed="true"] {
+  border: 3px solid #174a85;
+  background: #dbeafe;
+}
+.relay-graph :focus-visible {
+  outline: 3px solid #8b3600;
+  outline-offset: 3px;
+}
+.relay-graph table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  margin-block: 0.75rem;
+}
+.relay-graph th,
+.relay-graph td {
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #8092a4;
+  padding: 0.5rem;
+  overflow-wrap: anywhere;
+}
+.relay-graph summary {
+  cursor: pointer;
+  padding-block: 0.6rem;
+}
+@media (max-width: 450px) {
+  .relay-graph {
+    padding: 0.5rem;
+  }
+  .relay-graph th,
+  .relay-graph td {
+    padding: 0.25rem;
+  }
+  .relay-graph td button {
+    padding: 0.25rem;
+  }
+}

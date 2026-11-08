@@ -1,0 +1,15 @@
+# Extraction interfaces v1
+
+`src/contracts.ts` owns supervisor configuration, native run records, loaded state and actionable work identities. `src/project.ts` owns project discovery and policy validation. `src/ports.ts` defines coordination, read-model, workspace and adapter seams. The existing `lanes` configuration key is retained for compatibility, but IDs are configurable agents, not fixed names.
+
+`src/engine/read-model.ts` composes durable task/claim/status/acceptance/message records with separately qualified runtime observations. Neither supervisor nor scheduler imports HTTP/dashboard code. HTTP and CLI are adapters over the same coordination services.
+
+File-store protocol v1 has a Crewplane namespace and canonical Git common-directory identity. Task records have independent assignment, scope, scheduling metadata, exclusive claim, reported status and integration acceptance. Messages are append-only UUID records with sender, recipient, kind, task, reply identity and optional exact review SHA. State writes use temporary files and rename; exclusive records use exclusive creation/link. Board mutation locks serialize scope/assignment/claim/status transitions. A crash during a board mutation can leave a lock requiring inspection; do not auto-delete it. Store files are private local-user coordination, not a hostile multiuser authorization boundary.
+
+FAIR-V1 consumes explicit candidates, dependencies, role identity, active work, budgets and holds and returns reasons for selected/blocked/capacity states. The model does not choose executable eligibility. Phase gating is explicit coordinator authorization; task prose does not become authority.
+
+Harness adapters consume native stream events into bounded session/model/usage/final-result observations. Cross-harness or epoch resume is rejected. A final state is one of working/waiting/ready/needs_operator, with a bounded summary. Schema versions and session identity remain explicit. Completion and trace settlement are part of process ownership.
+
+Operational trace, usage and evidence modules retain versioned records and capacity limits. Logical evidence route aliases replace Relay's product-specific path whitelist. Usage coverage distinguishes unknown dimensions from measured values; the detailed ledger is not yet connected to all runtime providers.
+
+Breaking persisted or command meanings require a new version and an explicit migration. No automatic Relay store migration is provided. New harnesses must supply capability and lifecycle fixtures before registration. Keep public interfaces centralized; do not redefine task or process entities in the dashboard.

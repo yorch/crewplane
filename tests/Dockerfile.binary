@@ -1,0 +1,7 @@
+FROM oven/bun:1.4.1
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY . .
+RUN bun run build
+CMD ["bun", "run", "test:binary"]
