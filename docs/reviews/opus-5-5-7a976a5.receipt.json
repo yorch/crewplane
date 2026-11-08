@@ -1,0 +1,13 @@
+{
+  "baseline": "7a976a5",
+  "publishedEquivalent": "6b2522e",
+  "cliVersion": "2.1.319",
+  "canonicalModels": ["claude-opus-5-5"],
+  "tools": ["Read", "Glob", "Grep"],
+  "permissionDenials": [],
+  "turns": 78,
+  "durationMs": 795654,
+  "isError": false,
+  "subtype": "success",
+  "delegatedAgents": 0
+}

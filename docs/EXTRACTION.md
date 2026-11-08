@@ -15,6 +15,6 @@ Source repository: https://github.com/yorch/volunteer-relay; exact source commit
 | docs/agents/**                                                             | project templates             | Move ownership/phase rules into a Relay profile; preserve user instructions             |
 | orchestration test suites                                                  | regression harness            | Remove hardcoded paths and run compiled-binary scenarios                                |
 
-Resolved couplings: source-file subprocess invocations became internal services and executable commands; dashboard assets are explicitly embedded; runtime no longer requires Node 26; task IDs, roles and document paths are configurable; supervisor reads the shared projection without importing HTTP/dashboard code. Relay-specific plan import is an optional profile.
+Resolved couplings: source-file subprocess invocations became internal services and executable commands; dashboard assets are explicitly embedded; runtime no longer requires Node 26; task IDs, roles and document paths are configurable; supervisor reads the shared projection without importing the HTTP server; pure display helpers remain shared and graph failures degrade explicitly. Relay-specific plan import is an optional profile.
 
 Keep application code, PostgreSQL/Drizzle/Better Auth, product fixtures, deployment infrastructure and domain contracts in Volunteer Relay. Git history integration policy is configurable but linear-history defaults remain.
