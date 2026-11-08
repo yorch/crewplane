@@ -173,9 +173,7 @@ export function projectHeadless(
             r?.inputTokensKnown === true ? count(r.inputTokens) : null,
           outputTokens:
             r?.outputTokensKnown === true ? count(r.outputTokens) : null,
-          runsLastHour: records
-            .flatMap((record) => record.runs)
-            .filter((at) => at <= now && at > now - 3600000).length,
+          runsLastHour: runs.length,
         },
       };
     }),

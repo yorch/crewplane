@@ -234,15 +234,19 @@ it("shows loaded budgets and a precise hourly wait instead of implying the confi
       key: "coordinator",
       lane: "coordinator",
       status: "idle",
-      runs: [now - 20000, now - 10000],
+      runs: [now - 10000],
     },
   };
+  runtime.retiredRuns = { coordinator: [now - 20000] };
   const projected = projectHeadless(
     { ...cfg, maxRunsPerHour: 60 },
     runtime,
     now,
     () => false,
   );
+  expect(
+    projected.lanes.find((l) => l.lane === "coordinator")?.usage.runsLastHour,
+  ).toBe(2);
   expect(projected.budgetsSource).toBe("loaded");
   expect(projected.budgets?.maxRunsPerHour).toBe(2);
   expect(

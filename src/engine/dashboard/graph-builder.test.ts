@@ -143,7 +143,8 @@ describe("GRAPH-V1 builder", () => {
     const graph = buildGraph(source, "communication");
     expect(graph.nodes).toHaveLength(50);
     expect(graph.edges).toHaveLength(100);
-    expect(graph.hidden).toEqual({ nodes: 14, edges: 28 });
+    expect(graph.hidden).toEqual({ nodes: 0, edges: 0 });
+    expect(graph.truncated).toEqual({ nodes: 14, edges: 28 });
     expect(graph.edges[0]?.id).toBe(JSON.stringify(["message", "new", "L0"]));
     expect(
       buildGraph(
@@ -155,6 +156,24 @@ describe("GRAPH-V1 builder", () => {
         "communication",
       ),
     ).toEqual(graph);
+  });
+  it("separates archived tasks from truncation without false missing-reference edges", () => {
+    const tasks = Array.from({ length: 60 }, (_, i) =>
+      task(`T${String(i).padStart(2, "0")}`),
+    );
+    const first = tasks[0];
+    if (!first) throw Error("Synthetic fixture missing");
+    first.dependsOn = [
+      { taskId: "T59", require: "ready" },
+      { taskId: "missing", require: "ready" },
+    ];
+    const graph = buildGraph(
+      input({ tasks: [...tasks, task("archive", true)] }),
+      "dependencies",
+    );
+    expect(graph.hidden).toEqual({ nodes: 1, edges: 0 });
+    expect(graph.truncated).toEqual({ nodes: 10, edges: 1 });
+    expect(graph.edges.map((e) => e.to)).toEqual(["missing"]);
   });
   it("preserves hostile display text and never mutates input", () => {
     const source = input({

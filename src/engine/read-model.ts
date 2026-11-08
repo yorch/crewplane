@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Board, Config, LiveTask, State } from "../contracts.ts";
+import { gitEnvironment } from "../environment.ts";
 import { relayPlannedTasks } from "../profiles/relay.ts";
 import {
   coordinatorOf,
@@ -39,7 +40,7 @@ export function parseTask(id: string, markdown: string, live?: LiveTask) {
                 : "todo";
   return {
     id,
-    title: markdown.split("\n")[0]?.replace(/^#\s*/, "") ?? id,
+    title: markdown.split("\n")[0]?.replace(/^#\s*/, "").trim() || id,
     owner:
       live?.assignment.owner ??
       markdown.match(
@@ -169,6 +170,7 @@ export async function snapshot(root: string) {
   );
   const worktrees = execFileSync("git", ["worktree", "list", "--porcelain"], {
     cwd: root,
+    env: gitEnvironment(),
     encoding: "utf8",
   })
     .split("\n\n")
@@ -263,12 +265,34 @@ export async function snapshot(root: string) {
       })),
     unansweredIds: board.unanswered.slice(-1000).map((m) => m.id),
   };
-  return {
-    graphs: {
+  // Display validation must never take down the authoritative board read.
+  let graphState = "available";
+  let graphs: {
+    dependencies: ReturnType<typeof buildGraph>;
+    communication: ReturnType<typeof buildGraph>;
+  };
+  try {
+    graphs = {
       dependencies: buildGraph(graphInput, "dependencies"),
       communication: buildGraph(graphInput, "communication"),
-    },
+    };
+  } catch {
+    graphState = "unavailable";
+    graphs = {
+      dependencies: buildGraph(
+        { version: 1, tasks: [], lanes: [], messages: [], unansweredIds: [] },
+        "dependencies",
+      ),
+      communication: buildGraph(
+        { version: 1, tasks: [], lanes: [], messages: [], unansweredIds: [] },
+        "communication",
+      ),
+    };
+  }
+  return {
+    graphs,
     graphCoverage: {
+      state: graphState,
       lanesTotal: agents.length,
       lanesIncluded: graphInput.lanes.length,
       tasksTotal: tasks.filter((t) => t.live?.assignment).length,

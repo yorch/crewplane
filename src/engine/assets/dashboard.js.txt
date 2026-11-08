@@ -175,7 +175,7 @@ function render() {
   );
   if (data.graphCoverage)
     $("graph-note").textContent =
-      `Graph input: ${data.graphCoverage.tasksIncluded ?? "unknown"}/${data.graphCoverage.tasksTotal ?? "unknown"} tasks, ${data.graphCoverage.lanesIncluded ?? "unknown"}/${data.graphCoverage.lanesTotal ?? "unknown"} agents. Full task board remains available. Display data grants no execution authority.`;
+      `Graph ${data.graphCoverage.state ?? "available"}. Input: ${data.graphCoverage.tasksIncluded ?? "unknown"}/${data.graphCoverage.tasksTotal ?? "unknown"} tasks, ${data.graphCoverage.lanesIncluded ?? "unknown"}/${data.graphCoverage.lanesTotal ?? "unknown"} agents. Full task board remains available. Display data grants no execution authority.`;
   window.crewplaneGraphSnapshot = {
     graphs: data.graphs,
     coverage: data.graphCoverage,

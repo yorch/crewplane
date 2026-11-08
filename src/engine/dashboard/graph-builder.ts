@@ -54,6 +54,7 @@ export type GraphSnapshot = {
   nodes: GraphNode[];
   edges: GraphEdge[];
   hidden: { nodes: number; edges: number };
+  truncated: { nodes: number; edges: number };
 };
 function fail(): never {
   throw new Error("Invalid graph input");
@@ -261,14 +262,21 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
       }
   }
   nodes.sort((a, b) => compare(a.id, b.id));
+  const displayedNodes = nodes.slice(0, 50);
+  const truncatedIds = new Set(nodes.slice(50).map((node) => node.id));
+  // Missing references remain visible; references to intentionally clipped nodes do not.
+  const eligibleEdges = edges.filter(
+    (edge) => !truncatedIds.has(edge.from) && !truncatedIds.has(edge.to),
+  );
   return {
     version: 1,
     view,
-    nodes: nodes.slice(0, 50),
-    edges: edges.slice(0, 100),
-    hidden: {
-      nodes: omitted + Math.max(0, nodes.length - 50),
-      edges: omittedEdges + Math.max(0, edges.length - 100),
+    nodes: displayedNodes,
+    edges: eligibleEdges.slice(0, 100),
+    hidden: { nodes: omitted, edges: omittedEdges },
+    truncated: {
+      nodes: Math.max(0, nodes.length - 50),
+      edges: edges.length - Math.min(100, eligibleEdges.length),
     },
   };
 }
