@@ -33,7 +33,13 @@ export interface RecordState {
   reason: string;
   summary?: string;
   pid?: number;
+  processGroupId?: number;
+  cleanupUnverified?: boolean;
+  inputTokensKnown?: boolean;
+  outputTokensKnown?: boolean;
   seen: string[];
+  seenMessagesThrough?: string;
+  seenMessagesAtBoundary?: string[];
   startedAt?: string;
   finishedAt?: string;
   exitCode?: number;
@@ -49,12 +55,14 @@ export interface RecordState {
 export interface State {
   version: 1;
   running: boolean;
+  generation?: string;
   checkedAt: string;
   pid: number;
   draining: boolean;
   held: Lane[];
   commands: string[];
   records: Record<string, RecordState>;
+  retiredRuns?: Partial<Record<Lane, number[]>>;
   notices: Partial<Record<Lane, string[]>>;
   attention?: {
     oldestUnhandledAt: number | null;

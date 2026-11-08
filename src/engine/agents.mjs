@@ -1,20 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-  link,
-  mkdir,
-  readdir,
-  readFile,
-  rename,
-  rmdir,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rmdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { gitEnvironment } from "../environment.ts";
+import { publishJson, syncDirectory } from "../io.ts";
 import {
   coordinatorOf,
   discoverProject,
   projectPolicy,
+  reviewerRoleOf,
   reviewersOf,
   validId,
   validTaskId,
@@ -28,6 +22,7 @@ function ensure(condition, message) {
 function git(args, cwd) {
   return execFileSync("git", args, {
     cwd,
+    env: gitEnvironment(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -40,23 +35,9 @@ async function read(path, fallback) {
     throw error;
   }
 }
-async function put(path, value, exclusive = false) {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temp = `${path}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-      flush: true,
-    });
-    if (exclusive) await link(temp, path);
-    else await rename(temp, path);
-  } finally {
-    await unlink(temp).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-  }
-}
+const put = (path, value, exclusive = false) =>
+  publishJson(path, value, { exclusive });
+
 function options(args) {
   const result = {};
   for (let i = 0; i < args.length; i += 2) {
@@ -236,17 +217,21 @@ async function knownScope(ctx, id) {
   return paths;
 }
 async function outstandingRevision(ctx, id, agent) {
+  const assignment = await read(taskPath(ctx, id, "assignment.json"));
+  const status = await read(taskPath(ctx, id, "status.json"), null);
   const all = await messages(ctx);
   const answered = new Set(
     all.filter((m) => m.kind === "answer").map((m) => m.replyTo),
   );
-  return all.some(
+  return all.find(
     (m) =>
       m.from === coordinatorOf(ctx.policy) &&
       m.to === agent &&
       m.task === id &&
       m.kind === "request" &&
-      !answered.has(m.id),
+      !answered.has(m.id) &&
+      m.assignmentId === (assignment.id ?? assignment.at) &&
+      m.reviewCommit === status?.commit,
   );
 }
 const priorities = ["urgent-operational", "gate-critical", "normal", "low"];
@@ -363,10 +348,10 @@ export async function main(args = process.argv.slice(2), cwd = process.cwd()) {
   if (!command || command === "help") return help;
   if (command === "prompt") {
     const id = lane(rest[0]);
-    const p = projectPolicy(cwd);
+    const p = (await context(cwd)).policy;
     return agentPrompt(
       id,
-      id === reviewersOf(p)[1]
+      reviewerRoleOf(p, id) === "visual"
         ? "visual"
         : reviewersOf(p).includes(id)
           ? "review"
@@ -402,6 +387,7 @@ export async function main(args = process.argv.slice(2), cwd = process.cwd()) {
     "status",
     "accept",
     "release",
+    "send",
   ].includes(command);
   if (mutating) {
     try {
@@ -507,18 +493,27 @@ async function execute(command, o, ctx) {
     ensure(kinds.includes(o.kind), "Unknown message kind");
     if (o.task) task(o.task);
     let messageTask = o.task ?? null;
+    let parent;
     if (o.kind === "answer")
-      ensure(o["reply-to"], "Answers require --reply-to UUID");
+      ensure(
+        o["reply-to"] || (agent === coordinatorOf(ctx.policy) && messageTask),
+        "Answers require --reply-to UUID or a coordinator task decision",
+      );
     if (o["reply-to"]) {
-      const parent = await read(
+      parent = await read(
         join(ctx.store, "messages", `${uuid(o["reply-to"])}.json`),
       );
       ensure(
-        !messageTask || !parent.task || messageTask === parent.task,
+        o.kind === "answer"
+          ? !messageTask || messageTask === parent.task
+          : !messageTask || !parent.task || messageTask === parent.task,
         "Reply task must match the question/request",
       );
       messageTask ??= parent.task;
-      ensure(to === parent.from, "Reply to the original sender");
+      ensure(
+        to === parent.from || (to === "all" && parent.to === "all"),
+        "Reply to the original sender; broadcast only for an original broadcast",
+      );
       ensure(
         parent.to === agent || parent.to === "all",
         "Message was addressed to another lane",
@@ -529,14 +524,64 @@ async function execute(command, o, ctx) {
           "Answers must reference a question/request",
         );
     }
+    const taskAssignment = messageTask
+      ? await read(taskPath(ctx, messageTask, "assignment.json"), null)
+      : null;
+    if (o.kind === "answer" && !parent)
+      ensure(
+        taskAssignment?.owner === to,
+        "Coordinator task decisions must address the current owner",
+      );
+    const boundAssignment =
+      parent?.assignmentId ??
+      ((taskAssignment?.owner === agent &&
+        ["question", "request"].includes(o.kind)) ||
+      (o.kind === "answer" && !parent)
+        ? (taskAssignment?.id ?? taskAssignment?.at)
+        : undefined);
+    const authorRequest =
+      agent === coordinatorOf(ctx.policy) &&
+      o.kind === "request" &&
+      messageTask &&
+      !reviewersOf(ctx.policy).includes(to) &&
+      to !== "all";
+    const coordinatorTaskRequest =
+      agent === coordinatorOf(ctx.policy) &&
+      o.kind === "request" &&
+      messageTask;
+    const targetAssignment = coordinatorTaskRequest
+      ? await read(
+          taskPath(ctx, messageTask, "assignment.json"),
+          authorRequest ? undefined : null,
+        )
+      : null;
+    const targetStatus = authorRequest
+      ? await read(taskPath(ctx, messageTask, "status.json"), null)
+      : null;
+    if (authorRequest)
+      ensure(
+        targetAssignment.owner === to,
+        "Request must target current assignment owner",
+      );
+    if (
+      agent === coordinatorOf(ctx.policy) &&
+      o.kind === "request" &&
+      reviewersOf(ctx.policy).includes(to)
+    )
+      ensure(
+        o.commit && messageTask,
+        "Reviewer requests require --task and exact --commit",
+      );
+    if (authorRequest && targetStatus?.state === "ready")
+      ensure(o.commit, "Author corrections require exact --commit");
     let reviewCommit;
     if (o.commit !== undefined) {
       ensure(
         agent === coordinatorOf(ctx.policy) &&
-          reviewersOf(ctx.policy).includes(to) &&
+          (reviewersOf(ctx.policy).includes(to) || authorRequest) &&
           o.kind === "request" &&
           messageTask,
-        "Only coordinator task requests to reviewers may pin a review commit",
+        "Only coordinator task requests may pin a commit",
       );
       reviewCommit = git(
         ["rev-parse", "--verify", "--end-of-options", `${o.commit}^{commit}`],
@@ -544,7 +589,19 @@ async function execute(command, o, ctx) {
       );
       ensure(/^[a-f0-9]{40}$/.test(reviewCommit), "Invalid review commit");
     }
+    if (authorRequest && o.commit)
+      ensure(
+        targetStatus?.state === "ready" && reviewCommit === targetStatus.commit,
+        "Author correction must pin current frozen submission",
+      );
     return send(ctx, {
+      ...(targetAssignment || boundAssignment
+        ? {
+            assignmentId: targetAssignment
+              ? (targetAssignment.id ?? targetAssignment.at)
+              : boundAssignment,
+          }
+        : {}),
       from: agent,
       to,
       kind: o.kind,
@@ -699,6 +756,7 @@ async function execute(command, o, ctx) {
       }
     }
     const assignment = {
+      id: randomUUID(),
       task: id,
       owner,
       baseCommit,
@@ -741,10 +799,47 @@ async function execute(command, o, ctx) {
       !(await read(taskPath(ctx, id, "accepted.json"), null)),
       "Accepted work needs a new task, not release",
     );
+    const runtime = await read(
+      join(ctx.store, "supervisor", "state.json"),
+      null,
+    );
+    ensure(
+      !Object.values(runtime?.records ?? {}).some(
+        (r) => r.task === id && r.status === "running",
+      ),
+      "Cannot release task with a running native record",
+    );
     const note = await text(o, ctx.root);
+    const all = await messages(ctx);
+    const answered = new Set(
+      all.filter((m) => m.kind === "answer").map((m) => m.replyTo),
+    );
+    for (const request of all) {
+      if (
+        request.from === coordinatorOf(ctx.policy) &&
+        request.kind === "request" &&
+        request.task === id &&
+        request.assignmentId === (assignment.id ?? assignment.at) &&
+        (request.to === assignment.owner ||
+          reviewersOf(ctx.policy).includes(request.to)) &&
+        !answered.has(request.id)
+      ) {
+        await send(ctx, {
+          from: request.to,
+          to: request.from,
+          kind: "answer",
+          task: id,
+          assignmentId: request.assignmentId,
+          replyTo: request.id,
+          text: `Closed by coordinator release of assignment ${assignment.id ?? assignment.at}. No task completion or review is inferred. ${note}`,
+        });
+      }
+    }
     const archive = join(ctx.store, "archive", `${id}-${randomUUID()}`);
     await mkdir(dirname(archive), { recursive: true, mode: 0o700 });
     await rename(dirname(taskPath(ctx, id, "assignment.json")), archive);
+    await syncDirectory(join(ctx.store, "tasks"));
+    await syncDirectory(dirname(archive));
     await send(ctx, {
       from: agent,
       to: "all",
@@ -877,13 +972,16 @@ async function execute(command, o, ctx) {
   );
   const previous = await read(taskPath(ctx, id, "status.json"), null);
   const revising = previous?.state === "ready" && o.state === "working";
+  let revision;
   if (o.state === "working") {
     await executionGuard(ctx, id, agent, revising);
-    if (revising)
+    if (revising) {
+      revision = await outstandingRevision(ctx, id, agent);
       ensure(
-        await outstandingRevision(ctx, id, agent),
+        revision,
         "Frozen submission requires an outstanding coordinator revision request",
       );
+    }
   }
   if (checkpointing) {
     ensure(
@@ -919,6 +1017,17 @@ async function execute(command, o, ctx) {
     agent,
     task: id,
     state: o.state,
+    ...(revision
+      ? {
+          revisionRequestId: revision.id,
+          revisionCommit: revision.reviewCommit,
+        }
+      : previous?.revisionRequestId
+        ? {
+            revisionRequestId: previous.revisionRequestId,
+            revisionCommit: previous.revisionCommit,
+          }
+        : {}),
     ...(checkpointing ? { checkpointed: true } : {}),
     commit,
     at: new Date().toISOString(),
@@ -939,6 +1048,30 @@ async function execute(command, o, ctx) {
     ...status,
     messageId: event.id,
   });
+  if (o.state === "ready") {
+    for (const request of await messages(ctx)) {
+      if (
+        request.from === coordinatorOf(ctx.policy) &&
+        request.to === agent &&
+        request.task === id &&
+        request.kind === "request" &&
+        request.assignmentId === (assignment.id ?? assignment.at) &&
+        (previous?.state !== "ready" ||
+          request.id === previous.revisionRequestId)
+      ) {
+        const all = await messages(ctx);
+        if (!all.some((m) => m.kind === "answer" && m.replyTo === request.id))
+          await send(ctx, {
+            from: agent,
+            to: request.from,
+            kind: "answer",
+            task: id,
+            replyTo: request.id,
+            text: `Superseded by frozen submission ${commit}`,
+          });
+      }
+    }
+  }
   return status;
 }
 

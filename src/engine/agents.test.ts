@@ -432,6 +432,8 @@ it("supports a reusable reviewer inbox and threaded findings without implementat
       "P1-01",
       "--text",
       "Review exact synthetic base/tip in the tracked brief",
+      "--commit",
+      "HEAD",
     );
     const inbox = ok(
       root,
@@ -533,6 +535,8 @@ it("supports visual QA inbox/findings without implementation authority", async (
       "P1-01",
       "--text",
       "Review exact synthetic base/tip in the tracked brief",
+      "--commit",
+      "HEAD",
     );
     const inbox = ok(
       root,
@@ -705,6 +709,10 @@ function revisionRequest(root: string, task = "P1-01") {
     task,
     "--text",
     "Required synthetic review correction",
+    "--commit",
+    ok(root, "board").tasks.find(
+      (entry: { task: string }) => entry.task === task,
+    ).status.commit,
   );
 }
 const working = [
@@ -1331,7 +1339,7 @@ it("records exact coordinator review pins as data and rejects pins on other mess
     expect(ok(root, "inbox", "--agent", "reviewer")[0].reviewCommit).toBe(
       expected,
     );
-    const legacy = ok(
+    const legacy = cli(
       root,
       "send",
       "--agent",
@@ -1345,12 +1353,10 @@ it("records exact coordinator review pins as data and rejects pins on other mess
       "--text",
       "Legacy text-only review",
     );
-    expect(legacy.reviewCommit).toBeUndefined();
+    expect(legacy.code).toBe(1);
     for (const [from, to, kind, task] of [
       ["B", "reviewer", "request", "P1-01"],
-      ["coordinator", "B", "request", "P1-01"],
       ["coordinator", "visual", "update", "P1-01"],
-      ["coordinator", "reviewer", "request", ""],
     ] as const) {
       expect(
         cli(
@@ -1368,7 +1374,7 @@ it("records exact coordinator review pins as data and rejects pins on other mess
           "--text",
           "Synthetic invalid pin",
         ).error,
-      ).toContain("Only coordinator task requests to reviewers");
+      ).toContain("Only coordinator task requests");
     }
     expect(
       cli(
@@ -1388,7 +1394,7 @@ it("records exact coordinator review pins as data and rejects pins on other mess
         "Synthetic missing pin",
       ).code,
     ).toBe(1);
-    expect(ok(root, "board").messages).toHaveLength(2);
+    expect(ok(root, "board").messages).toHaveLength(1);
   });
 });
 
@@ -1413,7 +1419,22 @@ it("requires an outstanding task-specific coordinator request to unfreeze an aut
         "Cannot checkpoint frozen work",
       ).code,
     ).toBe(1);
-    revisionRequest(root, "P1-02");
+    expect(
+      cli(
+        root,
+        "send",
+        "--agent",
+        "coordinator",
+        "--to",
+        "B",
+        "--kind",
+        "request",
+        "--task",
+        "P1-02",
+        "--text",
+        "Unassigned request",
+      ).code,
+    ).toBe(1);
     expect(cli(b, ...working).code).toBe(1);
     const request = revisionRequest(root);
     ok(
@@ -1593,5 +1614,340 @@ it("refuses known path overlap across lanes while permitting unknown legacy scop
         "Legacy unknown scope retains protocol ownership",
       ).owner,
     ).toBe("C");
+  });
+});
+it("closes serviced corrections and rejects stale reopening or releasing native work", async () => {
+  await fixture(({ root, b }) => {
+    assign(root);
+    ok(b, ...claim);
+    ok(b, ...ready);
+    expect(
+      cli(
+        root,
+        "send",
+        "--agent",
+        "coordinator",
+        "--to",
+        "B",
+        "--kind",
+        "request",
+        "--task",
+        "P1-01",
+        "--text",
+        "Unpinned correction",
+      ).code,
+    ).toBe(1);
+    const request = revisionRequest(root);
+    ok(b, ...ready);
+    expect(
+      ok(root, "board").unanswered.some(
+        (m: { id: string }) => m.id === request.id,
+      ),
+    ).toBe(true);
+    ok(b, ...working);
+    writeFileSync(join(b, "correction.txt"), "Synthetic corrected content\n");
+    git(b, "add", ".");
+    git(b, "commit", "-qm", "fix(test): correct synthetic source");
+    ok(b, ...ready);
+    const board = ok(root, "board");
+    expect(
+      board.unanswered.some((m: { id: string }) => m.id === request.id),
+    ).toBe(false);
+    expect(cli(b, ...working).code).toBe(1);
+    const store = ok(root, "init").store;
+    mkdirSync(join(store, "supervisor"), { recursive: true });
+    writeFileSync(
+      join(store, "supervisor/state.json"),
+      JSON.stringify({
+        records: { old: { task: "P1-01", lane: "B", status: "running" } },
+      }),
+    );
+    expect(
+      cli(
+        root,
+        "release",
+        "--agent",
+        "coordinator",
+        "--task",
+        "P1-01",
+        "--text",
+        "Synthetic release",
+      ).error,
+    ).toContain("running native record");
+    expect(ok(root, "board").tasks).toHaveLength(1);
+  });
+});
+it("discovers explicit reviewer prompts from subdirectories and linked worktrees", async () => {
+  await fixture(({ root, b }) => {
+    writeFileSync(
+      join(root, "crewplane.json"),
+      JSON.stringify({
+        version: 1,
+        coordinator: "coordinator",
+        reviewers: ["visual", "inspector"],
+        reviewerRoles: { visual: "code", inspector: "visual" },
+        tasksPath: "tasks",
+      }),
+    );
+    mkdirSync(join(root, "nested"));
+    mkdirSync(join(b, "nested"));
+    for (const cwd of [join(root, "nested"), join(b, "nested")]) {
+      expect(cli(cwd, "prompt", "inspector").output).toContain(
+        "visual and interaction verifier",
+      );
+      expect(cli(cwd, "prompt", "visual").output).toContain(
+        "exact requested commit",
+      );
+    }
+  });
+});
+it("ignores inherited repository selectors for coordination Git commands", async () => {
+  await fixture(({ root, b }) => {
+    assign(root);
+    const result = spawnSync(process.execPath, [script, ...claim], {
+      cwd: b,
+      env: { ...env, GIT_DIR: join(root, ".git"), GIT_WORK_TREE: root },
+      encoding: "utf8",
+    });
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const claimed = JSON.parse(result.stdout);
+    expect(claimed.worktree).toBe(b);
+    expect(claimed.branch).toBe("worker-B");
+  });
+});
+it("explicitly closes only current-assignment author and reviewer threads on release", async () => {
+  await fixture(({ root, b }) => {
+    const assigned = assign(root);
+    ok(b, ...claim);
+    ok(b, ...ready);
+    const author = revisionRequest(root);
+    const reviewer = ok(
+      root,
+      "send",
+      "--agent",
+      "coordinator",
+      "--to",
+      "reviewer",
+      "--kind",
+      "request",
+      "--task",
+      "P1-01",
+      "--commit",
+      "HEAD",
+      "--text",
+      "Synthetic exact review",
+    );
+    expect(reviewer.assignmentId).toBe(assigned.id);
+    const generic = ok(
+      root,
+      "send",
+      "--agent",
+      "coordinator",
+      "--to",
+      "B",
+      "--kind",
+      "request",
+      "--text",
+      "Generic unrelated thread",
+    );
+    const store = ok(root, "init").store;
+    const stale = {
+      ...author,
+      id: "00000000-0000-4000-8000-000000000001",
+      assignmentId: "archived-assignment",
+    };
+    writeFileSync(
+      join(store, "messages", `${stale.id}.json`),
+      JSON.stringify(stale),
+    );
+    ok(
+      root,
+      "release",
+      "--agent",
+      "coordinator",
+      "--task",
+      "P1-01",
+      "--text",
+      "Synthetic abandonment",
+    );
+    const board = ok(root, "board");
+    expect(board.tasks).toHaveLength(0);
+    const pending = board.unanswered.map((m: { id: string }) => m.id);
+    expect(pending).toContain(generic.id);
+    expect(pending).toContain(stale.id);
+    expect(pending).not.toContain(author.id);
+    expect(pending).not.toContain(reviewer.id);
+    for (const id of [author.id, reviewer.id]) {
+      const closure = board.messages.find(
+        (m: { replyTo: string }) => m.replyTo === id,
+      );
+      expect(closure.kind).toBe("answer");
+      expect(closure.assignmentId).toBe(assigned.id);
+      expect(closure.text).toContain(
+        "No task completion or review is inferred",
+      );
+    }
+  });
+});
+it("inherits threaded answer task and assignment scope while constraining recipients", async () => {
+  await fixture(({ root, b }) => {
+    const assignment = assign(root);
+    ok(b, ...claim);
+    const question = ok(
+      b,
+      "send",
+      "--agent",
+      "B",
+      "--to",
+      "C",
+      "--kind",
+      "question",
+      "--task",
+      "P1-01",
+      "--text",
+      "Synthetic peer dependency",
+    );
+    expect(question.assignmentId).toBe(assignment.id);
+    const answer = ok(
+      root,
+      "send",
+      "--agent",
+      "C",
+      "--to",
+      "B",
+      "--kind",
+      "answer",
+      "--reply-to",
+      question.id,
+      "--text",
+      "Synthetic resolution",
+    );
+    expect(answer.task).toBe("P1-01");
+    expect(answer.assignmentId).toBe(assignment.id);
+    for (const extra of [
+      ["--task", "P1-02"],
+      ["--to", "all"],
+    ]) {
+      const args = [
+        "send",
+        "--agent",
+        "C",
+        "--to",
+        "B",
+        "--kind",
+        "answer",
+        "--reply-to",
+        question.id,
+        "--text",
+        "Contradictory scope",
+      ];
+      if (extra[0] === "--to") args[4] = "all";
+      else args.push(...extra);
+      expect(cli(root, ...args).code).toBe(1);
+    }
+    const broadcast = ok(
+      b,
+      "send",
+      "--agent",
+      "B",
+      "--to",
+      "all",
+      "--kind",
+      "question",
+      "--task",
+      "P1-01",
+      "--text",
+      "Synthetic broadcast dependency",
+    );
+    expect(
+      ok(
+        root,
+        "send",
+        "--agent",
+        "C",
+        "--to",
+        "all",
+        "--kind",
+        "answer",
+        "--reply-to",
+        broadcast.id,
+        "--text",
+        "Shared resolution",
+      ).task,
+    ).toBe("P1-01");
+    expect(
+      ok(
+        root,
+        "send",
+        "--agent",
+        "coordinator",
+        "--to",
+        "B",
+        "--kind",
+        "answer",
+        "--task",
+        "P1-01",
+        "--text",
+        "Task-specific coordinator decision",
+      ).assignmentId,
+    ).toBe(assignment.id);
+    const generic = ok(
+      b,
+      "send",
+      "--agent",
+      "B",
+      "--to",
+      "C",
+      "--kind",
+      "question",
+      "--text",
+      "Generic unrelated question",
+    );
+    expect(
+      cli(
+        root,
+        "send",
+        "--agent",
+        "C",
+        "--to",
+        "B",
+        "--kind",
+        "answer",
+        "--reply-to",
+        generic.id,
+        "--task",
+        "P1-01",
+        "--text",
+        "Invented task association",
+      ).code,
+    ).toBe(1);
+    ok(
+      root,
+      "release",
+      "--agent",
+      "coordinator",
+      "--task",
+      "P1-01",
+      "--text",
+      "Synthetic reassignment",
+    );
+    const replacement = assign(root);
+    const stale = ok(
+      root,
+      "send",
+      "--agent",
+      "C",
+      "--to",
+      "B",
+      "--kind",
+      "answer",
+      "--reply-to",
+      question.id,
+      "--text",
+      "Late old-assignment answer",
+    );
+    expect(stale.assignmentId).toBe(assignment.id);
+    expect(stale.assignmentId).not.toBe(replacement.id);
   });
 });

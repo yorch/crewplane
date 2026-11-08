@@ -71,6 +71,8 @@ const message = (id: string, task: string, to = "B", kind = "request") => ({
   to,
   kind,
   replyTo: null,
+  assignmentId: new Date(now - 100000).toISOString(),
+  reviewCommit: "b".repeat(40),
   at: new Date(now - 20000).toISOString(),
   text: "Synthetic controlled request",
 });
@@ -267,7 +269,7 @@ it("rejects stale typed review pins but keeps legacy brief provenance explicitly
   const w = evaluateOrchestration(b, state(), config, now).work.find(
     (w) => w.lane === "reviewer",
   );
-  expect(w?.reason).toContain("scheduler pin unavailable");
+  expect(w).toBeUndefined();
 });
 
 it("does not rerun a completed correction or let its stale request block the checkpointed task", () => {
@@ -314,7 +316,10 @@ it("legacy reviewers cannot consume the slot reserved for coordinator when coord
   });
   // Three reviews share only two reviewer lanes and one author; with an extra author,
   // the fourth worker must wait even though legacy reviews have kind control.
-  const request = message("review", "P1-01", "reviewer");
+  const request: Board["messages"][number] = {
+    ...message("review", "P1-01", "reviewer"),
+  };
+  delete request.reviewCommit;
   b.messages.push(request);
   b.unanswered.push(request);
   b.tasks.push(task("P1-02", "C") as unknown as Board["tasks"][number]);
@@ -328,9 +333,7 @@ it("legacy reviewers cannot consume the slot reserved for coordinator when coord
   };
   const next = evaluateOrchestration(b, s, config, now);
   expect(next.work.length).toBe(2);
-  expect(
-    next.queue.queue.some((q) => q.reason === "COORDINATOR_RESERVED"),
-  ).toBe(true);
+  expect(next.work.some((w) => w.lane === "reviewer")).toBe(false);
 });
 
 it("serializes known overlapping delegated scopes across lanes and refuses overlap with an active writer", () => {
@@ -355,4 +358,363 @@ it("serializes known overlapping delegated scopes across lanes and refuses overl
   expect(r.queue.queue.find((q) => q.taskId === "P1-02")?.reason).toBe(
     "PATH_OVERLAP",
   );
+});
+it("checkpoints an uncheckpointed blocked sibling before required corrections", () => {
+  const b = board([task("P1-01", "B", "ready"), task("P1-02", "B", "blocked")]);
+  const request = message("fix", "P1-01");
+  b.messages.push(request);
+  b.unanswered.push(request);
+  const first = evaluateOrchestration(b, state(), config, now);
+  expect(first.work.find((w) => w.lane === "B")?.task).toBe("P1-02");
+  expect(first.work.find((w) => w.lane === "B")?.reason).toContain(
+    "checkpoint",
+  );
+  must(must(must(b.tasks[1]).live).status).checkpointed = true;
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.find(
+      (w) => w.lane === "B",
+    )?.task,
+  ).toBe("P1-01");
+});
+it("resumes blocked work from an assignment-bound coordinator request", () => {
+  const b = board([task("P1-01", "B", "blocked")]);
+  const request: Board["messages"][number] = { ...message("resume", "P1-01") };
+  delete request.reviewCommit;
+  b.messages.push(request);
+  b.unanswered.push(request);
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.find(
+      (w) => w.lane === "B",
+    )?.reason,
+  ).toContain("Resume this task");
+});
+it("does not reuse requests across assignment or frozen revision identities", () => {
+  const b = board([task("P1-01", "B", "ready")]);
+  const request = { ...message("old", "P1-01"), assignmentId: "previous" };
+  b.messages.push(request);
+  b.unanswered.push(request);
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  request.assignmentId = new Date(now - 100000).toISOString();
+  request.reviewCommit = "c".repeat(40);
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+});
+it("schedules maximum identity lengths and large accepted history", () => {
+  const id = `T${"x".repeat(95)}`,
+    lane = `W${"x".repeat(63)}`;
+  const history = Array.from({ length: 1001 }, (_, i) => ({
+    ...task(`T-${i}`),
+    live: { ...task(`T-${i}`).live, accepted: { commit: "a".repeat(40) } },
+  }));
+  const b = board([...history, task(id, lane)]);
+  const c = {
+    ...config,
+    allowedTasks: [id],
+    lanes: {
+      coordinator: { enabled: true },
+      [lane]: { enabled: true, sessionEpoch: "e".repeat(64) },
+    },
+  };
+  const work = evaluateOrchestration(b, state(), c, now).work.find(
+    (w) => w.lane === lane,
+  );
+  expect(work?.task).toBe(id);
+  expect(work?.key).toMatch(/^work:[a-f0-9]{64}$/);
+});
+it("serializes a reassigned task against a running prior native key", () => {
+  const b = board([task("P1-01", "C")]);
+  must(must(b.tasks[0]).live).scope = {
+    version: 1,
+    paths: ["src"],
+  };
+  const s = state();
+  s.records.old = {
+    key: "old",
+    lane: "B",
+    task: "P1-01",
+    cwd: "/old",
+    status: "running",
+    reason: "",
+    seen: [],
+    runs: [],
+    noProgress: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+  expect(
+    evaluateOrchestration(b, s, config, now).queue.queue.find(
+      (q) => q.lane === "C",
+    )?.reason,
+  ).toBe("PATH_OVERLAP");
+});
+it("retains accepted dependency truth when dropping unrelated accepted history", () => {
+  const accepted = task("P1-01");
+  const b = board([
+    {
+      ...accepted,
+      live: {
+        ...accepted.live,
+        accepted: { commit: "a".repeat(40), sourceCommit: "b".repeat(40) },
+      },
+    },
+    task("P1-02"),
+  ]);
+  must(must(b.tasks[1]).live).scheduling = {
+    version: 1,
+    priority: "normal",
+    dependsOn: [
+      { taskId: "P1-01", require: "accepted", commit: "b".repeat(40) },
+    ],
+    reviewOf: null,
+    enqueuedAt: now - 1000,
+    updatedBy: "coordinator",
+  };
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.task === "P1-02",
+    ),
+  ).toBe(true);
+  must(must(must(b.tasks[0]).live).accepted).sourceCommit = "c".repeat(40);
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.task === "P1-02",
+    ),
+  ).toBe(false);
+});
+it("preserves more than 1000 relevant accepted dependency records without a controller fault", () => {
+  const metadata = (
+    dependsOn: { taskId: string; require: "accepted"; commit: null }[],
+  ) => ({
+    version: 1 as const,
+    priority: "normal" as const,
+    dependsOn,
+    reviewOf: null,
+    enqueuedAt: now - 1000,
+    updatedBy: "coordinator",
+  });
+  const dependency = (taskId: string) => ({
+    taskId,
+    require: "accepted" as const,
+    commit: null,
+  });
+  const accepted = (
+    id: string,
+    dependsOn: ReturnType<typeof dependency>[] = [],
+  ) => ({
+    ...task(id),
+    live: {
+      ...task(id).live,
+      accepted: { commit: "a".repeat(40) },
+      scheduling: metadata(dependsOn),
+    },
+  });
+  const leaves = Array.from({ length: 1024 }, (_, i) => accepted(`leaf-${i}`));
+  const parents = Array.from({ length: 64 }, (_, i) =>
+    accepted(
+      `parent-${i}`,
+      Array.from({ length: 16 }, (_, j) => dependency(`leaf-${i * 16 + j}`)),
+    ),
+  );
+  const b = board([...leaves, ...parents, task("P1-01")]);
+  must(must(b.tasks.at(-1)).live).scheduling = metadata(
+    parents.map((t) => dependency(t.id)),
+  );
+  const result = evaluateOrchestration(b, state(), config, now);
+  expect(result.work.some((work) => work.task === "P1-01")).toBe(false);
+  expect(result.queue.queue.find((row) => row.taskId === "P1-01")?.reason).toBe(
+    "SCHEDULE_INPUT_OVERFLOW",
+  );
+});
+it("uses compact message boundaries without dropping unseen messages at the same timestamp", () => {
+  const b = board([task("P1-01"), task("P1-02", "C", "ready")]);
+  const old = message("old", "P1-01", "coordinator", "answer");
+  b.messages.push(old);
+  const s = state();
+  const initial = evaluateOrchestration(b, s, config, now).work.find(
+    (w) => w.lane === "coordinator",
+  );
+  remember(s, must(initial), {
+    seen: must(initial).events.filter((event) => !event.startsWith("message:")),
+    seenMessagesThrough: old.at,
+    seenMessagesAtBoundary: [old.id],
+    finalState: "waiting",
+    waitingForEvent: true,
+  });
+  expect(
+    evaluateOrchestration(b, s, config, now).work.some(
+      (w) => w.lane === "coordinator",
+    ),
+  ).toBe(false);
+  const earlier = {
+    ...old,
+    id: "earlier",
+    at: new Date(Date.parse(old.at) - 1).toISOString(),
+  };
+  b.messages.push(earlier);
+  expect(
+    evaluateOrchestration(b, s, config, now).work.some(
+      (w) => w.lane === "coordinator",
+    ),
+  ).toBe(false);
+  b.messages.push({ ...old, id: "same-time-new" });
+  const next = evaluateOrchestration(b, s, config, now).work.find(
+    (w) => w.lane === "coordinator",
+  );
+  expect(next?.events).toContain("message:same-time-new");
+  expect(next?.events).toContain(`ready:P1-02:${"b".repeat(40)}`);
+  expect(next?.events).not.toContain("message:old");
+  expect(next?.events).not.toContain("message:earlier");
+});
+it("does not resume blocked work from a compacted answer but permits a new same-time answer", () => {
+  const b = board([task("P1-01", "B", "blocked")]);
+  const answer = message("old-answer", "P1-01", "B", "answer");
+  b.messages.push(answer);
+  const s = state();
+  const first = must(
+    evaluateOrchestration(b, s, config, now).work.find((w) => w.lane === "B"),
+  );
+  remember(s, first, {
+    seen: [],
+    seenMessagesThrough: answer.at,
+    seenMessagesAtBoundary: [answer.id],
+    waitingForEvent: true,
+    finalState: "waiting",
+  });
+  expect(
+    evaluateOrchestration(b, s, config, now).work.some((w) => w.lane === "B"),
+  ).toBe(false);
+  b.messages.push({ ...answer, id: "new-answer" });
+  expect(
+    evaluateOrchestration(b, s, config, now).work.find((w) => w.lane === "B")
+      ?.events,
+  ).toContain("message:new-answer");
+});
+it("bounds active frozen submissions without letting excluded old work fault authorized scheduling", () => {
+  const frozen = Array.from({ length: 1100 }, (_, i) =>
+    task(`old-${i}`, "B", "ready"),
+  );
+  const b = board([...frozen, task("P1-01", "C")]);
+  for (const old of frozen) {
+    const request = message(`fix-${old.id}`, old.id);
+    b.messages.push(request);
+    b.unanswered.push(request);
+  }
+  const result = evaluateOrchestration(
+    b,
+    state(),
+    { ...config, allowedTasks: ["P1-01"] },
+    now,
+  );
+  expect(result.work.some((work) => work.task === "P1-01")).toBe(true);
+  expect(result.work.some((work) => work.lane === "B")).toBe(false);
+  expect(
+    result.queue.queue.some((row) => row.reason === "SCHEDULE_INPUT_OVERFLOW"),
+  ).toBe(true);
+});
+it("bounds more than 1000 exact review requests with explicit overflow coverage", () => {
+  const b = board([task("P1-01", "B", "ready")]);
+  for (let i = 0; i < 1100; i++) {
+    const request = message(`review-${i}`, "P1-01", "reviewer");
+    b.messages.push(request);
+    b.unanswered.push(request);
+  }
+  const result = evaluateOrchestration(b, state(), config, now);
+  expect(result.work.filter((work) => work.lane === "reviewer")).toHaveLength(
+    1,
+  );
+  expect(
+    result.queue.queue.filter((row) => row.lane === "reviewer"),
+  ).toHaveLength(1100);
+  expect(
+    result.queue.queue.some((row) => row.reason === "SCHEDULE_INPUT_OVERFLOW"),
+  ).toBe(true);
+});
+it("counts retained and compacted hourly runs without deduplicating same-time turns", () => {
+  const b = board([task("P1-01")]);
+  const s = state();
+  const work = must(
+    evaluateOrchestration(b, s, config, now).work.find((w) => w.lane === "B"),
+  );
+  remember(s, work, { seen: [], runs: [now - 1000] });
+  s.retiredRuns = { B: [now - 1000, now - 1000, now - 3600000, now + 1] };
+  const limited = { ...config, maxRunsPerHour: 3 };
+  expect(
+    evaluateOrchestration(b, s, limited, now).queue.queue.find(
+      (row) => row.lane === "B",
+    )?.reason,
+  ).toBe("RATE_LIMITED");
+  s.retiredRuns.B = [now - 1000, now - 3600000, now + 1];
+  expect(
+    evaluateOrchestration(b, s, limited, now).work.some(
+      (work) => work.lane === "B",
+    ),
+  ).toBe(true);
+});
+it("resumes a blocked owner only from a valid scoped peer answer or coordinator decision", () => {
+  const b = board([task("P1-01", "B", "blocked")]);
+  const assignmentId = new Date(now - 100000).toISOString();
+  const question = {
+    ...message("peer-question", "P1-01", "C", "question"),
+    from: "B",
+    assignmentId,
+  };
+  const answer = {
+    ...message("peer-answer", "P1-01", "B", "answer"),
+    from: "C",
+    replyTo: question.id,
+    assignmentId,
+  };
+  b.messages.push(question, answer);
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.find(
+      (w) => w.lane === "B",
+    )?.reason,
+  ).toContain("Resume this task");
+  answer.assignmentId = "old-assignment";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  answer.assignmentId = assignmentId;
+  question.assignmentId = "old-assignment";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  question.assignmentId = assignmentId;
+  answer.replyTo = "unrelated";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  answer.replyTo = question.id;
+  question.from = "C";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  question.from = "B";
+  answer.to = "all";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(false);
+  question.to = "all";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (w) => w.lane === "B",
+    ),
+  ).toBe(true);
 });

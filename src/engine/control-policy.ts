@@ -3,6 +3,8 @@ import { validId } from "../project.ts";
 
 export interface Control {
   action: string;
+  generation?: string;
+  confirmCleanup?: boolean;
   lane?: Lane;
   at?: string;
   text?: string;
@@ -28,8 +30,18 @@ export function control(value: unknown): Control {
     (typeof c.at !== "string" || !Number.isFinite(Date.parse(c.at)))
   )
     return { action: "invalid" };
+  if (
+    c.confirmCleanup !== undefined &&
+    (c.confirmCleanup !== true ||
+      c.action !== "retry" ||
+      typeof c.text !== "string" ||
+      !c.text.trim())
+  )
+    return { action: "invalid" };
   return {
     action: c.action,
+    ...(c.confirmCleanup === true ? { confirmCleanup: true } : {}),
+    ...(typeof c.generation === "string" ? { generation: c.generation } : {}),
     ...(typeof c.lane === "string" ? { lane: c.lane as Lane } : {}),
     ...(typeof c.text === "string" ? { text: c.text } : {}),
     ...(typeof c.at === "string" ? { at: c.at } : {}),
@@ -49,6 +61,20 @@ export function validState(value: unknown): value is State {
     !s.commands.every((x) => typeof x === "string") ||
     !s.notices ||
     typeof s.notices !== "object"
+  )
+    return false;
+  if (
+    s.retiredRuns !== undefined &&
+    (!s.retiredRuns ||
+      typeof s.retiredRuns !== "object" ||
+      Array.isArray(s.retiredRuns) ||
+      Object.entries(s.retiredRuns).some(
+        ([lane, runs]) =>
+          !validId(lane) ||
+          !Array.isArray(runs) ||
+          runs.length > 60 ||
+          runs.some((n) => !Number.isSafeInteger(n) || n < 0),
+      ))
   )
     return false;
   for (const [key, r] of Object.entries(s.records))

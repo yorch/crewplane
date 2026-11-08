@@ -123,11 +123,13 @@ it("keeps ready authors frozen until an actual revision request", () => {
   const live = b.tasks[0]?.live;
   if (!live?.status) throw new Error("Fixture");
   live.status.state = "ready";
-  live.status.commit = "candidate";
+  live.status.commit = "b".repeat(40);
   const s = state();
   expect(plan(b, s, config).some((w) => w.lane === "B")).toBe(false);
   const request = {
     id: "revision",
+    assignmentId: live.assignment.at,
+    reviewCommit: live.status.commit,
     from: "coordinator",
     to: "B",
     kind: "request",
@@ -142,7 +144,12 @@ it("keeps ready authors frozen until an actual revision request", () => {
 });
 it("creates a fresh reviewer context per pinned request and respects run budgets and held lanes", () => {
   const b = board();
+  const source = b.tasks[0]?.live;
+  if (!source?.status) throw Error("Fixture");
+  source.status.state = "ready";
+  source.status.commit = "b".repeat(40);
   const request = {
+    reviewCommit: "b".repeat(40),
     id: "review-one",
     from: "coordinator",
     to: "reviewer",
@@ -289,10 +296,24 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
           "P1-06",
           "--text",
           "Synthetic pinned review",
+          "--commit",
+          "HEAD",
         ],
         { cwd: root, stdio: "pipe" },
       );
-      running = serve(initial, directory, controller.signal);
+      const { snapshot: readSnapshot } = await import("./read-model.ts");
+      const pinned = git("rev-parse", "HEAD").toString().trim();
+      running = serve(initial, directory, controller.signal, {
+        readBoard: async (root) => {
+          const actual = await readSnapshot(root);
+          const synthetic = board().tasks[0];
+          if (!synthetic?.live?.status) throw Error("Fixture");
+          synthetic.live.status.state = "ready";
+          synthetic.live.status.commit = pinned;
+          actual.tasks.push(synthetic);
+          return actual;
+        },
+      });
       const until = async (check: () => Promise<boolean>) => {
         const deadline = Date.now() + 7000;
         while (!(await check())) {
@@ -419,12 +440,17 @@ it("schedules visual only for pinned coordinator requests, separately from revie
   const b = board();
   const s = state();
   expect(plan(b, s, cfg).some((w) => w.lane === "visual")).toBe(false);
+  const source = b.tasks[0]?.live;
+  if (!source?.status) throw Error("Fixture");
+  source.status.state = "ready";
+  source.status.commit = "b".repeat(40);
   const request = {
+    reviewCommit: "b".repeat(40),
     id: "visual-one",
     from: "coordinator",
     to: "visual",
     kind: "request",
-    task: "P1-07",
+    task: "P1-06",
     replyTo: null,
     at: "2026-11-07T00:00:00Z",
     text: "Exact synthetic commit/route brief",

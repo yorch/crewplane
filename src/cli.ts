@@ -31,6 +31,8 @@ Usage: crewplane [--project PATH] COMMAND
   start                        Run the supervisor in the foreground
   status                       Show persisted supervisor state (never starts it)
   pause|resume|retry|nudge --lane ID [--text TEXT]
+  retry --lane ID --confirm-cleanup true --text NOTE
+                               Acknowledge inspected unverified descendants
   stop                         Request intentional stop and drain
   rollout                      Request an authorized drain; no automatic restart
   dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
@@ -194,9 +196,20 @@ async function main() {
   if (
     ["pause", "resume", "retry", "nudge", "stop", "rollout"].includes(command)
   ) {
-    const opts = options(rest, ["--lane", "--text"]);
+    const opts = options(rest, ["--lane", "--text", "--confirm-cleanup"]);
+    if (
+      opts["--confirm-cleanup"] !== undefined &&
+      opts["--confirm-cleanup"] !== "true"
+    )
+      throw new Error("Cleanup confirmation must be true");
     const value = control({
       action: command,
+      ...(opts["--confirm-cleanup"] === "true" ? { confirmCleanup: true } : {}),
+      generation: (
+        (await optional(join(directory, "state.json"))) as {
+          generation?: string;
+        } | null
+      )?.generation,
       ...(opts["--lane"] ? { lane: opts["--lane"] } : {}),
       ...(opts["--text"] ? { text: opts["--text"] } : {}),
       at: new Date().toISOString(),

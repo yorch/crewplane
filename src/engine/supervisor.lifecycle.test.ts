@@ -70,7 +70,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   await writeFile(join(directory, "config.json"), JSON.stringify(config));
   const load = async () =>
     JSON.parse(await readFile(join(directory, "state.json"), "utf8")) as State;
-  const command = async (action: string, lane = "coordinator") => {
+  const command = async (
+    action: string,
+    lane = "coordinator",
+    text = "Synthetic operator note",
+  ) => {
     await mkdir(join(directory, "commands"), { recursive: true });
     await writeFile(
       join(
@@ -80,7 +84,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       JSON.stringify({
         action,
         lane,
-        text: "Synthetic operator note",
+        text,
         at: new Date().toISOString(),
       }),
     );
@@ -224,7 +228,7 @@ it(
         });
         const s = await f.load();
         expect(s.records["coordinator:control"]?.reason).toContain(
-          "Result handling failed",
+          "No valid final result",
         );
         expect(JSON.stringify(s)).not.toContain("PRIVATE_SECRET_SENTINEL");
         expect(s.records["coordinator:control"]?.pid).toBeUndefined();
@@ -366,3 +370,359 @@ it(
     }),
   15000,
 );
+
+it("wakes an idle long interval immediately on abort", async () => {
+  const { idleWait } = await import("./supervisor.ts");
+  const controller = new AbortController();
+  const started = Date.now();
+  const waiting = idleWait(60000, controller.signal);
+  controller.abort();
+  await waiting;
+  expect(Date.now() - started).toBeLessThan(500);
+});
+
+it("recovers a transient state write failure without abandoning final persistence", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    const { publishJson } = await import("../io.ts");
+    const controller = new AbortController();
+    let writes = 0;
+    const running = serve(f.config, f.directory, controller.signal, {
+      writeState: async (path, value) => {
+        if (++writes === 2) throw new Error("Synthetic EIO");
+        await publishJson(path, value);
+      },
+    });
+    await expect(running).rejects.toThrow("Synthetic EIO");
+    expect(writes).toBeGreaterThan(2);
+    expect((await f.load()).running).toBe(false);
+    await expect(access(join(f.directory, "watcher.lock"))).rejects.toThrow();
+    await rm(f.root, { recursive: true, force: true });
+  }));
+
+it("classifies an empty nonzero native result as CLI failure", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    await writeFile(
+      f.config.binary,
+      "#!/usr/bin/env node\nfor await (const chunk of process.stdin) {}\nprocess.exit(7);\n",
+      { mode: 0o700 },
+    );
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal);
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "paused"
+          );
+        } catch {
+          return false;
+        }
+      });
+      const record = (await f.load()).records["coordinator:control"];
+      expect(record?.reason).toBe(
+        "CLI run failed; inspect private log and retry",
+      );
+      expect(record?.noProgress).toBe(0);
+      expect(record?.finalState).toBeUndefined();
+      expect(record?.inputTokensKnown).toBe(false);
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("classifies deadline with no result as timeout", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    await writeFile(
+      f.config.binary,
+      "#!/usr/bin/env node\nsetInterval(()=>{},1000);\n",
+      { mode: 0o700 },
+    );
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal, {
+      runTimeoutMs: 100,
+      cleanupGraceMs: 100,
+    });
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "paused"
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect((await f.load()).records["coordinator:control"]?.reason).toBe(
+        "Time budget reached",
+      );
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("persists child identity before delivering any prompt", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    await writeFile(
+      f.config.binary,
+      `#!/usr/bin/env node
+import {readFileSync,writeFileSync} from 'node:fs';
+for await(const chunk of process.stdin){}
+const state=JSON.parse(readFileSync(${JSON.stringify(join(f.directory, "state.json"))},'utf8'));
+const record=state.records['coordinator:control'];
+if(record.status!=='running'||record.pid!==process.pid||record.processGroupId!==process.pid)process.exit(9);
+console.log(JSON.stringify({type:'thread.started',thread_id:'00000000-0000-4000-8000-000000000001'}));
+const args=process.argv.slice(2);writeFileSync(args[args.indexOf('--output-last-message')+1],JSON.stringify({state:'ready',summary:'Durable launch confirmed'}));
+`,
+      { mode: 0o700 },
+    );
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal);
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "idle"
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect((await f.load()).records["coordinator:control"]?.summary).toBe(
+        "Durable launch confirmed",
+      );
+      expect((await f.load()).records["coordinator:control"]?.sessionId).toBe(
+        "00000000-0000-4000-8000-000000000001",
+      );
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("ignores a stop queued for an earlier supervisor generation", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    await mkdir(join(f.directory, "commands"), { recursive: true });
+    await writeFile(
+      join(f.directory, "commands/11111111-1111-4111-8111-111111111111.json"),
+      JSON.stringify({
+        action: "stop",
+        generation: "previous-generation",
+        at: new Date().toISOString(),
+      }),
+    );
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal);
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "idle"
+          );
+        } catch {
+          return false;
+        }
+      });
+      expect((await f.load()).running).toBe(true);
+      expect((await f.load()).draining).toBe(false);
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("requires explicit inspected-cleanup acknowledgement across every task in a lane", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    const state = initialState();
+    state.records.old = {
+      key: "old",
+      lane: "coordinator",
+      task: null,
+      cwd: f.root,
+      status: "paused",
+      pauseKind: "failure",
+      reason: "Unverified descendants",
+      cleanupUnverified: true,
+      seen: [],
+      runs: [],
+      noProgress: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    };
+    await writeFile(join(f.directory, "state.json"), JSON.stringify(state));
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal);
+    try {
+      await until(async () => {
+        try {
+          return (await f.load()).running;
+        } catch {
+          return false;
+        }
+      });
+      await f.command("retry");
+      await until(async () => !!(await f.load()).notices.coordinator?.length);
+      expect((await f.load()).records.old?.cleanupUnverified).toBe(true);
+      expect((await f.load()).records["coordinator:control"]).toBeUndefined();
+      await writeFile(
+        join(f.directory, "commands/22222222-2222-4222-8222-222222222222.json"),
+        JSON.stringify({
+          action: "retry",
+          lane: "coordinator",
+          confirmCleanup: true,
+          text: "Synthetic operator inspected and terminated escaped descendants",
+          generation: (await f.load()).generation,
+          at: new Date().toISOString(),
+        }),
+      );
+      await until(
+        async () =>
+          (await f.load()).records["coordinator:control"]?.status === "idle",
+      );
+      expect((await f.load()).records.old?.cleanupUnverified).toBeUndefined();
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("retries failed claimed checkout setup without binding the session to the primary checkout", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    const base = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: f.root,
+      encoding: "utf8",
+    }).trim();
+    const checkout = join(f.root, ".crewplane-local", "claimed");
+    f.config.allowedTasks = ["T1"];
+    f.config.lanes = {
+      coordinator: { enabled: false },
+      worker: { enabled: true },
+    };
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(f.config));
+    const synthetic = {
+      id: "T1",
+      title: "Synthetic setup",
+      owner: "worker",
+      phase: "test",
+      state: "assigned",
+      documentedStatus: "assigned",
+      goal: "Retry setup",
+      dependencies: "",
+      scheduling: { code: "ready", label: "ready" },
+      markdown: "Synthetic",
+      live: {
+        task: "T1",
+        assignment: {
+          owner: "worker",
+          baseCommit: base,
+          at: new Date().toISOString(),
+          text: "Synthetic setup retry",
+        },
+        claim: {
+          branch: "synthetic-claimed",
+          worktree: checkout,
+          at: new Date().toISOString(),
+        },
+        status: null,
+        accepted: null,
+      },
+    };
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal, {
+      readBoard: async (root) => {
+        const actual = await snapshot(root);
+        actual.tasks.push(synthetic);
+        return actual;
+      },
+    });
+    try {
+      await until(async () => {
+        try {
+          return Object.values((await f.load()).records).some(
+            (r) => r.lane === "worker" && r.status === "paused",
+          );
+        } catch {
+          return false;
+        }
+      });
+      const failed = Object.values((await f.load()).records).find(
+        (r) => r.lane === "worker",
+      );
+      expect(failed?.cwd).toBe("");
+      await mkdir(join(f.root, ".crewplane-local"), { recursive: true });
+      execFileSync(
+        "git",
+        ["worktree", "add", "-b", "synthetic-claimed", checkout, base],
+        { cwd: f.root, stdio: "pipe" },
+      );
+      await f.command("retry", "worker");
+      await until(async () =>
+        Object.values((await f.load()).records).some(
+          (r) => r.lane === "worker" && r.status === "idle" && !!r.sessionId,
+        ),
+      );
+      const resumed = Object.values((await f.load()).records).find(
+        (r) => r.lane === "worker",
+      );
+      expect(resumed?.key).toBe(failed?.key);
+      expect(resumed?.cwd).toBe(checkout);
+      expect(resumed?.sessionId).toBe("00000000-0000-4000-8000-000000000001");
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("keeps distinct notice-only coordinator waiting turns idle", () =>
+  withEnv(async () => {
+    const f = await fixture("waiting");
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal);
+    try {
+      await until(async () => {
+        try {
+          return (
+            (await f.load()).records["coordinator:control"]?.status === "idle"
+          );
+        } catch {
+          return false;
+        }
+      });
+      for (const [index, text] of [
+        "Synthetic operator routing notice",
+        "Synthetic watchdog attention notice",
+      ].entries()) {
+        await f.command("nudge", "coordinator", text);
+        await until(async () => {
+          const record = (await f.load()).records["coordinator:control"];
+          return (
+            (record?.runs.length ?? 0) === index + 2 &&
+            record?.status !== "running"
+          );
+        });
+        const record = (await f.load()).records["coordinator:control"];
+        expect(record?.status).toBe("idle");
+        expect(record?.noProgress).toBe(1);
+        expect(record?.pauseKind).toBeUndefined();
+        expect(record?.finalState).toBe("waiting");
+      }
+    } finally {
+      controller.abort();
+      await running;
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));

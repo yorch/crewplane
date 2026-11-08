@@ -60,10 +60,14 @@ export function schedulingReason(
       "dependency-blocked",
       "Owner explicitly reported blocked; see its task update",
     );
+  const freshness = Math.max(
+    45000,
+    (state?.scheduling?.intervalSeconds ?? 0) * 3000,
+  );
   if (
     !state ||
     !Number.isFinite(Date.parse(state.checkedAt)) ||
-    now - Date.parse(state.checkedAt) > 45000
+    now - Date.parse(state.checkedAt) > freshness
   )
     return result("unknown", "Scheduling observation unavailable or stale");
   if (state.draining || !state.running)
@@ -74,10 +78,12 @@ export function schedulingReason(
     entry &&
     queue &&
     Date.parse(state.checkedAt) >= queue.evaluatedAt &&
-    now - queue.evaluatedAt < 45000
+    now - queue.evaluatedAt < freshness
   ) {
     const labels: Record<string, string> = {
       RATE_LIMITED: "Hourly run budget exhausted",
+      SCHEDULE_INPUT_OVERFLOW:
+        "Scheduling window exceeded; task remains blocked with dependencies preserved",
       DEPENDENCY_WAITING: "Waiting for explicit task dependencies",
       DEPENDENCY_CYCLE: "Dependency cycle requires coordinator correction",
       DEPENDENCY_MISSING: "Missing dependency metadata",

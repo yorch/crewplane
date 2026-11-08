@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Config, Lane, State, Work } from "../contracts.ts";
+import type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
 import { coordinatorOf, reviewersOf } from "../project.ts";
 import {
   evaluateSchedule,
@@ -14,6 +14,10 @@ type Board = Awaited<ReturnType<typeof snapshot>>;
 
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const workKey = (key: string) =>
+  /^[A-Za-z0-9][A-Za-z0-9:_./-]{0,199}$/.test(key)
+    ? key
+    : `work:${digest(key)}`;
 const instant = (value: string | undefined, fallback: number) =>
   value && Number.isFinite(Date.parse(value)) ? Date.parse(value) : fallback;
 export function evaluateOrchestration(
@@ -23,6 +27,20 @@ export function evaluateOrchestration(
   now = Date.now(),
 ) {
   const coordinator = coordinatorOf(config);
+  const messageById = new Map(board.messages.map((m) => [m.id, m]));
+  const eventSeen = (record: RecordState | undefined, event: string) => {
+    if (record?.seen.includes(event)) return true;
+    if (!event.startsWith("message:")) return false;
+    const message = messageById.get(event.slice("message:".length));
+    if (!message || !record?.seenMessagesThrough) return false;
+    const at = Date.parse(message.at),
+      through = Date.parse(record.seenMessagesThrough);
+    return (
+      at < through ||
+      (at === through && !!record.seenMessagesAtBoundary?.includes(message.id))
+    );
+  };
+
   const laneNames = Object.keys(config.lanes);
   const active = board.tasks.filter((t) => t.live && !t.live.accepted);
   const backlog = board.tasks
@@ -54,16 +72,59 @@ export function evaluateOrchestration(
     const t = active.find((t) => t.id === task);
     const prior =
       state.records[
-        `${lane}:${task}:${t?.live?.assignment.at}${harnessKey(config.lanes[lane])}`
+        workKey(
+          `${lane}:${task}:${t?.live?.assignment.id ?? t?.live?.assignment.at}${harnessKey(config.lanes[lane])}`,
+        )
       ];
+    if (
+      !t?.live ||
+      m.assignmentId !== (t.live.assignment.id ?? t.live.assignment.at)
+    )
+      return false;
+    if (
+      t.live.status?.state === "ready" &&
+      m.reviewCommit !== t.live.status.commit
+    )
+      return false;
+    if (
+      t.live.status?.state !== "ready" &&
+      m.reviewCommit &&
+      t.live.status?.revisionRequestId !== m.id
+    )
+      return false;
+    if (
+      t.live.status?.state === "blocked" &&
+      eventSeen(prior, `message:${m.id}`)
+    )
+      return false;
     return !(
-      prior?.finalState === "ready" && prior.seen.includes(`message:${m.id}`)
+      prior?.finalState === "ready" && eventSeen(prior, `message:${m.id}`)
     );
   };
   const works: Work[] = [];
   const candidates: ScheduleCandidate[] = [];
+  // Keep transitive dependency evidence, while excluding unrelated completed history.
+  const taskById = new Map(board.tasks.map((t) => [t.id, t]));
+  const needed = new Set(active.map((t) => t.id));
+  for (const request of board.unanswered)
+    if (
+      request.kind === "request" &&
+      request.task &&
+      reviewersOf(config).includes(request.to)
+    )
+      needed.add(request.task);
+  const pending = [...needed];
+  for (let i = 0; i < pending.length; i++) {
+    for (const dependency of taskById.get(pending[i] as string)?.live
+      ?.scheduling?.dependsOn ?? []) {
+      if (!needed.has(dependency.taskId)) {
+        needed.add(dependency.taskId);
+        pending.push(dependency.taskId);
+      }
+    }
+  }
   const tasks: ScheduleTask[] = board.tasks
-    .filter((t) => t.live)
+    .filter((t) => t.live && needed.has(t.id))
     .map((t) => ({
       id: t.id,
       state: t.live?.accepted
@@ -80,10 +141,15 @@ export function evaluateOrchestration(
     enqueuedAt: number,
     schedulerTask = work.task ?? `${coordinator}:control`,
   ) => {
+    work.key = workKey(work.key);
     const old = state.records[work.key];
     // Never change a persisted native session's checkout or harness by choosing another task.
     if (old?.status === "running" || old?.status === "paused") return;
-    const fresh = work.events.some((event) => !old?.seen.includes(event));
+    const fresh = work.events.some((event) => !eventSeen(old, event));
+    // Only newly delivered message identities advance the completion watermark.
+    work.events = work.events.filter(
+      (event) => !event.startsWith("message:") || !eventSeen(old, event),
+    );
     const outboundWait = board.unanswered.some(
       (m) => m.from === work.lane && (!work.task || m.task === work.task),
     );
@@ -178,7 +244,8 @@ export function evaluateOrchestration(
           m.to === lane &&
           m.kind === "request" &&
           m.task &&
-          config.allowedTasks.includes(m.task),
+          config.allowedTasks.includes(m.task) &&
+          !!m.reviewCommit,
       )) {
         const key = `${lane}:${request.id}${suffix}`;
         const virtualId = `review:${request.id}`;
@@ -201,8 +268,6 @@ export function evaluateOrchestration(
           acceptedSourceCommit: null,
           metadata,
         });
-        // Legacy text-only briefs remain executable, but are explicitly unverified by
-        // the scheduler; never infer a reviewed SHA from a moving ready branch.
         const work = {
           lane,
           key,
@@ -213,31 +278,41 @@ export function evaluateOrchestration(
               .filter((m) => m.task === request.task)
               .map((m) => `message:${m.id}`),
           ],
-          reason: request.reviewCommit
-            ? "Complete the exact pinned review and answer its original thread"
-            : "Legacy review brief: verify the exact SHA in the original request; scheduler pin unavailable",
+          reason:
+            "Complete the exact pinned review and answer its original thread",
         };
-        add(
-          work,
-          request.reviewCommit ? "review" : "control",
-          instant(request.at, now),
-          virtualId,
-        );
+        add(work, "review", instant(request.at, now), virtualId);
       }
     } else {
       for (const t of active.filter((t) => t.live?.assignment.owner === lane)) {
-        const key = `${lane}:${t.id}:${t.live?.assignment.at}${suffix}`;
+        const key = workKey(
+          `${lane}:${t.id}:${t.live?.assignment.id ?? t.live?.assignment.at}${suffix}`,
+        );
         const status = t.live?.status?.state;
         const requests = board.unanswered.filter((m) =>
           pendingRevision(m, lane, t.id),
         );
-        const freshAnswer = incoming.some(
-          (m) =>
-            m.from === coordinator &&
-            m.kind === "answer" &&
-            m.task === t.id &&
-            !state.records[key]?.seen.includes(`message:${m.id}`),
-        );
+        const freshAnswer = incoming.some((m) => {
+          if (
+            m.kind !== "answer" ||
+            m.task !== t.id ||
+            eventSeen(state.records[key], `message:${m.id}`)
+          )
+            return false;
+          const assignmentId = t.live?.assignment.id ?? t.live?.assignment.at;
+          if (m.assignmentId && m.assignmentId !== assignmentId) return false;
+          const parent = m.replyTo ? messageById.get(m.replyTo) : undefined;
+          if (!parent) return m.from === coordinator && !m.replyTo;
+          if (parent.assignmentId && parent.assignmentId !== assignmentId)
+            return false;
+          return (
+            parent.from === lane &&
+            parent.task === t.id &&
+            ["question", "request"].includes(parent.kind) &&
+            (parent.to === m.from || parent.to === "all") &&
+            (m.to === lane || (m.to === "all" && parent.to === "all"))
+          );
+        });
         const anyRevision = board.unanswered.some(
           (m) =>
             m.task !== null &&
@@ -248,10 +323,15 @@ export function evaluateOrchestration(
                 other.id === m.task && other.live?.status?.state === "ready",
             ),
         );
+        const checkpointOnly =
+          status === "blocked" && anyRevision && !t.live?.status?.checkpointed;
         const resumeBlocked =
           status === "blocked" &&
-          !anyRevision &&
-          (freshAnswer || !!t.live?.status?.checkpointed);
+          (checkpointOnly ||
+            (!anyRevision &&
+              (freshAnswer ||
+                requests.length > 0 ||
+                !!t.live?.status?.checkpointed)));
         const frozen = status === "ready" || status === "blocked";
         if (frozen && !requests.length && !resumeBlocked) continue;
         const competing = active.filter(
@@ -289,13 +369,15 @@ export function evaluateOrchestration(
                 .filter((m) => m.task === t.id)
                 .map((m) => `message:${m.id}`),
             ],
-            reason: resumeBlocked
-              ? "Resume this task in its original checkout after a safe checkpoint or coordinator resolution"
-              : frozen
-                ? "Address the required correction in this original task checkout/session"
-                : checkpointRequests.length
-                  ? "A required correction is pending for an earlier submitted task. Finish a safe checkpoint, run agents checkpoint for THIS task, and end waiting; do not edit the other task from this session."
-                  : "Continue this independent explicit assignment",
+            reason: checkpointOnly
+              ? "A required correction is pending. Run agents checkpoint for THIS task and end waiting; do not edit the submitted task from this session."
+              : resumeBlocked
+                ? "Resume this task in its original checkout after a safe checkpoint or coordinator resolution"
+                : frozen
+                  ? "Address the required correction in this original task checkout/session"
+                  : checkpointRequests.length
+                    ? "A required correction is pending for an earlier submitted task. Finish a safe checkpoint, run agents checkpoint for THIS task, and end waiting; do not edit the other task from this session."
+                    : "Continue this independent explicit assignment",
           },
           resumeBlocked ? "resume" : frozen ? "revision" : "implementation",
           instant(requests[0]?.at ?? t.live?.assignment.at, now),
@@ -332,11 +414,66 @@ export function evaluateOrchestration(
       Object.values(state.records).some(
         (r) =>
           r.status === "running" &&
-          r.task !== candidate.taskId &&
-          overlaps(scope(r.task), scope(candidate.taskId)),
+          workKey(r.key) !== candidate.key &&
+          (r.task === candidate.taskId ||
+            overlaps(scope(r.task), scope(candidate.taskId))),
       )
     )
       candidate.pathsDisjoint = false;
+  // Project a bounded, dependency-complete scheduling window. Omitted work is
+  // explicitly blocked; truncation must never turn missing evidence into authority.
+  const schedulerTasks = new Map(tasks.map((task) => [task.id, task]));
+  const projectedTasks = new Map<string, ScheduleTask>();
+  const projectedCandidates: ScheduleCandidate[] = [];
+  const overflow: ScheduleCandidate[] = [];
+  const priorityOrder = [
+    "urgent-operational",
+    "gate-critical",
+    "normal",
+    "low",
+  ];
+  const ordered = [...candidates].sort(
+    (a, b) =>
+      Number(b.lane === coordinator) - Number(a.lane === coordinator) ||
+      Number(b.authorized) - Number(a.authorized) ||
+      priorityOrder.indexOf(
+        schedulerTasks.get(a.taskId)?.metadata?.priority ?? "normal",
+      ) -
+        priorityOrder.indexOf(
+          schedulerTasks.get(b.taskId)?.metadata?.priority ?? "normal",
+        ) ||
+      a.enqueuedAt - b.enqueuedAt ||
+      a.key.localeCompare(b.key),
+  );
+  for (const candidate of ordered) {
+    const required = new Map<string, ScheduleTask>();
+    const pendingIds = [candidate.taskId];
+    const visited = new Set<string>();
+    for (let index = 0; index < pendingIds.length; index++) {
+      const id = pendingIds[index] as string;
+      if (visited.has(id)) continue;
+      visited.add(id);
+      const task = schedulerTasks.get(id);
+      if (!task) continue;
+      if (!projectedTasks.has(id)) required.set(id, task);
+      if (projectedTasks.size + required.size > 1000) break;
+      pendingIds.push(
+        ...(task.metadata?.dependsOn.map((dependency) => dependency.taskId) ??
+          []),
+      );
+      if (task.metadata?.reviewOf)
+        pendingIds.push(task.metadata.reviewOf.taskId);
+    }
+    if (
+      projectedCandidates.length >= 1000 ||
+      projectedTasks.size + required.size > 1000
+    ) {
+      overflow.push(candidate);
+      continue;
+    }
+    for (const [id, task] of required) projectedTasks.set(id, task);
+    projectedCandidates.push(candidate);
+  }
   const result = evaluateSchedule({
     version: 1,
     now,
@@ -346,7 +483,7 @@ export function evaluateOrchestration(
       !!config.lanes[coordinator]?.enabled && config.maxParallel > 1,
     active: Object.values(state.records)
       .filter((r) => r.status === "running")
-      .map((r) => ({ key: r.key, lane: r.lane })),
+      .map((r) => ({ key: workKey(r.key), lane: r.lane })),
     lanes: laneNames.map((lane) => ({
       lane,
       enabled: config.lanes[lane]?.enabled ?? false,
@@ -357,15 +494,38 @@ export function evaluateOrchestration(
           r.status === "paused" &&
           (!r.task || active.some((t) => t.id === r.task)),
       ),
-      runsLastHour: Object.values(state.records)
-        .filter((r) => r.lane === lane)
-        .flatMap((r) => r.runs)
-        .filter((t) => t <= now && now - t < 3600000).length,
+      runsLastHour: [
+        ...Object.values(state.records)
+          .filter((r) => r.lane === lane)
+          .flatMap((r) => r.runs),
+        ...(state.retiredRuns?.[lane] ?? []),
+      ].filter((t) => t <= now && now - t < 3600000).length,
       maxRunsPerHour: config.maxRunsPerHour,
     })),
-    tasks,
-    candidates,
+    tasks: [...projectedTasks.values()],
+    candidates: projectedCandidates,
   });
+  result.queue.push(
+    ...overflow.map((candidate) => ({
+      key: candidate.key,
+      lane: candidate.lane,
+      taskId: candidate.taskId,
+      status: "blocked" as const,
+      reason: "SCHEDULE_INPUT_OVERFLOW",
+      position: null,
+      components: {
+        priority: 0,
+        aging: 0,
+        unblocks: 0,
+        review: false,
+        enqueue: candidate.enqueuedAt,
+      },
+      dependencyIds:
+        schedulerTasks
+          .get(candidate.taskId)
+          ?.metadata?.dependsOn.map((dependency) => dependency.taskId) ?? [],
+    })),
+  );
   const selectedScopes: (string[] | null)[] = [];
   result.selected = result.selected.filter((key) => {
     const candidate = candidates.find((c) => c.key === key);

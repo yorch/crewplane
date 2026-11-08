@@ -119,3 +119,8 @@ it("canonicalizes equivalent config order and distinguishes submitted work from 
   s.running = false;
   expect(schedulingReason(task, s, cfg, now).code).toBe("draining");
 });
+it("uses the loaded interval for scheduling observation freshness", () => {
+  const s = state();
+  s.scheduling = loadedScheduling({ ...cfg, intervalSeconds: 60 });
+  expect(schedulingReason(task, s, cfg, now + 50000).code).toBe("queued");
+});

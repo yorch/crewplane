@@ -6,5 +6,9 @@
   "planPath": "IMPLEMENTATION-PLAN.md",
   "statusPath": "docs/STATUS.md",
   "instructionsPath": "AGENTS.md",
-  "roadmapFormat": "relay"
+  "roadmapFormat": "relay",
+  "reviewerRoles": {
+    "R": "code",
+    "V": "visual"
+  }
 }

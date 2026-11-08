@@ -154,6 +154,8 @@ export interface HarnessStream {
   sessionId?: string;
   expectedCwd?: string;
   observedModel?: string;
+  inputTokensKnown?: boolean;
+  outputTokensKnown?: boolean;
   inputTokens: number;
   outputTokens: number;
   final?: FinalResult;
@@ -204,6 +206,12 @@ export function consumeEvent(
   }
   if (harness === "codex" && event.type === "turn.completed") {
     const usage = event.usage as Record<string, unknown> | undefined;
+    stream.inputTokensKnown ||=
+      Number.isSafeInteger(usage?.input_tokens) &&
+      (usage?.input_tokens as number) >= 0;
+    stream.outputTokensKnown ||=
+      Number.isSafeInteger(usage?.output_tokens) &&
+      (usage?.output_tokens as number) >= 0;
     stream.inputTokens += tokens(usage?.input_tokens);
     stream.outputTokens += tokens(usage?.output_tokens);
   }
@@ -219,6 +227,12 @@ export function consumeEvent(
         }
       | undefined;
     if (message?.role !== "assistant") return;
+    stream.inputTokensKnown ||=
+      Number.isSafeInteger(message.usage?.input) &&
+      (message.usage?.input as number) >= 0;
+    stream.outputTokensKnown ||=
+      Number.isSafeInteger(message.usage?.output) &&
+      (message.usage?.output as number) >= 0;
     stream.inputTokens += tokens(message.usage?.input);
     stream.outputTokens += tokens(message.usage?.output);
     if (message.model) {
