@@ -1,7 +1,6 @@
 import { constants } from "node:fs";
 import {
   lstat,
-  mkdir,
   open,
   readdir,
   realpath,
@@ -9,7 +8,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { publishJson } from "../io.ts";
+import { durableMkdir, publishJson } from "../io.ts";
 import { withProcessLock } from "../process-lock.ts";
 import { validId, validTaskId } from "../project.ts";
 import type { Harness } from "./harness.ts";
@@ -296,7 +295,7 @@ export async function createTraceStore(
       v > traceLimits[k as keyof TraceLimits]
     )
       throw Error("Invalid trace limit");
-  await mkdir(root, { recursive: true, mode: 0o700 });
+  await durableMkdir(root);
   if ((await lstat(root)).isSymbolicLink()) throw Error("Unsafe trace root");
   root = await realpath(root);
   const path = (id: string, suffix: string) => {
@@ -317,7 +316,9 @@ export async function createTraceStore(
     }
   }
   async function atomic(meta: TraceMeta) {
-    await publishJson(path(meta.runId, "meta.json"), meta);
+    await publishJson(path(meta.runId, "meta.json"), meta, {
+      directoryRoot: root,
+    });
   }
   function cleanMeta(v: unknown): TraceMeta {
     const m = v as TraceMeta;

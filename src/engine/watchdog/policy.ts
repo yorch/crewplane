@@ -10,7 +10,7 @@ export interface WatchdogInput {
     heartbeatAt: number | null;
     draining: boolean;
   };
-  children: Array<{ pid: number; alive: Liveness }>;
+  children: Array<{ pid: number | null; alive: Liveness; retained?: boolean }>;
   config: { loaded: string | null; disk: string | null };
   queue: Array<{
     id: string;
@@ -139,7 +139,10 @@ export function evaluateWatchdog(
       !Array.isArray(input.children) ||
       input.children.length > 64 ||
       input.children.some(
-        (c) => !Number.isInteger(c.pid) || c.pid <= 0 || !live(c.alive),
+        (c) =>
+          (c.pid !== null && (!Number.isInteger(c.pid) || c.pid <= 0)) ||
+          !live(c.alive) ||
+          (c.retained !== undefined && typeof c.retained !== "boolean"),
       )
     )
       throw 0;
@@ -275,8 +278,11 @@ export function evaluateWatchdog(
     else if (old(input.supervisor.heartbeatAt))
       add("supervisor-stale", null, input.supervisor.heartbeatAt);
     if (
-      input.supervisor.alive === "dead" &&
-      input.children.some((c) => c.alive !== "dead")
+      input.children.some(
+        (c) =>
+          (input.supervisor.alive === "dead" || c.retained === true) &&
+          c.alive !== "dead",
+      )
     )
       add("orphan-or-unknown-child");
     if (

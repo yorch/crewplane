@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, unlink, writeFile } from "node:fs/promises";
+import { lstat, open, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { durableMkdir } from "./io.ts";
 
 interface Owner {
   pid: number;
@@ -60,7 +61,7 @@ export async function withProcessLock<T>(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await durableMkdir(dirname(path));
   const lease: Owner = { pid: process.pid, token: randomUUID() },
     deadline = Date.now() + 10000;
   while (true) {

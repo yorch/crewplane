@@ -6,7 +6,6 @@ import {
   fchmodSync,
   fsyncSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -16,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { durableMkdir } from "../../io.ts";
 import { withProcessLock } from "../../process-lock.ts";
 import { validId as validAgentId } from "../../project.ts";
 import {
@@ -123,8 +123,8 @@ function safe(path: string, directory: boolean) {
     fail();
   return stat;
 }
-function privateDir(path: string) {
-  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+async function privateDir(path: string, root: string) {
+  await durableMkdir(path, { root });
   safe(path, true);
 }
 function readPrivate(path: string, max: number) {
@@ -221,7 +221,7 @@ async function openStore(
     ancestor = parent;
   }
   if (!existsSync(absolute)) {
-    mkdirSync(absolute, { recursive: true, mode: 0o700 });
+    await durableMkdir(absolute);
   }
   safe(absolute, true);
   if (realpathSync(absolute) !== absolute) fail();
@@ -494,9 +494,9 @@ async function openStore(
         retention: { omittedArtifacts: 0, reason: "none" },
       };
       if (!trim(runs, m, 0, true)) fail();
-      privateDir(join(absolute, m.task));
-      privateDir(join(absolute, m.task, m.runId));
-      privateDir(runPath(m));
+      await privateDir(join(absolute, m.task), absolute);
+      await privateDir(join(absolute, m.task, m.runId), absolute);
+      await privateDir(runPath(m), absolute);
       save(m);
       return structuredClone(m);
     },
@@ -553,9 +553,9 @@ async function openStore(
         bytes: contentBytes.length,
         sha256: hash(contentBytes),
       };
-      privateDir(join(runPath(m), a.scenario));
-      privateDir(join(runPath(m), a.scenario, a.browser));
-      privateDir(dirname(artifactPath(m, a)));
+      await privateDir(join(runPath(m), a.scenario), absolute);
+      await privateDir(join(runPath(m), a.scenario, a.browser), absolute);
+      await privateDir(dirname(artifactPath(m, a)), absolute);
       atomic(artifactPath(m, a), contentBytes);
       m.artifacts.push(a);
       save(m);

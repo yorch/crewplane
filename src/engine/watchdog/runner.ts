@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir } from "node:fs/promises";
+import { lstat, open, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { publishJson } from "../../io.ts";
+import { durableMkdir, publishJson } from "../../io.ts";
 import {
   coordinatorOf,
   discoverProject,
@@ -350,15 +350,29 @@ export async function readHealth(
     children: records
       .filter(
         (r) =>
-          r.status === "running" &&
-          (pidValue(r.processGroupId) !== null || pidValue(r.pid) !== null),
+          r.status === "running" ||
+          r.cleanupUnverified === true ||
+          pidValue(r.processGroupId) !== null ||
+          pidValue(r.pid) !== null,
       )
-      .map((r) => ({
-        pid: (pidValue(r.pid) ?? pidValue(r.processGroupId)) as number,
-        alive: pidValue(r.processGroupId)
+      .map((r) => {
+        const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
+        const observed = pidValue(r.processGroupId)
           ? observe(-(pidValue(r.processGroupId) as number))
-          : observe(pidValue(r.pid)),
-      })),
+          : pid === null
+            ? "unknown"
+            : observe(pid);
+        return {
+          ...(r.status !== "running" || r.cleanupUnverified === true
+            ? { retained: true }
+            : {}),
+          pid,
+          alive:
+            r.cleanupUnverified === true && observed === "dead"
+              ? ("unknown" as const)
+              : observed,
+        };
+      }),
     config: {
       loaded: fingerprint(object(state?.scheduling)?.fingerprint),
       disk,
@@ -426,12 +440,13 @@ export async function deliverNotice(
   ].sort();
   if (!codes.length) return;
   const safeDirectory = async (path: string) => {
-    await mkdir(path, { recursive: true, mode: 0o700 });
+    await durableMkdir(path);
     const st = await lstat(path);
     if (!st.isDirectory() || st.isSymbolicLink())
       throw Error("Unsafe notice directory");
   };
-  const atomicNotice = publishJson;
+  const atomicNotice = (path: string, value: unknown) =>
+    publishJson(path, value, { directoryRoot: store });
   const directory = join(store, "watchdog");
   await safeDirectory(directory);
   await atomicNotice(join(directory, "notice.json"), {

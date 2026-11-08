@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { publishJson } from "../../io.ts";
+import { durableMkdir, publishJson } from "../../io.ts";
 import { withProcessLock } from "../../process-lock.ts";
 import type {
   WatchdogInput,
@@ -56,11 +56,15 @@ async function readPrivate(path: string): Promise<string> {
     await handle.close();
   }
 }
-async function atomic(path: string, value: unknown): Promise<void> {
+async function atomic(
+  path: string,
+  value: unknown,
+  directoryRoot?: string,
+): Promise<void> {
   const data = `${JSON.stringify(value)}\n`;
   if (Buffer.byteLength(data) > 65536)
     throw new Error("Watchdog state too large");
-  await publishJson(path, value);
+  await publishJson(path, value, directoryRoot ? { directoryRoot } : {});
 }
 async function run(
   options: WatchdogOptions,
@@ -68,7 +72,7 @@ async function run(
 ): Promise<WatchdogResult | null> {
   const clock = options.clock ?? systemClock;
   if (options.signal.aborted) return null;
-  await mkdir(options.directory, { recursive: true, mode: 0o700 });
+  await durableMkdir(options.directory);
   const directoryStat = await lstat(options.directory);
   if (
     !directoryStat.isDirectory() ||
@@ -116,7 +120,7 @@ async function run(
         await rmdir(lease);
         await mkdir(lease, { mode: 0o700 });
       }
-      await atomic(ownerPath, owner);
+      await atomic(ownerPath, owner, options.directory);
     },
   );
   let ownsLease = false;

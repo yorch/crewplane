@@ -103,7 +103,11 @@ it("keeps partially shaped private snapshots unknown-safe", async () => {
       const result = await readHealth(store);
       expect(result.supervisor.alive).toBe("unknown");
       expect(result.config.loaded).toBeNull();
-      expect(result.children).toEqual([]);
+      expect(result.children).toEqual(
+        typeof decoded === "object" && decoded !== null && "pid" in decoded
+          ? [{ pid: null, alive: "unknown" }]
+          : [],
+      );
       expect(
         result.lanePauses?.every((pause) => pause.reason === "unknown"),
       ).toBe(true);
@@ -657,6 +661,67 @@ it("projects schedule overflow as configuration blocked while retaining real com
     expect(bounded.queue).toHaveLength(64);
     expect(bounded.queue.every((entry) => entry.state === "config")).toBe(true);
     expect(bounded.availableSignals).not.toContain("queue");
+  } finally {
+    await rm(store, { recursive: true, force: true });
+  }
+});
+
+it("reports paused retained process groups and identity-free unverified cleanup as orphan risks", async () => {
+  const store = await mkdtemp(join(tmpdir(), "watchdog-retained-child-"));
+  try {
+    await mkdir(join(store, "supervisor"), { recursive: true, mode: 0o700 });
+    const now = 900000;
+    await writeFile(
+      join(store, "supervisor/desired.json"),
+      JSON.stringify({ desiredRunning: true }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(store, "supervisor/state.json"),
+      JSON.stringify({
+        pid: 500,
+        checkedAt: new Date(now).toISOString(),
+        records: {
+          group: { lane: "B", status: "paused", pid: 501, processGroupId: 502 },
+          leader: { lane: "C", status: "paused", pid: 503 },
+          unknown: { lane: "D", status: "paused", cleanupUnverified: true },
+          unverifiedDead: {
+            lane: "E",
+            status: "paused",
+            pid: 504,
+            cleanupUnverified: true,
+          },
+          normal: { lane: "F", status: "running", pid: 505 },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const observed: Array<number | null> = [];
+    const input = await readHealth(store, now, (pid) => {
+      observed.push(pid);
+      return pid === -502 || pid === 500 || pid === 505 ? "alive" : "dead";
+    });
+    expect(observed).toContain(-502);
+    expect(observed).not.toContain(501);
+    expect(input.children).toEqual([
+      { pid: 501, alive: "alive", retained: true },
+      { pid: 503, alive: "dead", retained: true },
+      { pid: null, alive: "unknown", retained: true },
+      { pid: 504, alive: "unknown", retained: true },
+      { pid: 505, alive: "alive" },
+    ]);
+    const result = evaluateWatchdog(input, null, {
+      ...settings,
+      startupGraceMs: 0,
+    });
+    expect(result.codes).toContain("orphan-or-unknown-child");
+    expect(result.codes).not.toContain("input-unavailable");
+    const healthy = evaluateWatchdog(
+      { ...input, children: [{ pid: 505, alive: "alive" }] },
+      null,
+      { ...settings, startupGraceMs: 0 },
+    );
+    expect(healthy.codes).not.toContain("orphan-or-unknown-child");
   } finally {
     await rm(store, { recursive: true, force: true });
   }
