@@ -1,0 +1,18 @@
+# Crewplane status
+
+Updated 2026-11-08. Steps 1–5 are implemented and locally verified; no real project has been activated or migrated. The engine baseline is `b44221e` on main. The operating/validation documentation follows as a separate Conventional Commit.
+
+## Validation
+
+- Pinned Bun 1.4.1 application runtime/build and Node 26.11.1 Vitest development runtime. Package registry engine metadata was checked before pinning TypeScript 7.0.2, Biome 2.6.6, Vitest 5.1.0 and Bun types 1.4.1; frozen installation is supported by bun.lock.
+- Local complete quality gate passed: Biome with warnings treated as errors, strict type checking, 254 tests across 25 files, embedded production binary build and standalone acceptance. Subsequent CLI atomic-publication/primary-binding changes passed type/lint, focused discovery tests and the final native binary acceptance scenario; hosted CI verifies the committed tree independently.
+- Source regression fixtures cover scheduling/fairness/dependencies, claim and frozen-submission guards, checkpoints/corrections, session identity, budget/hold/retry controls, completion-before-lease-release, orphan detection, trace retention/privacy, watchdog saturation/cooldown, evidence hashes/retention/rechecks and usage-ledger semantics. Expectations are synthetic and independently specified.
+- Compiled executable acceptance passed natively on macOS ARM64 and in an isolated Linux ARM64 Docker container. Each run copies only the executable into a fixture tools directory; Node and Bun are absent from its PATH. External Git and a separately compiled fake harness remain available. The run creates two worktrees, exchanges a question/answer, performs pinned review and an author correction in the original session, integrates both submissions with linear history, serves embedded assets/traces, persists/reads PNG evidence, intentionally stops and recovers fail-closed from a simulated dead controller/identity-less run.
+- Sandboxed Chromium passed actual compiled-dashboard and graph checks. Dashboard viewports: 1440, 390 and 320 pixels; retained search/focus on refresh, dynamic custom-agent filters, no horizontal overflow or page errors. Screenshots were inspected; timestamp nulls and unconfigured-assigned agent visibility were corrected. Synthetic QA artifacts remain ignored under `.crewplane-local/qa`.
+- The first hosted push failed formatting because the initial inventory's formatting change was left for the documentation group. This handoff includes that correction. Native GitHub jobs install frozen dependencies, run all gates on Ubuntu/macOS and upload the executable with SHA-256 checksums. Their actual final outcomes must be read from GitHub Actions, not inferred from local success.
+
+## Remaining boundaries
+
+Volunteer Relay adoption is step 6 and is not authorized by extraction completion. Its source and live state remain untouched. No native provider invocation, credential check, production load, long-duration model supervision or real harness-version acceptance is claimed. Pi remains no-tools; Claude/OpenCode adapters are absent. Windows, signed/notarized releases, auto-update, multi-project management and SQLite migration remain open. Detailed usage ledger modules are extracted/tested, but automatic per-provider/cache accounting is not wired into the runtime/UI. Counters are retained reported fields, not billing totals.
+
+Task scope is coordination policy, not OS sandboxing or hostile multiuser authorization. Unknown scopes remain protocol-governed. Phase gates require explicit coordinator authorization, not interpretation of task prose. A stale board-mutation lock requires inspection. Watchdog is notice-only; intentional stops and explicit holds/failures are never silently overridden.

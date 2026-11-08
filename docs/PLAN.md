@@ -1,13 +1,15 @@
 # Extraction plan and status
 
-Foundation: complete — separate repository, MIT license, engineering rules, architecture proposal, inventory and minimal compilable CLI. No orchestration functionality has been extracted yet.
+Steps 1–5 are implemented. See [status and verification](STATUS.md) and [operating guide](USAGE.md). This is a standalone extraction baseline with synthetic acceptance, not certification of live harnesses/providers or production operation.
 
-1. Freeze extraction contracts and source provenance. Define project identity, configuration, tasks/claims/messages, agent roles, lifecycle, storage and harness capability interfaces. Introduce strict TypeScript, Biome, Vitest and CI with verified dependency versions.
-2. Extract existing file-store coordination and pure scheduler with regression tests. Use a Relay project profile, temporary repositories and fake harnesses. Preserve behavior before changing storage.
-3. Extract runtime and adapters, including process ownership, checkpoint/correction routing, budget enforcement and stop/recovery tests. Codex/pi capability limitations remain explicit.
-4. Extract dashboard, telemetry and independent watchdog through shared services. Embed assets. Retain loopback access controls and bounded private artifacts.
-5. Prove standalone operation: clean fixture project, no source/dependencies/Node/Bun installation; two independent tasks, worktrees, question/answer, review/correction, linear integration, intentional stop and simulated crash recovery. Test native macOS/Linux binaries.
-6. Adopt in Volunteer Relay through a separate PR; only then retire duplicate scripts. No automatic legacy-state migration or supervisor restart.
-7. Follow-ups: SQLite migration, more harnesses, native usage integration and global project overview. Each requires a scoped design and acceptance tests.
+| Step | Task  | Status           | Delivered                                                                                                                                               |
+| ---- | ----- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | CP-01 | Complete         | Shared project/run/board/adapter contracts, strict TypeScript, verified toolchain pins, Biome/Vitest and native macOS/Linux CI                          |
+| 2    | CP-02 | Complete         | File-store coordination, configurable roles/task paths/IDs, scope/dependency scheduling, claims, messages and frozen submissions                        |
+| 3    | CP-03 | Complete         | Supervisor, Codex/restricted pi adapters, worktrees, per-task sessions, controls, completion ownership and crash recovery                               |
+| 4    | CP-04 | Complete         | Embedded dashboard through a shared read model, monitor/watchdog, sanitized traces and bounded evidence storage/API                                     |
+| 5    | CP-05 | Complete locally | Standalone binary acceptance on macOS ARM64 and Linux ARM64, 254 source/browser tests, desktop/mobile visual checks; hosted results reported separately |
+| 6    | —     | Not started      | Adopt Crewplane in Volunteer Relay through a separate explicitly authorized change; only then retire duplicate scripts                                  |
+| 7    | —     | Deferred         | SQLite migration, additional harnesses, native cache/provider usage integration, global project overview and distribution signing                       |
 
-Next assignment: step 1 only. Do not mix storage redesign or new UX with behavioral extraction. Maintain a runnable baseline after each step. Initial skeleton is not evidence of scheduler or harness compatibility.
+All work uses one isolated extraction branch/worktree and explicit operator scope. No subagents, live models, application databases, legacy board adoption or production supervisor activation were required. Integration uses Conventional Commits and fast-forward only; the operator requested direct main publication.

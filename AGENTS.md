@@ -10,4 +10,4 @@ Use temporary repositories, fake harnesses and independently authored expected r
 
 Each implementation task uses its own branch/worktree with bounded paths. Coordinate shared interfaces before changing consumers. No subagents unless explicitly requested or delegated by a task. Handoffs report scope, validation, compatibility and unresolved limits.
 
-Use Conventional Commits. Keep Git history linear: rebase and fast-forward, or squash based on branch scope. Never create merge commits. Do not modify Volunteer Relay during extraction; project adoption is a separate reviewed change.
+Use Conventional Commits. Keep Git history linear: rebase and fast-forward, or squash based on branch scope. Never create merge commits. The operator requests direct main publication: fast-forward verified logical groups into main and push as work progresses. Do not modify Volunteer Relay during extraction; project adoption is a separate reviewed change.

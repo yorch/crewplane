@@ -1,6 +1,6 @@
 # Architecture proposal
 
-Status: proposed extraction boundaries; implementation decisions below distinguish defaults from unproven capabilities.
+Status: v1 extraction implemented. Decisions below distinguish delivered defaults from deferred capabilities; see docs/STATUS.md for actual verification.
 
 ## Defaults
 
