@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 import type { Config } from "./contracts.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
@@ -88,7 +89,7 @@ async function main() {
   }
   const [command = "--help", ...rest] = args;
   if (command === "--help" || command === "-h") return output(help);
-  if (command === "--version") return output("0.1.0");
+  if (command === "--version") return output(pkg.version);
   const ctx = (await agents(["init"], requested)) as {
     store: string;
     gitCommonDir: string;

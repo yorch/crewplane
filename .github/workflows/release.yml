@@ -1,0 +1,66 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux }
+          - { os: macos-latest, name: macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26.11.1
+      - run: bun install --frozen-lockfile
+      - name: Tag must match package.json
+        run: test "v$(bun -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Configure sandboxed Chromium on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile crewplane-chromium "%s/.cache/ms-playwright/**/chrome-headless-shell" flags=(unconfined) {\n  userns,\n}\n' "$HOME" > /tmp/crewplane-chromium.apparmor
+          sudo install -m 0644 /tmp/crewplane-chromium.apparmor /etc/apparmor.d/crewplane-chromium
+          sudo apparmor_parser -r /etc/apparmor.d/crewplane-chromium
+      - run: bun run verify
+        env:
+          TMPDIR: /tmp
+      - name: Package
+        run: |
+          arch="$(uname -m)"
+          asset="crewplane-${GITHUB_REF_NAME}-${{ matrix.name }}-${arch}"
+          mkdir -p release
+          cp dist/crewplane "release/${asset}"
+          (cd release && shasum -a 256 "${asset}" > "${asset}.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.name }}
+          path: release/*
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes --verify-tag
