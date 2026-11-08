@@ -1,7 +1,24 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { gitEnvironment } from "./environment.ts";
+
+/** Canonicalize existing ancestors without creating a store during discovery. */
+function canonicalStore(path: string): string {
+  let current = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return join(realpathSync(current), ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missing.push(basename(current));
+      current = parent;
+    }
+  }
+}
 export const validId = (value: unknown): value is string =>
   typeof value === "string" &&
   /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value) &&
@@ -153,8 +170,9 @@ export function discoverProject(cwd: string) {
     root,
     common,
     primary: realpathSync(primary),
-    store:
+    store: canonicalStore(
       process.env.CREWPLANE_COORD_DIR ||
-      join(realpathSync(primary), ".crewplane-state"),
+        join(realpathSync(primary), ".crewplane-state"),
+    ),
   };
 }

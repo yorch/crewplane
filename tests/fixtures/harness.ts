@@ -14,7 +14,11 @@ const cli = (...args: string[]) => {
       encoding: "utf8",
     });
     if (result.status === 0) return JSON.parse(result.stdout);
-    if (!result.stderr.includes("Board mutation busy"))
+    if (
+      !result.stderr.includes(
+        "Process lock unavailable; inspect ownership before retry",
+      )
+    )
       throw Error(result.stderr);
     awaitDelay(20);
   }

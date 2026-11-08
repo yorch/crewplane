@@ -112,7 +112,14 @@ it("accepts the source only after it is integrated into primary and serializes a
     const source = git(worker, "rev-parse", "HEAD");
     git(root, "merge", "--ff-only", source);
     const { store } = (await main(["init"], root)) as { store: string };
-    mkdirSync(join(store, "board-mutation.lock"));
+    writeFileSync(
+      join(store, "board-mutation.lock"),
+      JSON.stringify({
+        pid: process.pid,
+        token: "11111111-1111-4111-8111-111111111111",
+      }),
+      { mode: 0o600 },
+    );
     await expect(main(accept("ff", base), root)).rejects.toThrow(
       "Process lock unavailable; inspect ownership before retry",
     );
