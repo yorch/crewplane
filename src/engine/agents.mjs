@@ -400,6 +400,8 @@ export async function main(args = process.argv.slice(2), cwd = process.cwd()) {
     "claim",
     "checkpoint",
     "status",
+    "accept",
+    "release",
   ].includes(command);
   if (mutating) {
     try {
@@ -754,6 +756,11 @@ async function execute(command, o, ctx) {
     return { archive };
   }
   if (command === "accept") {
+    const primaryHead = git(["rev-parse", "HEAD"], ctx.primary);
+    ensure(
+      git(["rev-parse", "HEAD"], ctx.root) === primaryHead,
+      "Acceptance requires the current primary integration HEAD, not an unintegrated worktree tip",
+    );
     ensure(
       agent === coordinatorOf(ctx.policy),
       "Only the coordinator accepts integration",
