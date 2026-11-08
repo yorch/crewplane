@@ -1,11 +1,30 @@
 name: Release
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
   build:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -16,6 +35,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.1
@@ -24,7 +45,9 @@ jobs:
           node-version: 26.11.1
       - run: bun install --frozen-lockfile
       - name: Tag must match package.json
-        run: test "v$(bun -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: test "v$(bun -p 'require("./package.json").version')" = "$TAG"
       - run: node node_modules/@playwright/test/cli.js install --with-deps chromium
       - name: Configure sandboxed Chromium on Ubuntu
         if: runner.os == 'Linux'
@@ -36,9 +59,11 @@ jobs:
         env:
           TMPDIR: /tmp
       - name: Package
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
           arch="$(uname -m)"
-          asset="crewplane-${GITHUB_REF_NAME}-${{ matrix.name }}-${arch}"
+          asset="crewplane-${TAG}-${{ matrix.name }}-${arch}"
           mkdir -p release
           cp dist/crewplane "release/${asset}"
           (cd release && shasum -a 256 "${asset}" > "${asset}.sha256")
@@ -47,7 +72,7 @@ jobs:
           name: release-${{ matrix.name }}
           path: release/*
   publish:
-    needs: build
+    needs: [release-please, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -57,10 +82,8 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: release
-      - name: Create GitHub release
+      - name: Attach binaries to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" release/* \
-            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --generate-notes --verify-tag
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber

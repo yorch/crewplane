@@ -45,4 +45,4 @@ See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extra
 curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
 ```
 
-This downloads the latest [release](https://github.com/yorch/crewplane/releases) binary for Linux or macOS, verifies its SHA-256 checksum and installs it to `~/.local/bin` (override with `CREWPLANE_INSTALL_DIR`; pin with `CREWPLANE_VERSION=v0.2.0`). Binaries are published per tag by `bun run release <patch|minor|major>`. Signing and automatic updates are deferred.
+This downloads the latest [release](https://github.com/yorch/crewplane/releases) binary for Linux or macOS, verifies its SHA-256 checksum and installs it to `~/.local/bin` (override with `CREWPLANE_INSTALL_DIR`; pin with `CREWPLANE_VERSION=v0.2.0`). Binaries are published by the Release workflow when the Release Please PR is merged (see [releasing](docs/RELEASING.md)). Signing and automatic updates are deferred.
