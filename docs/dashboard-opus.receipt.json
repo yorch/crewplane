@@ -1,0 +1,14 @@
+{
+  "task": "CP-07",
+  "baseline": "26c5054",
+  "cliVersion": "2.1.319",
+  "canonicalModels": ["claude-opus-5-5"],
+  "tools": ["Read", "Glob", "Grep", "Edit", "Write"],
+  "permissionDenials": [],
+  "turns": 98,
+  "durationMs": 1657114,
+  "isError": false,
+  "subtype": "success",
+  "delegatedAgents": 0,
+  "validation": "Coordinator executed all commands and browser QA; the model session had no shell."
+}

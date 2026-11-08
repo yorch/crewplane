@@ -329,9 +329,21 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
         ) as State;
       await until(async () => {
         try {
-          return Object.values((await load()).records).some(
-            (r) => r.finishedAt,
+          const record = Object.values((await load()).records).find(
+            (r) => r.finishedAt && r.status !== "running",
           );
+          if (!record?.runId) return false;
+          const trace = JSON.parse(
+            await readFile(
+              join(
+                root,
+                ".crewplane-state/operational-traces",
+                `${record.runId}.meta.json`,
+              ),
+              "utf8",
+            ),
+          );
+          return trace.status === "finished";
         } catch {
           return false;
         }
