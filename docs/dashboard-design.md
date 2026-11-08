@@ -54,3 +54,5 @@ Hash values are parsed with `URLSearchParams`, restricted to a per-view allowlis
 ## Verification
 
 The interface was implemented with explicitly requested Claude CLI 2.1.319 and exact claude-opus-5-5; sanitized provenance is in dashboard-opus.receipt.json. The coordinator rebuilt embedded assets, corrected semantic filter groups and CSS ordering, then inspected screenshots of the compiled executable using an isolated synthetic busy project. All seven views were checked at 1440, 1024, 390 and 320 pixels with no document overflow, page errors or CSP errors. The browser suite checks navigation, filters, drill-down, model labels, polling and safe text rendering. A separate delayed-response run test covers three-page history and unique incremental timeline events; pagination intent is queued when a poll is already in flight. No live provider or project supervisor was started.
+
+Final verification: 324 tests across 33 files, Biome, strict TypeScript, compiled build and standalone/native acceptance passed locally. [Ubuntu/macOS CI at 975f07a](https://github.com/yorch/crewplane/actions/runs/42522166856) passed the same gate and uploaded executable/checksum artifacts.

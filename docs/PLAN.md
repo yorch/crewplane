@@ -16,4 +16,4 @@ The initial extraction used one isolated branch/worktree. CP-06 adds the explici
 
 CP-06: three exact-model Opus 5.5 reviews and all reported corrections are implemented. Final quality and native gates passed at d6eb2d3; hosted Ubuntu/macOS verification passed. CP-06 is complete. See docs/reviews/CP-06.md for findings, evidence and boundaries.
 
-CP-07: responsive dashboard redesign implemented with explicitly requested Claude CLI / exact Opus 5.5. Seven navigable views and detailed records replace the single long page; the read-only backend is unchanged. Local 324-test/full native gates passed; hosted CI pending. See docs/dashboard-design.md and docs/tasks/CP-07.md.
+CP-07: responsive dashboard redesign implemented with explicitly requested Claude CLI / exact Opus 5.5. Seven navigable views and detailed records replace the single long page; the read-only backend is unchanged. Local 324-test/full native gates and hosted Ubuntu/macOS verification passed. CP-07 is complete. See docs/dashboard-design.md and docs/tasks/CP-07.md.
