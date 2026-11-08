@@ -2161,3 +2161,71 @@ it("respects a live board mutation owner and recovers a killed lock holder", asy
     ).toEqual(["second"]);
   });
 });
+it("lets coordinator triage close an active assignment-pinned peer question", async () => {
+  await fixture(({ root, b }) => {
+    const assignment = assign(root);
+    ok(b, ...claim);
+    const question = ok(
+      b,
+      "send",
+      "--agent",
+      "B",
+      "--to",
+      "C",
+      "--kind",
+      "question",
+      "--task",
+      "P1-01",
+      "--text",
+      "Blocking peer decision",
+    );
+    const answer = ok(
+      root,
+      "send",
+      "--agent",
+      "coordinator",
+      "--to",
+      "B",
+      "--kind",
+      "answer",
+      "--reply-to",
+      question.id,
+      "--text",
+      "Coordinator resolves dependency",
+    );
+    expect(answer.task).toBe("P1-01");
+    expect(answer.assignmentId).toBe(assignment.id);
+    expect(
+      ok(root, "board").unanswered.some(
+        (message: { id: string }) => message.id === question.id,
+      ),
+    ).toBe(false);
+    ok(
+      root,
+      "release",
+      "--agent",
+      "coordinator",
+      "--task",
+      "P1-01",
+      "--text",
+      "Synthetic replacement",
+    );
+    assign(root);
+    expect(
+      cli(
+        root,
+        "send",
+        "--agent",
+        "coordinator",
+        "--to",
+        "B",
+        "--kind",
+        "answer",
+        "--reply-to",
+        question.id,
+        "--text",
+        "Stale triage reply",
+      ).code,
+    ).toBe(1);
+  });
+});

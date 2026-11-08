@@ -527,8 +527,20 @@ async function execute(command, o, ctx) {
         to === parent.from || (to === "all" && parent.to === "all"),
         "Reply to the original sender; broadcast only for an original broadcast",
       );
+      const parentAssignment = parent.task
+        ? await read(taskPath(ctx, parent.task, "assignment.json"), null)
+        : null;
+      const coordinatorTriage =
+        agent === coordinatorOf(ctx.policy) &&
+        o.kind === "answer" &&
+        parent.kind === "question" &&
+        parent.task &&
+        to === parent.from &&
+        parentAssignment?.owner === parent.from &&
+        parent.assignmentId === (parentAssignment.id ?? parentAssignment.at) &&
+        !(await read(taskPath(ctx, parent.task, "accepted.json"), null));
       ensure(
-        parent.to === agent || parent.to === "all",
+        parent.to === agent || parent.to === "all" || coordinatorTriage,
         "Message was addressed to another lane",
       );
       if (o.kind === "answer")

@@ -333,7 +333,12 @@ export function evaluateOrchestration(
             parent.from === lane &&
             parent.task === t.id &&
             ["question", "request"].includes(parent.kind) &&
-            (parent.to === m.from || parent.to === "all") &&
+            (parent.to === m.from ||
+              parent.to === "all" ||
+              (m.from === coordinator &&
+                parent.kind === "question" &&
+                parent.assignmentId === assignmentId &&
+                m.assignmentId === assignmentId)) &&
             (m.to === lane || (m.to === "all" && parent.to === "all"))
           );
         });
@@ -406,7 +411,16 @@ export function evaluateOrchestration(
           resumeBlocked ? "resume" : frozen ? "revision" : "implementation",
           instant(requests[0]?.at ?? t.live?.assignment.at, now),
         );
-        if (frozen && !resumeBlocked && competing.length) {
+        const claimBlocked =
+          !t.live?.claim &&
+          !t.live?.status &&
+          active.some(
+            (other) =>
+              other.id !== t.id &&
+              other.live?.assignment.owner === lane &&
+              other.live?.status?.state !== "ready",
+          );
+        if (claimBlocked || (frozen && !resumeBlocked && competing.length)) {
           const candidate = candidates.find((c) => c.key === key);
           if (candidate) candidate.ownershipValid = false;
         }

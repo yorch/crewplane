@@ -815,3 +815,53 @@ it("checkpoints the blocked writer ahead of a correction with a third unclaimed 
     ).toBe("P1-01");
   }
 });
+it("never schedules an unclaimed sibling while its lane claim would be refused", () => {
+  const b = board([
+    task("P1-01", "B", "ready"),
+    task("P1-02", "B", "blocked"),
+    task("P1-03", "B"),
+  ]);
+  const result = evaluateOrchestration(b, state(), config, now);
+  expect(result.queue.queue.find((row) => row.taskId === "P1-03")?.reason).toBe(
+    "OWNERSHIP_INVALID",
+  );
+  expect(result.work.some((work) => work.task === "P1-03")).toBe(false);
+  must(must(must(b.tasks[0]).live).status).state = "working";
+  const correction = evaluateOrchestration(b, state(), config, now);
+  expect(
+    correction.queue.queue.find((row) => row.taskId === "P1-03")?.reason,
+  ).toBe("OWNERSHIP_INVALID");
+  expect(correction.work.some((work) => work.task === "P1-03")).toBe(false);
+});
+it("continues the owner across turns after a coordinator closes a pinned peer question", () => {
+  const b = board([task("P1-01", "B", "blocked")]);
+  const question = {
+    ...message("triaged-question", "P1-01", "C", "question"),
+    from: "B",
+  };
+  const answer = {
+    ...message("triaged-answer", "P1-01", "B", "answer"),
+    replyTo: question.id,
+  };
+  b.messages.push(question, answer);
+  const s = state();
+  const resumed = must(
+    evaluateOrchestration(b, s, config, now).work.find(
+      (work) => work.lane === "B",
+    ),
+  );
+  remember(s, resumed, { finalState: "working", waitingForEvent: false });
+  must(must(must(b.tasks[0]).live).status).state = "working";
+  expect(
+    evaluateOrchestration(b, s, config, now).work.some(
+      (work) => work.lane === "B",
+    ),
+  ).toBe(true);
+  must(must(must(b.tasks[0]).live).status).state = "blocked";
+  answer.assignmentId = "stale-assignment";
+  expect(
+    evaluateOrchestration(b, state(), config, now).work.some(
+      (work) => work.lane === "B",
+    ),
+  ).toBe(false);
+});
