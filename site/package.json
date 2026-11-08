@@ -1,0 +1,17 @@
+{
+  "name": "crewplane-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "bun scripts/sync-docs.ts",
+    "dev": "bun scripts/sync-docs.ts && bunx --bun astro dev",
+    "build": "bun scripts/sync-docs.ts && bunx --bun astro build",
+    "preview": "bunx --bun astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.42.10",
+    "asciinema-player": "3.18.0",
+    "astro": "7.4.7"
+  }
+}

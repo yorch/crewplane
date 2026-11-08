@@ -1,0 +1,283 @@
+---
+import "../styles/landing.css";
+
+const base = import.meta.env.BASE_URL;
+const REPO = "https://github.com/yorch/crewplane";
+const install =
+  "curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh";
+const title = "Crewplane — local orchestration for coding agents";
+const description =
+  "Run coding agents in isolated Git worktrees with tasks, review, budgets, supervision and a dashboard. One executable, local-first, harness-agnostic.";
+
+const features = [
+  {
+    icon: "M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v4H4zM14 15h6v4h-6z",
+    title: "Isolated worktrees",
+    text: "Every task runs in its own Git worktree and branch. Writers get exclusive ownership of their scope, so agents never trample each other.",
+    wide: true,
+  },
+  {
+    icon: "M12 3v18M5 8l7-5 7 5M5 16l7 5 7-5",
+    title: "Harness-agnostic",
+    text: "Codex and pi adapters today. Capabilities and usage coverage are declared explicitly, never assumed.",
+  },
+  {
+    icon: "M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z",
+    title: "Controls that hold",
+    text: "Holds, run budgets and failed-run recovery cannot be bypassed. A stopped supervisor stays stopped.",
+  },
+  {
+    icon: "M4 5h16v11H9l-5 4z",
+    title: "Messages and review",
+    text: "Agents ask questions, answer, and hand off for review. Every thread is tied to its task and commit.",
+    wide: true,
+  },
+  {
+    icon: "M3 12h4l3-8 4 16 3-8h4",
+    title: "Read-only dashboard",
+    text: "Tasks, agents, runs, relationships and system health, served on loopback only. Observing never launches an agent.",
+  },
+  {
+    icon: "M7 3h10l4 4v14H3V3zM7 3v6h10",
+    title: "One executable",
+    text: "A compiled binary with the Bun runtime and dashboard assets inside. No Node, Bun or package install to run it.",
+  },
+];
+const steps = [
+  [
+    "Write task cards",
+    "Commit a card per task: owner, goal, allowed paths, dependencies.",
+  ],
+  [
+    "Approve explicitly",
+    "The coordinator scopes, assigns against a base commit and schedules. Reading a plan never grants authority.",
+  ],
+  [
+    "Supervise",
+    "Agents run in parallel under budgets and holds, each in a private worktree.",
+  ],
+  [
+    "Review and integrate",
+    "Reviewers answer on the thread. You decide what lands.",
+  ],
+];
+const guarantees = [
+  "Nothing runs until a task card is committed, scoped and approved.",
+  "Completion is persisted before process ownership is released.",
+  "Telemetry never stores secrets, raw reasoning or sensitive provider payloads.",
+  "No automatic merge, budget increase, provider login or legacy-state adoption.",
+  "Missing usage dimensions are reported as unknown, never as zero.",
+  "Local-first: the dashboard binds to 127.0.0.1 with Host and Origin checks.",
+];
+const shots = [
+  [
+    "overview",
+    "Overview",
+    "What needs attention now, and how the crew is doing.",
+  ],
+  ["tasks", "Tasks", "Board or list, filters, and a drill-down per task."],
+  [
+    "agents",
+    "Agents",
+    "Configured versus observed model, harness and process.",
+  ],
+  ["messages", "Messages", "Open questions and full thread context."],
+];
+const status = [
+  [
+    "Codex harness adapter",
+    "Extracted; covered with synthetic native events",
+    "ok",
+  ],
+  [
+    "pi harness adapter (no-tools)",
+    "Extracted; covered with synthetic native events",
+    "ok",
+  ],
+  [
+    "Dashboard, supervisor, watchdog",
+    "Verified locally and in hosted CI",
+    "ok",
+  ],
+  [
+    "Linux and macOS binaries",
+    "Published per tagged release with checksums",
+    "ok",
+  ],
+  [
+    "Real provider acceptance",
+    "Separate from extraction; not yet recorded",
+    "todo",
+  ],
+  ["Claude and OpenCode adapters", "Not delivered", "todo"],
+  ["Windows, signing, auto-update", "Not delivered", "todo"],
+];
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href={`${base}favicon.svg`} />
+    <link rel="canonical" href="https://yorch.github.io/crewplane/" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://yorch.github.io/crewplane/" />
+    <meta property="og:image" content="https://yorch.github.io/crewplane/og.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script is:inline>
+      try {
+        const t = localStorage.getItem("starlight-theme");
+        const dark = t ? t === "dark" : !matchMedia("(prefers-color-scheme: light)").matches;
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <header class="nav">
+      <a class="brand" href={base}><img src={`${base}favicon.svg`} alt="" width="26" height="26" />Crewplane</a>
+      <nav aria-label="Main">
+        <a href="#features">Features</a>
+        <a href="#how">How it works</a>
+        <a href="#status">Status</a>
+        <a href={`${base}docs/usage/`}>Docs</a>
+        <a href={REPO} rel="noopener">GitHub</a>
+        <button id="theme" type="button" aria-label="Toggle color theme"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Open source · MIT · macOS &amp; Linux</p>
+        <h1>Run a crew of coding agents.<br /><span class="grad">Keep your hands on the controls.</span></h1>
+        <p class="lede">Crewplane orchestrates coding agents across harnesses: tasks, isolated worktrees, messages, review, supervision and a dashboard, in one local executable.</p>
+        <div class="install">
+          <code id="cmd"><span class="prompt">$</span> {install}</code>
+          <button id="copy" type="button" data-text={install}>Copy</button>
+        </div>
+        <div class="cta">
+          <a class="btn primary" href={`${base}docs/usage/`}>Get started</a>
+          <a class="btn" href={REPO} rel="noopener">View on GitHub</a>
+        </div>
+      </section>
+
+      <section class="demo" aria-label="Terminal demo">
+        <div class="window">
+          <div class="bar"><i></i><i></i><i></i><span>crewplane — acme-api</span></div>
+          <div id="player" data-src={`${base}demo.cast`}></div>
+        </div>
+        <p class="caption">A real recording of the compiled binary supervising two agents. The agents are the repository's synthetic test harness, so no provider is called. Git's internal ref-probe messages are omitted.</p>
+      </section>
+
+      <section id="features" class="section">
+        <h2>Orchestration you can reason about</h2>
+        <p class="sub">Policy lives in the core and is independent of any harness, storage backend or UI.</p>
+        <div class="bento">
+          {features.map((f) => (
+            <article class:list={["card", { wide: f.wide }]}>
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={f.icon} /></svg>
+              <h3>{f.title}</h3>
+              <p>{f.text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="how" class="section">
+        <h2>From task card to reviewed commit</h2>
+        <ol class="steps">
+          {steps.map(([t, d], i) => (<li><span class="num">{i + 1}</span><h3>{t}</h3><p>{d}</p></li>))}
+        </ol>
+      </section>
+
+      <section id="dashboard" class="section">
+        <h2>See the whole crew at a glance</h2>
+        <p class="sub">A read-only cockpit on loopback. Screenshots below are the real dashboard from the demo project.</p>
+        <div class="tabs" role="tablist" aria-label="Dashboard views">
+          {shots.map(([id, label], i) => (<button role="tab" type="button" aria-selected={i === 0} data-shot={id}>{label}</button>))}
+        </div>
+        <figure class="shot">
+          {shots.map(([id, label, text], i) => (
+            <div class="pane" data-pane={id} hidden={i !== 0}>
+              <img src={`${base}shots/${id}.png`} alt={`${label} view of the Crewplane dashboard`} width="2880" height="1800" loading={i === 0 ? "eager" : "lazy"} />
+              <figcaption>{text}</figcaption>
+            </div>
+          ))}
+        </figure>
+      </section>
+
+      <section class="section split">
+        <div>
+          <h2>Safe by construction</h2>
+          <p class="sub">Autonomy is opt-in at every step. These are enforced behaviors, not conventions.</p>
+        </div>
+        <ul class="checks">
+          {guarantees.map((g) => (<li>{g}</li>))}
+        </ul>
+      </section>
+
+      <section id="status" class="section">
+        <h2>Honest status</h2>
+        <p class="sub">Crewplane is early. Here is what is delivered and what is not. Details in <a href={`${base}docs/status/`}>validation status</a>.</p>
+        <ul class="status">
+          {status.map(([name, note, kind]) => (
+            <li><span class:list={["dot", kind]} aria-label={kind === "ok" ? "Delivered" : "Not yet"}></span><strong>{name}</strong><span>{note}</span></li>
+          ))}
+        </ul>
+      </section>
+
+      <section class="final">
+        <h2>Try it on a throwaway repo</h2>
+        <div class="install">
+          <code><span class="prompt">$</span> {install}</code>
+          <button type="button" class="copy" data-text={install}>Copy</button>
+        </div>
+        <div class="cta"><a class="btn primary" href={`${base}docs/usage/`}>Read the operating guide</a></div>
+      </section>
+    </main>
+
+    <footer>
+      <span>© Crewplane contributors · MIT License</span>
+      <span><a href={REPO} rel="noopener">GitHub</a> · <a href={`${REPO}/releases`} rel="noopener">Releases</a> · <a href={`${base}docs/architecture/`}>Architecture</a></span>
+    </footer>
+
+    <script>
+      import * as AsciinemaPlayer from "asciinema-player";
+      import "asciinema-player/dist/bundle/asciinema-player.css";
+
+      const player = document.getElementById("player");
+      if (player) {
+        AsciinemaPlayer.create(player.dataset.src as string, player, {
+          cols: 104, rows: 30, fit: "width", theme: "dracula", idleTimeLimit: 1.5,
+          autoPlay: true, loop: true, preload: true, terminalFontSize: "13px",
+          poster: "npt:0:12",
+        });
+      }
+
+      for (const b of document.querySelectorAll<HTMLButtonElement>("button[data-text]")) {
+        b.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(b.dataset.text ?? ""); b.textContent = "Copied"; }
+          catch { b.textContent = "Press ⌘C"; }
+          setTimeout(() => { b.textContent = "Copy"; }, 1600);
+        });
+      }
+
+      const tabs = document.querySelectorAll<HTMLButtonElement>("[data-shot]");
+      for (const t of tabs) {
+        t.addEventListener("click", () => {
+          for (const o of tabs) o.setAttribute("aria-selected", String(o === t));
+          for (const p of document.querySelectorAll<HTMLElement>("[data-pane]")) p.hidden = p.dataset.pane !== t.dataset.shot;
+        });
+      }
+
+      document.getElementById("theme")?.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+        document.documentElement.dataset.theme = next;
+        try { localStorage.setItem("starlight-theme", next); } catch {}
+      });
+    </script>
+  </body>
+</html>
