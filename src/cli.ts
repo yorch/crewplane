@@ -140,6 +140,7 @@ async function main() {
       root,
       coordinator: policy.coordinator,
       reviewers: policy.reviewers,
+      reviewerRoles: policy.reviewerRoles,
     });
     const release = await acquire(directory);
     try {

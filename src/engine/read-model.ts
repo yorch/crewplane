@@ -3,7 +3,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Board, Config, LiveTask, State } from "../contracts.ts";
 import { relayPlannedTasks } from "../profiles/relay.ts";
-import { coordinatorOf, projectPolicy, reviewersOf } from "../project.ts";
+import {
+  coordinatorOf,
+  projectPolicy,
+  reviewerRoleOf,
+  reviewersOf,
+} from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { buildGraph, type GraphInput } from "./dashboard/graph-builder.ts";
 import { readHeadless } from "./dashboard/headless.ts";
@@ -216,11 +221,11 @@ export async function snapshot(root: string) {
       role:
         lane.lane === coordinatorOf(configured ?? policy)
           ? "Coordinator"
-          : lane.lane === reviewersOf(configured ?? policy)[0]
-            ? "Code review"
-            : lane.lane === reviewersOf(configured ?? policy)[1]
+          : reviewersOf(configured ?? policy).includes(lane.lane)
+            ? reviewerRoleOf(configured ?? policy, lane.lane) === "visual"
               ? "Browser QA"
-              : "Implementation",
+              : "Code review"
+            : "Implementation",
       harness: lane.observedHarness,
       observedModel: lane.observedModel,
       taskId: lane.task,

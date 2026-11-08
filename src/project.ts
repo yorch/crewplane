@@ -1,13 +1,21 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { gitEnvironment } from "./environment.ts";
 export const validId = (value: unknown): value is string =>
   typeof value === "string" &&
   /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(value) &&
-  !["__proto__", "constructor", "prototype", "all"].includes(value);
+  !Object.hasOwn(Object.prototype, value) &&
+  !["prototype", "all"].includes(value);
 export const validTaskId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
+export type ReviewerRole = "code" | "visual";
+export const reviewerRoleOf = (
+  config: Roles | null | undefined,
+  id: string,
+): ReviewerRole => config?.reviewerRoles?.[id] ?? "code";
 export interface Roles {
+  reviewerRoles?: Record<string, ReviewerRole>;
   coordinator?: string;
   reviewers?: string[];
 }
@@ -28,6 +36,7 @@ export const defaultPolicy: ProjectPolicy = {
   roadmapFormat: "none",
   coordinator: "coordinator",
   reviewers: ["reviewer", "visual"],
+  reviewerRoles: { visual: "visual" },
   tasksPath: "tasks",
   planPath: "PLAN.md",
   statusPath: "STATUS.md",
@@ -45,6 +54,12 @@ export function projectPolicy(root: string): ProjectPolicy {
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Invalid project policy");
   const p = { ...defaultPolicy, ...raw } as ProjectPolicy;
+  if (!("reviewerRoles" in raw))
+    p.reviewerRoles = Object.fromEntries(
+      Object.entries(defaultPolicy.reviewerRoles ?? {}).filter(
+        ([id]) => Array.isArray(p.reviewers) && p.reviewers.includes(id),
+      ),
+    );
   if (
     p.version !== 1 ||
     !["none", "relay"].includes(p.roadmapFormat ?? "none") ||
@@ -54,6 +69,16 @@ export function projectPolicy(root: string): ProjectPolicy {
     new Set([p.coordinator, ...p.reviewers]).size !== p.reviewers.length + 1
   )
     throw new Error("Invalid project roles");
+  if (
+    !p.reviewerRoles ||
+    typeof p.reviewerRoles !== "object" ||
+    Array.isArray(p.reviewerRoles) ||
+    Object.entries(p.reviewerRoles).some(
+      ([id, role]) =>
+        !p.reviewers?.includes(id) || !["code", "visual"].includes(role),
+    )
+  )
+    throw new Error("Invalid reviewer roles");
   for (const path of [
     p.tasksPath,
     p.planPath,
@@ -77,6 +102,7 @@ export function discoverProject(cwd: string) {
   const git = (...args: string[]) =>
     execFileSync("git", args, {
       cwd,
+      env: gitEnvironment(),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -106,7 +132,7 @@ export function discoverProject(cwd: string) {
       const actualCommon = execFileSync(
         "git",
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        { cwd: primary, encoding: "utf8" },
+        { cwd: primary, env: gitEnvironment(), encoding: "utf8" },
       ).trim();
       if (realpathSync(actualCommon) !== common)
         throw new Error("Primary binding belongs to another repository");

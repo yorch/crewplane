@@ -5,6 +5,7 @@ export type Lane = string;
 export interface Config {
   coordinator?: string;
   reviewers?: string[];
+  reviewerRoles?: Record<string, import("./project.ts").ReviewerRole>;
   version: 1;
   root: string;
   binary: string;
@@ -81,6 +82,7 @@ export interface Work {
 
 export interface Message {
   reviewCommit?: string;
+  assignmentId?: string;
   id: string;
   at: string;
   from: string;
@@ -94,7 +96,13 @@ export interface LiveTask {
   scope?: { version: 1; paths: string[] } | null;
   scheduling?: import("./engine/fair-scheduler.ts").Metadata | null;
   task: string;
-  assignment: { owner: string; baseCommit: string; at: string; text: string };
+  assignment: {
+    id?: string;
+    owner: string;
+    baseCommit: string;
+    at: string;
+    text: string;
+  };
   claim: { branch: string; worktree: string; at: string } | null;
   status: {
     state: string;
@@ -102,6 +110,8 @@ export interface LiveTask {
     at: string;
     commit: string | null;
     checkpointed?: boolean;
+    revisionRequestId?: string;
+    revisionCommit?: string;
   } | null;
   accepted: {
     commit: string;

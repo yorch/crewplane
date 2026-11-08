@@ -1,0 +1,12 @@
+{
+  "baseline": "eb246ed",
+  "cliVersion": "2.1.319",
+  "canonicalModels": ["claude-opus-5-5"],
+  "tools": ["Read", "Glob", "Grep"],
+  "permissionDenials": [],
+  "turns": 69,
+  "durationMs": 904816,
+  "isError": false,
+  "subtype": "success",
+  "delegatedAgents": 0
+}
