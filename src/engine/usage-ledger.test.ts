@@ -157,6 +157,11 @@ describe("verified usage", () => {
       { ...event(), at: "2026-02-30T00:00:00Z" },
     ])
       expect(() => validateUsageEvent(bad)).toThrow();
+    for (const harness of ["claude", "opencode"] as const)
+      expect(validateUsageEvent(event({ harness })).harness).toBe(harness);
+    expect(() =>
+      validateUsageEvent({ ...event(), harness: "unknown" }),
+    ).toThrow();
     expect(() =>
       aggregateUsage([
         event({ input: Number.MAX_SAFE_INTEGER }),

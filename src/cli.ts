@@ -57,6 +57,18 @@ const optional = async (path: string) => {
     throw new Error("Invalid private state; inspect before recovery");
   }
 };
+const lanePermissions = (lane: Config["lanes"][string]) => {
+  switch (lane.harness ?? "codex") {
+    case "pi":
+      return "no-tools";
+    case "claude":
+      return `permission-mode:${lane.claudePermissionMode}`;
+    case "opencode":
+      return lane.opencodeAuto === true ? "auto-approve" : "harness-configured";
+    default:
+      return "harness-controlled";
+  }
+};
 const readConfig = async (directory: string) =>
   validateConfig((await optional(join(directory, "config.json"))) as Config);
 function options(args: string[], allowed: string[]) {
@@ -178,8 +190,7 @@ async function main() {
             id,
             harness: lane.harness ?? "codex",
             capabilities: harnessCapabilities[lane.harness ?? "codex"],
-            permissions:
-              lane.harness === "pi" ? "no-tools" : "harness-controlled",
+            permissions: lanePermissions(lane),
             model: lane.piModel ?? lane.model ?? null,
           }))
         : [],

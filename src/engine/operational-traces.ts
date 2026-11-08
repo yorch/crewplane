@@ -11,7 +11,7 @@ import { join, resolve } from "node:path";
 import { durableMkdir, publishJson } from "../io.ts";
 import { withProcessLock } from "../process-lock.ts";
 import { validId, validTaskId } from "../project.ts";
-import type { Harness } from "./harness.ts";
+import { type Harness, validHarness, validSessionId } from "./harness.ts";
 
 export const traceIdPattern =
   /^\d{13}-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -160,6 +160,25 @@ function project(
       .slice(0, 8),
   };
 }
+const traceTools: Record<string, string> = {
+  bash: "bash",
+  shell: "bash",
+  read: "read",
+  write: "write",
+  edit: "edit",
+  multiedit: "edit",
+  patch: "apply_patch",
+  apply_patch: "apply_patch",
+  grep: "grep",
+  glob: "find",
+  find: "find",
+  ls: "ls",
+  list: "ls",
+};
+const traceTool = (value: unknown) =>
+  typeof value === "string"
+    ? (traceTools[value.toLowerCase()] ?? "other-tool")
+    : "other-tool";
 export function nativeTrace(
   harness: Harness,
   event: Record<string, unknown>,
@@ -167,9 +186,107 @@ export function nativeTrace(
   const channel = "stdout" as const;
   if (
     (harness === "codex" && event.type === "thread.started") ||
-    (harness === "pi" && event.type === "session")
+    (harness === "pi" && event.type === "session") ||
+    (harness === "claude" &&
+      event.type === "system" &&
+      event.subtype === "init") ||
+    (harness === "opencode" && event.type === "step_start")
   )
     return [{ kind: "session", channel }];
+  if (harness === "claude") {
+    if (event.type === "assistant" || event.type === "user") {
+      const message = event.message as
+        | { content?: Array<Record<string, unknown>> }
+        | undefined;
+      const out: TraceInput[] = [];
+      for (const block of message?.content ?? []) {
+        if (block.type === "tool_use")
+          out.push({
+            kind: "tool-start",
+            channel,
+            tool: traceTool(block.name),
+            status: "running",
+          });
+        else if (block.type === "tool_result")
+          out.push({
+            kind: "tool-finish",
+            channel,
+            tool: "other-tool",
+            status: block.is_error === true ? "failed" : "succeeded",
+          });
+        else if (block.type === "text" && event.type === "assistant")
+          out.push({ kind: "assistant", channel });
+      }
+      return out;
+    }
+    if (event.type === "result") {
+      const u = event.usage as Record<string, unknown> | undefined;
+      const usage: TraceInput[] = [
+        {
+          kind: "usage",
+          channel,
+          ...(typeof u?.input_tokens === "number"
+            ? { inputTokens: u.input_tokens }
+            : {}),
+          ...(typeof u?.output_tokens === "number"
+            ? { outputTokens: u.output_tokens }
+            : {}),
+        },
+      ];
+      if (event.is_error === true || event.subtype !== "success")
+        usage.push({ kind: "error", channel });
+      return usage;
+    }
+    return [];
+  }
+  if (harness === "opencode") {
+    const part = event.part as Record<string, unknown> | undefined;
+    if (event.type === "text") return [{ kind: "assistant", channel }];
+    if (event.type === "tool_use") {
+      const state = part?.state as Record<string, unknown> | undefined;
+      const status = state?.status;
+      if (status === "completed")
+        return [
+          {
+            kind: "tool-finish",
+            channel,
+            tool: traceTool(part?.tool),
+            status: "succeeded",
+          },
+        ];
+      if (status === "error" || status === "failed")
+        return [
+          {
+            kind: "tool-finish",
+            channel,
+            tool: traceTool(part?.tool),
+            status: "failed",
+          },
+        ];
+      // Running, pending and unknown states must not read as a success.
+      return [
+        {
+          kind: "tool-start",
+          channel,
+          tool: traceTool(part?.tool),
+          status: "running",
+        },
+      ];
+    }
+    if (event.type === "step_finish") {
+      const t = part?.tokens as Record<string, unknown> | undefined;
+      return [
+        {
+          kind: "usage",
+          channel,
+          ...(typeof t?.input === "number" ? { inputTokens: t.input } : {}),
+          ...(typeof t?.output === "number" ? { outputTokens: t.output } : {}),
+        },
+      ];
+    }
+    if (event.type === "error") return [{ kind: "error", channel }];
+    return [];
+  }
   if (harness === "pi") {
     if (
       event.type === "tool_execution_start" ||
@@ -327,7 +444,7 @@ export async function createTraceStore(
       !traceIdPattern.test(m.runId) ||
       !validId(m.lane) ||
       !(m.task === null || validTaskId(m.task)) ||
-      !["codex", "pi"].includes(m.harness) ||
+      !validHarness(m.harness) ||
       !statuses.includes(m.status) ||
       !Number.isFinite(Date.parse(m.startedAt))
     )
@@ -338,10 +455,7 @@ export async function createTraceStore(
       lane: m.lane,
       task: m.task,
       harness: m.harness,
-      sessionId:
-        typeof m.sessionId === "string" && /^[a-f0-9-]{36}$/.test(m.sessionId)
-          ? m.sessionId
-          : null,
+      sessionId: validSessionId(m.harness, m.sessionId) ? m.sessionId : null,
       startedAt: m.startedAt,
       status: m.status,
       events: bounded(m.events, limits.maxEvents) ?? 0,
@@ -609,7 +723,7 @@ export async function createTraceStore(
         return {
           emit,
           session(id: string) {
-            if (/^[a-f0-9-]{36}$/.test(id)) meta.sessionId = id;
+            if (validSessionId(meta.harness, id)) meta.sessionId = id;
           },
           async finish(status: "finished" | "paused", finalState: unknown) {
             await emit({

@@ -8,7 +8,7 @@ File-store protocol v1 has a Crewplane namespace and canonical Git common-direct
 
 FAIR-V1 consumes explicit candidates, dependencies, role identity, active work, budgets and holds and returns reasons for selected/blocked/capacity states. The model does not choose executable eligibility. Phase gating is explicit coordinator authorization; task prose does not become authority.
 
-Harness adapters consume native stream events into bounded session/model/usage/final-result observations. Cross-harness or epoch resume is rejected. A final state is one of working/waiting/ready/needs_operator, with a bounded summary. Schema versions and session identity remain explicit. Completion and trace settlement are part of process ownership.
+Harness adapters (Codex, no-tools Pi, Claude Code and OpenCode) consume native stream events into bounded session/model/usage/final-result observations and declare resume, native-versus-prompted structured result, tool policy, observed model/cwd and partial usage explicitly. Session identity is harness-specific: a UUID for Codex, Pi and Claude Code, and `ses_` plus alphanumerics for OpenCode. Cross-harness, cross-epoch and malformed identities are rejected. A final state is one of working/waiting/ready/needs_operator, with a bounded summary. Schema versions and session identity remain explicit. Completion and trace settlement are part of process ownership.
 
 Operational trace, usage and evidence modules retain versioned records and capacity limits. Logical evidence route aliases replace Relay's product-specific path whitelist. Usage coverage distinguishes unknown dimensions from measured values; the detailed ledger is not yet connected to all runtime providers.
 

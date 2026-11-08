@@ -53,7 +53,7 @@ const ENUM_PARAMS = {
   layout: ["board", "list"],
   filter: ["open", "all"],
   status: ["running", "stale", "paused", "idle", "standby", "unknown"],
-  harness: ["codex", "pi"],
+  harness: ["codex", "pi", "claude", "opencode"],
   graph: ["communication", "dependencies"],
 };
 const SELECTION_PARAM = {

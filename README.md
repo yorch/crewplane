@@ -35,7 +35,7 @@ crewplane watchdog start
 
 `crewplane stop` requests intentional drain; `status` reports persistence and process observations. Inspection does not launch agents. No automatic integration, controller replacement, budget increase or legacy-state adoption occurs.
 
-Codex and restrictive no-tools pi adapters are extracted and covered with synthetic native events. Real harness/provider acceptance is separate; Claude/OpenCode, Windows, signing and automatic updates are not delivered. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
+Codex, restrictive no-tools pi, Claude Code and OpenCode adapters are covered with synthetic native events and lifecycle fixtures. Claude/OpenCode compatibility is limited to the locally probed CLI protocols; real provider acceptance, Windows, signing and automatic updates remain separate. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
 
 See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extraction provenance](docs/PROVENANCE.md), and [plan](docs/PLAN.md). See [operating guide](docs/USAGE.md) for configuration and workflow examples, and [validation status](docs/STATUS.md) for evidence and limits.
 

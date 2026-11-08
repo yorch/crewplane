@@ -4,6 +4,7 @@ import { validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
 import { createEvidenceStore } from "./evidence/store.ts";
+import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
 import { snapshot } from "./read-model.ts";
 
@@ -120,10 +121,7 @@ export function createDashboard(root: string) {
             const lane = url.searchParams.get("lane"),
               harness = url.searchParams.get("harness"),
               before = url.searchParams.get("before");
-            if (
-              (lane && !validId(lane)) ||
-              (harness && !["codex", "pi"].includes(harness))
-            )
+            if ((lane && !validId(lane)) || (harness && !validHarness(harness)))
               throw Error("Invalid filter");
             value = await store.list({
               ...(lane ? { lane } : {}),

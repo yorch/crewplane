@@ -194,7 +194,7 @@
           <section id="view-runs" class="view" aria-labelledby="view-title" hidden>
             <fieldset class="toolbar" aria-label="Filter runs">
               <label class="field">Agent<select id="run-lane"><option value="">All agents</option></select></label>
-              <label class="field">Harness<select id="run-harness"><option value="">All harnesses</option><option>codex</option><option>pi</option></select></label>
+              <label class="field">Harness<select id="run-harness"><option value="">All harnesses</option><option>codex</option><option>pi</option><option>claude</option><option>opencode</option></select></label>
               <label class="field field-grow">Task<input id="run-task" placeholder="Task ID" autocomplete="off" /></label>
             </fieldset>
             <div class="runs-split">

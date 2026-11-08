@@ -10,10 +10,13 @@ Steps 1–5 are implemented. See [status and verification](STATUS.md) and [opera
 | 4    | CP-04 | Complete    | Embedded dashboard through a shared read model, monitor/watchdog, sanitized traces and bounded evidence storage/API                                                                 |
 | 5    | CP-05 | Complete    | Standalone binary acceptance on macOS ARM64 and Linux ARM64, 318 source/browser tests, desktop/mobile visual checks; hosted Ubuntu/macOS gates and binary/checksum artifacts passed |
 | 6    | —     | Not started | Adopt Crewplane in Volunteer Relay through a separate explicitly authorized change; only then retire duplicate scripts                                                              |
-| 7    | —     | Deferred    | SQLite migration, additional harnesses, native cache/provider usage integration, global project overview and distribution signing                                                   |
+| 7    | —     | Deferred    | SQLite migration, harnesses beyond Claude/OpenCode, native cache/provider usage integration, global project overview and distribution signing                                       |
+| 8    | CP-08 | Complete    | Claude Code and OpenCode adapters with explicit capabilities, harness-specific session identity, synthetic stream/lifecycle fixtures and dashboard/trace filter coverage            |
 
 The initial extraction used one isolated branch/worktree. CP-06 adds the explicitly requested read-only Claude Opus 5.5 reviews and three explicitly authorized implementation agents in isolated worktrees. No application databases, legacy board adoption or production supervisor activation were required. Integration uses Conventional Commits and fast-forward only; the operator requested direct main publication.
 
 CP-06: three exact-model Opus 5.5 reviews and all reported corrections are implemented. Final quality and native gates passed at d6eb2d3; hosted Ubuntu/macOS verification passed. CP-06 is complete. See docs/reviews/CP-06.md for findings, evidence and boundaries.
 
 CP-07: responsive dashboard redesign implemented with explicitly requested Claude CLI / exact Opus 5.5. Seven navigable views and detailed records replace the single long page; the read-only backend is unchanged. Local 324-test/full native gates and hosted Ubuntu/macOS verification passed. CP-07 is complete. See docs/dashboard-design.md and docs/tasks/CP-07.md.
+
+CP-08: Claude Code and OpenCode adapters added without changing the Codex or no-tools Pi protocols. Claude uses its native schema-enforced `structured_output` and UUID session pinning/resume; OpenCode uses a prompted JSON result and its `ses_` session identity. Capability discovery now declares resume, structured-result mode, tool policy, observed model/cwd and partial usage. Probed CLI protocols are local evidence only; no supervisor, provider workflow or real project was activated. See docs/tasks/CP-08.md.

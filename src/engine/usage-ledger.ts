@@ -10,7 +10,7 @@ export type UsageEvent = {
   run: string;
   session: string;
   turn: string;
-  harness: "codex" | "pi";
+  harness: "codex" | "pi" | "claude" | "opencode";
   provider: string | null;
   observedModel: string | null;
   configuredModel: string | null;
@@ -37,7 +37,7 @@ export type UsageFilter = {
   session?: string;
   model?: string;
   provider?: string;
-  harness?: "codex" | "pi";
+  harness?: "codex" | "pi" | "claude" | "opencode";
 };
 const fields = [
   "input",
@@ -120,7 +120,7 @@ export function validateUsageEvent(value: unknown): UsageEvent {
       fail();
   if (
     v.version !== 1 ||
-    !["codex", "pi"].includes(v.harness as string) ||
+    !["codex", "pi", "claude", "opencode"].includes(v.harness as string) ||
     !["delta", "cumulative"].includes(v.semantics as string) ||
     !["input-subset", "unknown"].includes(v.cacheReadRelation as string) ||
     !["output-subset", "unknown"].includes(v.reasoningRelation as string) ||

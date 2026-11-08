@@ -938,7 +938,7 @@ it("blocks a replacement lane while the same task retains unverified native owne
     }
   }));
 
-it("settles the trace and restores the private mask when native spawn throws synchronously", () =>
+it("rejects invalid native argv before ownership, trace creation or private-mask change", () =>
   withEnv(async () => {
     const f = await fixture();
     f.config.lanes.coordinator = {
@@ -950,23 +950,10 @@ it("settles the trace and restores the private mask when native spawn throws syn
     try {
       await expect(
         serve(f.config, f.directory, new AbortController().signal),
-      ).rejects.toThrow();
+      ).rejects.toThrow("Invalid Codex model identifier");
       expect(process.umask()).toBe(priorMask);
-      const stopped = await f.load();
-      const failed = stopped.records["coordinator:control"];
-      expect(failed?.status).toBe("paused");
-      expect(failed?.pid).toBeUndefined();
-      const trace = JSON.parse(
-        await readFile(
-          join(
-            f.root,
-            ".crewplane-state/operational-traces",
-            `${failed?.runId}.meta.json`,
-          ),
-          "utf8",
-        ),
-      );
-      expect(trace.status).toBe("paused");
+      // Validation now precedes acquisition, write-ahead state and trace creation.
+      await expect(access(join(f.directory, "state.json"))).rejects.toThrow();
       await expect(access(join(f.directory, "watcher.lock"))).rejects.toThrow();
     } finally {
       process.umask(priorMask);

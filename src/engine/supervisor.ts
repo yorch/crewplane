@@ -334,9 +334,10 @@ export async function serve(
       (a.startedAt ?? "").localeCompare(b.startedAt ?? ""),
     ))
       latest.set(r.lane, r);
-    for (const [lane, prior] of latest)
-      if (config.lanes[lane]?.enabled)
-        assertSwitch(config.lanes[lane], prior, state.running);
+    for (const [lane, prior] of latest) {
+      const configured = config.lanes[lane];
+      if (configured) assertSwitch(configured, prior, state.running);
+    }
     for (const record of Object.values(state.records)) {
       if (record.status !== "running" && !record.pid && !record.processGroupId)
         continue;
@@ -681,9 +682,22 @@ export async function serve(
             await save();
             continue;
           }
-          record.cwd = cwd;
-          record.harness = harnessName(config.lanes[work.lane]);
+          const laneHarness = harnessName(config.lanes[work.lane]);
           const sessionEpoch = config.lanes[work.lane]?.sessionEpoch;
+          if (
+            old?.sessionId &&
+            ((old.harness ?? "codex") !== laneHarness ||
+              old.sessionEpoch !== sessionEpoch)
+          ) {
+            record.status = "paused";
+            record.pauseKind = "failure";
+            record.reason =
+              "Native session harness/epoch changed; inspect before retry";
+            await save();
+            continue;
+          }
+          record.cwd = cwd;
+          record.harness = laneHarness;
           if (sessionEpoch) record.sessionEpoch = sessionEpoch;
           else delete record.sessionEpoch;
           record.status = "running";
@@ -751,7 +765,7 @@ export async function serve(
               await save();
               continue;
             }
-            if (invocation.harness === "pi")
+            if (adapters[invocation.harness].sessionDirectory)
               await durableMkdir(join(directory, "pi-sessions"), {
                 root: directory,
               });
@@ -789,9 +803,13 @@ export async function serve(
           const notes = state.notices[work.lane] ?? [];
           delete state.notices[work.lane];
           if (state.noticeQueuedAt) delete state.noticeQueuedAt[work.lane];
+          const adapter = adapters[invocation.harness];
           const stream: HarnessStream = {
             expectedCwd: cwd,
             ...(record.sessionId ? { sessionId: record.sessionId } : {}),
+            ...(invocation.expectedSessionId
+              ? { expectedSessionId: invocation.expectedSessionId }
+              : {}),
             inputTokens: 0,
             outputTokens: 0,
             settled: false,
@@ -802,6 +820,42 @@ export async function serve(
           let timedOut = false;
           let stderrOmitted = false,
             stdoutOmitted = false;
+          const consumeLine = (line: string) => {
+            if (!line.trim()) return;
+            try {
+              if (line.length > 4 * 1024 * 1024)
+                throw new Error("Oversized native metadata");
+              const event = JSON.parse(line);
+              const previousInput = stream.inputTokens,
+                previousOutput = stream.outputTokens;
+              adapter.consume(stream, event);
+              if (stream.sessionId) {
+                const changed = record.sessionId !== stream.sessionId;
+                record.sessionId = stream.sessionId;
+                if (changed)
+                  void save().catch(() => {
+                    traceIOFailed = true;
+                  });
+                trace.session(stream.sessionId);
+              }
+              // Rejected events must not add usage/assistant evidence the record lacks.
+              if (!stream.invalid)
+                for (const metadata of nativeTrace(invocation.harness, event))
+                  emitTrace(metadata);
+              if (stream.observedModel)
+                record.observedModel = stream.observedModel;
+              record.inputTokensKnown ||= stream.inputTokensKnown === true;
+              record.outputTokensKnown ||= stream.outputTokensKnown === true;
+              record.inputTokens += stream.inputTokens - previousInput;
+              record.outputTokens += stream.outputTokens - previousOutput;
+            } catch {
+              if (adapter.strictStream) stream.invalid = true;
+              if (!stdoutOmitted) {
+                stdoutOmitted = true;
+                emitTrace({ kind: "omitted", channel: "stdout" });
+              }
+            }
+          };
           child.stdout?.on("data", (chunk: Buffer) => {
             let text = chunk.toString();
             if (droppingLine) {
@@ -815,41 +869,13 @@ export async function serve(
             while (end >= 0) {
               const line = buffer.slice(0, end);
               buffer = buffer.slice(end + 1);
-              try {
-                if (line.length > 4 * 1024 * 1024)
-                  throw new Error("Oversized native metadata");
-                const event = JSON.parse(line);
-                const previousInput = stream.inputTokens,
-                  previousOutput = stream.outputTokens;
-                adapters[invocation.harness].consume(stream, event);
-                if (stream.sessionId) {
-                  const changed = record.sessionId !== stream.sessionId;
-                  record.sessionId = stream.sessionId;
-                  if (changed)
-                    void save().catch(() => {
-                      traceIOFailed = true;
-                    });
-                  trace.session(stream.sessionId);
-                }
-                for (const metadata of nativeTrace(invocation.harness, event))
-                  emitTrace(metadata);
-                if (stream.observedModel)
-                  record.observedModel = stream.observedModel;
-                record.inputTokensKnown ||= stream.inputTokensKnown === true;
-                record.outputTokensKnown ||= stream.outputTokensKnown === true;
-                record.inputTokens += stream.inputTokens - previousInput;
-                record.outputTokens += stream.outputTokens - previousOutput;
-              } catch {
-                if (!stdoutOmitted) {
-                  stdoutOmitted = true;
-                  emitTrace({ kind: "omitted", channel: "stdout" });
-                }
-              }
+              consumeLine(line);
               end = buffer.indexOf("\n");
             }
             if (buffer.length > 4 * 1024 * 1024) {
               buffer = "";
               droppingLine = true;
+              if (adapter.strictStream) stream.invalid = true;
               emitTrace({ kind: "omitted", channel: "stdout" });
             }
           });
@@ -905,6 +931,11 @@ export async function serve(
             clearTimeout(timer);
             clearTimeout(deadlineDrainTimer);
             clearTimeout(exitDrainTimer);
+            // A final event without a trailing newline is still complete.
+            if (buffer && !droppingLine) {
+              consumeLine(buffer);
+              buffer = "";
+            }
             if (groupAlive()) {
               killGroup("SIGTERM");
               const until = Date.now() + (options.cleanupGraceMs ?? 1000);
@@ -928,16 +959,11 @@ export async function serve(
             record.finishedAt = new Date().toISOString();
             delete record.pid;
             delete record.processGroupId;
-            const final: unknown =
-              invocation.harness === "pi"
-                ? stream.settled && !stream.invalid && stream.sessionId
-                  ? stream.final
-                  : undefined
-                : await read(output, {}).catch(() => undefined);
+            const outcome = await adapter.finalize(stream, output);
+            const final: unknown = outcome.final;
             const valid =
               validFinal(final) && !stream.invalid && !!stream.sessionId;
-            if (invocation.harness === "pi" && valid)
-              await atomic(output, final);
+            if (valid && outcome.persist) await atomic(output, final);
             const completedBoard = await readBoard(config.root);
             const after = await progress(
               completedBoard,
@@ -1112,10 +1138,7 @@ export async function serve(
             throw error;
           }
           child.stdin?.end(
-            prompt(work, config, notes) +
-              (invocation.harness === "pi"
-                ? "\nReturn ONLY a JSON object with state (working/waiting/ready/needs_operator) and summary (max 2000 characters); no markdown or extra keys."
-                : ""),
+            prompt(work, config, notes) + (adapter.promptSuffix ?? ""),
           );
           console.log(
             JSON.stringify({

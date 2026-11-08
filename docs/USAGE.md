@@ -56,7 +56,43 @@ crewplane doctor
 
 `configure` installs a private configuration, overriding its root and roles from the selected project; it does not launch anything. Reconfiguration requires stopped state. Configured models are optional and remain distinct from observed models. Existing harness credentials and permissions apply; Crewplane does not log in or act as an OS sandbox. `doctor` validates configuration and binary presence; it does not certify credentials, provider operation or harness-version compatibility.
 
-The retained Codex adapter uses the extracted native exec/schema/resume protocol. Pi is explicitly restricted to `no-tools`, requires a fresh `sessionEpoch`, separate provider/model fields and a configured absolute `binaries.pi` path. Pi is not an implementation-capable substitute under this policy. Claude/OpenCode adapters are not delivered. Live native harness compatibility must be checked before real activation; acceptance uses fake adapters.
+The retained Codex adapter uses the extracted native exec/schema/resume protocol. Pi is explicitly restricted to `no-tools`, requires a fresh `sessionEpoch`, separate provider/model fields and a configured absolute `binaries.pi` path. Pi is not an implementation-capable substitute under this policy.
+
+Claude Code (probed with CLI 2.1.319) requires an explicit `model` and a non-bypass `claudePermissionMode` (`acceptEdits`, `auto`, `dontAsk` or `plan`). It receives the result schema as inline `--json-schema`, binds a generated UUID with `--session-id` on a fresh run and resumes with `--resume`; it exposes tool permissions to the harness and never enables `bypassPermissions`. OpenCode (probed with CLI 2.2.5) requires an explicit `model` in `provider/model` or `provider/model#variant` form and runs `opencode run --standalone --format json`. Its JSON stream has no schema-enforced result, so the agent receives the JSON-only instruction; the server-generated `ses_...` session is captured and resumed with `--session`. Because that flag also creates a missing session, OpenCode resume is best-effort identity continuity, not proof the prior context survived. `opencodeAuto: true` is the only auto-approval opt-in and is off by default.
+
+Both new adapters require an explicit absolute `binaries.claude` or `binaries.opencode` entry; only Codex falls back to the legacy `binary` path. A mixed configuration can look like this fragment inside the full shape above:
+
+```json
+{
+  "binary": "/absolute/path/to/codex",
+  "binaries": {
+    "claude": "/absolute/path/to/claude",
+    "opencode": "/absolute/path/to/opencode"
+  },
+  "lanes": {
+    "captain": {
+      "enabled": true,
+      "harness": "claude",
+      "model": "opus",
+      "claudePermissionMode": "plan"
+    },
+    "builder": {
+      "enabled": true,
+      "harness": "claude",
+      "model": "claude-opus-5-5",
+      "claudePermissionMode": "acceptEdits"
+    },
+    "inspector": {
+      "enabled": true,
+      "harness": "opencode",
+      "model": "opencode-go/claude-haiku-5-5",
+      "opencodeAuto": true
+    }
+  }
+}
+```
+
+Harness settings never cross harnesses: Pi, Claude and OpenCode fields on the wrong harness are rejected. Reported input/output counters are harness-reported fields only: Claude excludes cache creation/read tokens from `input_tokens`, OpenCode reports cache and reasoning separately, and neither is a billing total. Live native harness compatibility is limited to the probed CLI protocols above and must be rechecked before real activation; acceptance uses synthetic events and lifecycle fixtures, not live provider calls.
 
 ## Assign and supervise
 

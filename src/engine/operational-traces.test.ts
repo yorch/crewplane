@@ -85,6 +85,141 @@ it("projects both native adapters without collecting reasoning, credentials or a
     await rm(root, { recursive: true, force: true });
   }
 });
+it("projects Claude and OpenCode metadata without payloads and keeps harness-specific sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-traces-"));
+  try {
+    const store = await createTraceStore(root);
+    const uuid = "00000000-0000-4000-8000-000000000001";
+    const claude = await store.begin({
+      runId: run(2),
+      lane: "coordinator",
+      task: "P1-08",
+      harness: "claude",
+    });
+    await claude.emit({ kind: "started" });
+    for (const event of nativeTrace("claude", {
+      type: "system",
+      subtype: "init",
+      session_id: uuid,
+      cwd: "/synthetic",
+      model: "claude-opus-5-5",
+    }))
+      await claude.emit(event);
+    for (const event of nativeTrace("claude", {
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Bash",
+            input: { command: "echo AUTHORIZATION=private" },
+          },
+          { type: "text", text: "private assistant reply" },
+        ],
+      },
+    }))
+      await claude.emit(event);
+    for (const event of nativeTrace("claude", {
+      type: "user",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            is_error: false,
+            content: "private tool output",
+          },
+        ],
+      },
+    }))
+      await claude.emit(event);
+    for (const event of nativeTrace("claude", {
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      session_id: uuid,
+      usage: { input_tokens: 2, output_tokens: 75 },
+    }))
+      await claude.emit(event);
+    claude.session(uuid);
+    await claude.finish("finished", "waiting");
+    const open = await store.begin({
+      runId: run(3),
+      lane: "coordinator",
+      task: "P1-08",
+      harness: "opencode",
+    });
+    const session = "ses_00000000000000000000000000";
+    await open.emit({ kind: "started" });
+    for (const event of nativeTrace("opencode", {
+      type: "step_start",
+      sessionID: session,
+      part: { type: "step-start" },
+    }))
+      await open.emit(event);
+    for (const event of nativeTrace("opencode", {
+      type: "tool_use",
+      sessionID: session,
+      part: {
+        tool: "shell",
+        state: {
+          status: "completed",
+          input: { command: "echo AUTHORIZATION=private" },
+          output: "private tool output",
+        },
+      },
+    }))
+      await open.emit(event);
+    for (const event of nativeTrace("opencode", {
+      type: "text",
+      sessionID: session,
+      part: { type: "text", text: "private assistant reply" },
+    }))
+      await open.emit(event);
+    for (const event of nativeTrace("opencode", {
+      type: "step_finish",
+      sessionID: session,
+      part: { reason: "stop", tokens: { input: 4, output: 5 } },
+    }))
+      await open.emit(event);
+    open.session(session);
+    await open.finish("finished", "ready");
+    const claudeTail = await store.tail(run(2));
+    const openTail = await store.tail(run(3));
+    expect(claudeTail.meta.sessionId).toBe(uuid);
+    expect(openTail.meta.sessionId).toBe(session);
+    expect(
+      claudeTail.events.some(
+        (e) => e.kind === "tool-start" && e.tool === "bash",
+      ),
+    ).toBe(true);
+    expect(
+      claudeTail.events.some(
+        (e) => e.kind === "tool-finish" && e.status === "succeeded",
+      ),
+    ).toBe(true);
+    expect(
+      openTail.events.some(
+        (e) => e.kind === "tool-finish" && e.tool === "bash",
+      ),
+    ).toBe(true);
+    expect(
+      openTail.events.some((e) => e.kind === "usage" && e.inputTokens === 4),
+    ).toBe(true);
+    for (const text of [JSON.stringify(claudeTail), JSON.stringify(openTail)])
+      for (const secret of [
+        "AUTHORIZATION",
+        "private assistant reply",
+        "private tool output",
+      ])
+        expect(text).not.toContain(secret);
+    const listed = await store.list({ harness: "opencode" });
+    expect(listed.runs.map((r) => r.runId)).toEqual([run(3)]);
+    const claudeOnly = await store.list({ harness: "claude" });
+    expect(claudeOnly.runs.map((r) => r.runId)).toEqual([run(2)]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 it("keeps partial active tails, caps events and prunes bounded finished runs", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-traces-"));
   try {

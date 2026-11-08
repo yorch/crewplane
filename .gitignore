@@ -5,3 +5,4 @@ dist/
 !.env.example
 .crewplane-state/
 .crewplane-local/
+.pi/

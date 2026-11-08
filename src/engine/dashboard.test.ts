@@ -137,6 +137,15 @@ it("serves fresh tasks/messages without exposing files or allowing mutations/cro
       await fetch(`${url}/api/runs?lane=coordinator&limit=1`)
     ).json();
     expect(history.runs[0].runId).toBe(traceId);
+    expect(
+      (await (await fetch(`${url}/api/runs?harness=codex`)).json()).runs[0]
+        .runId,
+    ).toBe(traceId);
+    for (const harness of ["claude", "opencode", "pi"])
+      expect(
+        (await (await fetch(`${url}/api/runs?harness=${harness}`)).json()).runs,
+      ).toEqual([]);
+    expect((await fetch(`${url}/api/runs?harness=unknown`)).status).toBe(400);
     const tail = await (
       await fetch(`${url}/api/runs/${traceId}?after=0&limit=10`)
     ).json();

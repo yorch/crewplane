@@ -201,7 +201,68 @@ it("builds explicit-session resume arguments with automatic approval review and 
   );
 });
 
-it.each(["codex", "pi"] as const)(
+it("rejects a retained native session when a disabled lane switches harness without a fresh epoch", async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { serve } = await import("./supervisor.ts");
+  const root = await mkdtemp(join(tmpdir(), "relay-switch-"));
+  try {
+    const directory = join(root, ".crewplane-state/supervisor");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "state.json"),
+      JSON.stringify({
+        version: 1,
+        running: false,
+        checkedAt: new Date().toISOString(),
+        pid: process.pid,
+        draining: false,
+        held: [],
+        commands: [],
+        notices: {},
+        records: {
+          coordinator: {
+            key: "coordinator",
+            lane: "coordinator",
+            task: null,
+            cwd: root,
+            harness: "codex",
+            sessionId: "00000000-0000-4000-8000-000000000001",
+            status: "idle",
+            reason: "",
+            seen: [],
+            runs: [],
+            noProgress: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+          },
+        },
+      }),
+    );
+    const switched: Config = {
+      ...config,
+      root,
+      binaries: { claude: process.execPath },
+      allowedTasks: [],
+      intervalSeconds: 1,
+      lanes: {
+        coordinator: {
+          enabled: false,
+          harness: "claude",
+          model: "opus",
+          claudePermissionMode: "plan",
+        },
+      },
+    };
+    await expect(
+      serve(switched, directory, new AbortController().signal),
+    ).rejects.toThrow("drained idle lane");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}, 20000);
+it.each(["codex", "pi", "claude", "opencode"] as const)(
   "runs controlled %s, persists its native identity, resumes exactly and drains",
   async (harness) => {
     const { mkdtemp, mkdir, writeFile, readFile, rename, rm } = await import(
@@ -237,18 +298,39 @@ it.each(["codex", "pi"] as const)(
 import {writeFileSync,mkdirSync,readFileSync,existsSync} from 'node:fs';
 let input='';for await(const chunk of process.stdin)input+=chunk;
 if(!/Crewplane agent (coordinator|reviewer)/.test(input))process.exit(2);
+const harness=${JSON.stringify(harness)};
 const args=process.argv.slice(2);const out=args[args.indexOf('--output-last-message')+1];
-if (${JSON.stringify(harness)} === 'pi') {const dir=args[args.indexOf('--session-dir')+1];if(dir!==${JSON.stringify(join(root, ".crewplane-state/supervisor/pi-sessions"))}||!existsSync(dir))process.exit(9);}
+if (harness === 'pi') {const dir=args[args.indexOf('--session-dir')+1];if(dir!==${JSON.stringify(join(root, ".crewplane-state/supervisor/pi-sessions"))}||!existsSync(dir))process.exit(9);}
+if (harness === 'pi' || harness === 'opencode') {if(!input.includes('Return ONLY a JSON object'))process.exit(7);}
 mkdirSync('.crewplane-local',{recursive:true});const file='.crewplane-local/args.json';const history=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):[];history.push(args);writeFileSync(file,JSON.stringify(history));
-console.log(JSON.stringify({type:'thread.started',thread_id:'00000000-0000-4000-8000-000000000001'}));
+const result={state:'waiting',summary:'Controlled fixture completed'};
+const uuid='00000000-0000-4000-8000-000000000001';
+if (harness === 'codex') {
+console.log(JSON.stringify({type:'thread.started',thread_id:uuid}));
 console.log(JSON.stringify({type:'item.completed',item:{type:'reasoning',text:'PRIVATE_THOUGHT_SENTINEL'}}));
-if (${JSON.stringify(harness)} === 'codex') {
-writeFileSync(out,JSON.stringify({state:'waiting',summary:'Controlled fixture completed'}));
+writeFileSync(out,JSON.stringify(result));
 console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:5,output_tokens:2}}));
-} else {
-console.log(JSON.stringify({type:'session',id:'00000000-0000-4000-8000-000000000001',cwd:process.cwd()}));
-console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',model:'synthetic',provider:'fixture',usage:{input:5,output:2},content:[{type:'text',text:JSON.stringify({state:'waiting',summary:'Controlled fixture completed'})}]}}));
+} else if (harness === 'pi') {
+console.log(JSON.stringify({type:'session',id:uuid,cwd:process.cwd()}));
+console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',model:'synthetic',provider:'fixture',usage:{input:5,output:2},content:[{type:'thinking',thinking:'PRIVATE_THOUGHT_SENTINEL'},{type:'text',text:JSON.stringify(result)}]}}));
 console.log(JSON.stringify({type:'agent_settled',aborted:false}));
+} else if (harness === 'claude') {
+if(args[args.indexOf('--permission-mode')+1]!=='acceptEdits')process.exit(6);
+if(typeof JSON.parse(args[args.indexOf('--json-schema')+1])!=='object')process.exit(5);
+const fresh=args.includes('--session-id')?args[args.indexOf('--session-id')+1]:undefined;
+const resume=args.includes('--resume')?args[args.indexOf('--resume')+1]:undefined;
+const sid=fresh||resume;
+if(!/^[a-f0-9-]{36}$/.test(sid))process.exit(8);
+console.log(JSON.stringify({type:'system',subtype:'init',session_id:sid,cwd:process.cwd(),model:'claude-opus-5-5'}));
+console.log(JSON.stringify({type:'assistant',message:{model:'claude-opus-5-5',content:[{type:'thinking',thinking:'PRIVATE_THOUGHT_SENTINEL'},{type:'text',text:'ignored'}]}}));
+console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,session_id:sid,usage:{input_tokens:5,output_tokens:2},structured_output:result}));
+} else {
+const session=args.includes('--session')?args[args.indexOf('--session')+1]:'ses_fixture00000000000000000000';
+if(!/^ses_[A-Za-z0-9]+$/.test(session))process.exit(4);
+console.log(JSON.stringify({type:'step_start',sessionID:session,part:{type:'step-start'}}));
+console.log(JSON.stringify({type:'tool_use',sessionID:session,part:{tool:'shell',state:{status:'completed',input:{command:'echo PRIVATE_THOUGHT_SENTINEL'},output:'PRIVATE_THOUGHT_SENTINEL'}}}));
+console.log(JSON.stringify({type:'text',sessionID:session,part:{type:'text',text:JSON.stringify(result)}}));
+console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'step-finish',reason:'stop',tokens:{input:5,output:2}}}));
 }
 `,
         { mode: 0o700 },
@@ -259,7 +341,7 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
         root,
         binary,
         intervalSeconds: 1,
-        binaries: { pi: binary },
+        binaries: { pi: binary, claude: binary, opencode: binary },
         allowedTasks: [],
         lanes: {
           reviewer: { enabled: false },
@@ -271,7 +353,18 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
                   piPermissions: "no-tools",
                   sessionEpoch: "fixture",
                 } as const)
-              : {}),
+              : harness === "claude"
+                ? ({
+                    harness: "claude",
+                    model: "opus",
+                    claudePermissionMode: "acceptEdits",
+                  } as const)
+                : harness === "opencode"
+                  ? ({
+                      harness: "opencode",
+                      model: "fixture/model",
+                    } as const)
+                  : {}),
           },
         },
       };
@@ -349,8 +442,23 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
         }
       });
       let first = Object.values((await load()).records)[0];
-      expect(first?.sessionId).toBe("00000000-0000-4000-8000-000000000001");
+      const nativeSession = first?.sessionId;
+      if (harness === "claude")
+        expect(nativeSession).toMatch(/^[a-f0-9-]{36}$/);
+      else
+        expect(nativeSession).toBe(
+          harness === "opencode"
+            ? "ses_fixture00000000000000000000"
+            : "00000000-0000-4000-8000-000000000001",
+        );
       expect(first?.inputTokens).toBe(5);
+      expect(first?.observedModel).toBe(
+        harness === "claude"
+          ? "claude-opus-5-5"
+          : harness === "pi"
+            ? "fixture/synthetic"
+            : undefined,
+      );
       const traceDirectory = join(root, ".crewplane-state/operational-traces");
       const traceText = await readFile(
         join(traceDirectory, `${first?.runId}.events.jsonl`),
@@ -382,11 +490,16 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
           "00000000-0000-4000-8000-000000000001",
           "-",
         ]);
-      else
+      else if (harness === "pi")
         expect(args[1].slice(-2)).toEqual([
           "--session",
           "00000000-0000-4000-8000-000000000001",
         ]);
+      else if (harness === "claude") {
+        expect(args[1].slice(-2)).toEqual(["--resume", nativeSession]);
+        expect(args[1]).not.toContain("--session-id");
+        expect(args[1]).not.toContain("--dangerously-skip-permissions");
+      } else expect(args[1].slice(-2)).toEqual(["--session", nativeSession]);
       const before = await load();
       expect(
         Object.values(before.records).some((r) => r.lane === "reviewer"),
@@ -443,6 +556,138 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
   22000,
 );
 
+it.each([
+  ["claude", "session-mismatch"],
+  ["claude", "malformed"],
+  ["opencode", "malformed"],
+] as const)(
+  "fails closed and pauses when %s emits %s native output",
+  async (harness, mode) => {
+    const { mkdtemp, mkdir, readFile, rm, writeFile } = await import(
+      "node:fs/promises"
+    );
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFileSync } = await import("node:child_process");
+    const { serve } = await import("./supervisor.ts");
+    const root = await mkdtemp(join(tmpdir(), "relay-strict-"));
+    const old = process.env.CREWPLANE_COORD_DIR;
+    process.env.CREWPLANE_COORD_DIR = "";
+    const controller = new AbortController();
+    let running: Promise<void> | undefined;
+    try {
+      await mkdir(join(root, "tasks"), { recursive: true });
+      await writeFile(join(root, "STATUS.md"), "Synthetic strict fixture");
+      await writeFile(
+        join(root, ".gitignore"),
+        ".crewplane-state/\n.crewplane-local/\n",
+      );
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: root, stdio: "pipe" });
+      git("init", "-q", "--initial-branch=main");
+      git("config", "user.name", "Synthetic");
+      git("config", "user.email", "synthetic@example.invalid");
+      git("add", ".");
+      git("commit", "-qm", "test: initialize strict fixture");
+      const binary = join(root, "fake-strict.mjs");
+      await writeFile(
+        binary,
+        `#!/usr/bin/env node
+let input='';for await(const chunk of process.stdin)input+=chunk;
+const harness=${JSON.stringify(harness)},mode=${JSON.stringify(mode)};
+const args=process.argv.slice(2);
+const result={state:'waiting',summary:'Synthetic strict fixture'};
+if (harness === 'claude') {
+  const expected=args.includes('--session-id')?args[args.indexOf('--session-id')+1]:args[args.indexOf('--resume')+1];
+  const sid=mode === 'session-mismatch' ? '00000000-0000-4000-8000-000000000002' : expected;
+  console.log(JSON.stringify({type:'system',subtype:'init',session_id:sid,cwd:process.cwd(),model:'claude-opus-5-5'}));
+  console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,session_id:sid,usage:{input_tokens:5,output_tokens:2},structured_output:result}));
+} else {
+  const session='ses_00000000000000000000000000';
+  console.log(JSON.stringify({type:'step_start',sessionID:session}));
+  console.log(JSON.stringify({type:'text',sessionID:session,part:{type:'text',text:JSON.stringify(result)}}));
+  console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{reason:'stop',tokens:{input:5,output:2}}}));
+}
+if (mode === 'malformed') process.stdout.write('{"type":"broken');
+`,
+        { mode: 0o700 },
+      );
+      const directory = join(root, ".crewplane-state/supervisor");
+      const lane =
+        harness === "claude"
+          ? ({
+              enabled: true,
+              harness: "claude",
+              model: "opus",
+              claudePermissionMode: "acceptEdits",
+            } as const)
+          : ({
+              enabled: true,
+              harness: "opencode",
+              model: "fixture/model",
+            } as const);
+      const strict: Config = {
+        ...config,
+        root,
+        binary,
+        intervalSeconds: 1,
+        binaries: { [harness]: binary },
+        allowedTasks: [],
+        lanes: { coordinator: lane },
+      };
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "config.json"), JSON.stringify(strict));
+      running = serve(strict, directory, controller.signal);
+      const load = async (): Promise<State | undefined> => {
+        try {
+          return JSON.parse(
+            await readFile(join(directory, "state.json"), "utf8"),
+          ) as State;
+        } catch {
+          return undefined;
+        }
+      };
+      const until = async (check: () => Promise<boolean>) => {
+        const deadline = Date.now() + 7000;
+        while (!(await check())) {
+          if (Date.now() > deadline)
+            throw new Error("Strict fixture timed out");
+          await new Promise((r) => setTimeout(r, 25));
+        }
+      };
+      await until(async () => {
+        const record = Object.values((await load())?.records ?? {})[0];
+        return !!record?.finishedAt && record.status !== "running";
+      });
+      const record = Object.values((await load())?.records ?? {})[0];
+      expect(record?.status).toBe("paused");
+      expect(record?.finalState).toBeUndefined();
+      expect(record?.reason).toContain("No valid final result");
+      expect(record?.inputTokens).toBe(mode === "malformed" ? 5 : 0);
+      expect(!!record?.sessionId).toBe(mode === "malformed");
+      if (record?.runId) {
+        const trace = JSON.parse(
+          await readFile(
+            join(
+              root,
+              ".crewplane-state/operational-traces",
+              `${record.runId}.meta.json`,
+            ),
+            "utf8",
+          ),
+        );
+        expect(trace.status).toBe("paused");
+      }
+    } finally {
+      controller.abort();
+      if (running) await running;
+      if (old === undefined) delete process.env.CREWPLANE_COORD_DIR;
+      else process.env.CREWPLANE_COORD_DIR = old;
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  20000,
+);
 it("schedules visual only for pinned coordinator requests, separately from reviewer within existing limits", () => {
   const cfg: Config = {
     ...config,
