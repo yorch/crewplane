@@ -34,6 +34,8 @@ type Release = {
   tag: string;
   payload: string;
   checksum: string | null;
+  checksumName: string;
+  checksumEol: string;
   apiStatus: number;
   missingAsset: boolean;
 };
@@ -56,7 +58,9 @@ const server = createServer((request, response) => {
   }
   if (url === `${binary}.sha256` && release.checksum !== null) {
     response.writeHead(200, { "content-type": "text/plain" });
-    response.end(`${release.checksum}  ${asset}\n`);
+    response.end(
+      `${release.checksum}  ${release.checksumName}${release.checksumEol}`,
+    );
     return;
   }
   response.writeHead(404);
@@ -77,6 +81,8 @@ beforeEach(() => {
     tag: patch,
     payload: script(patch),
     checksum: sha256(script(patch)),
+    checksumName: asset,
+    checksumEol: "\n",
     apiStatus: 200,
     missingAsset: false,
   };
@@ -210,6 +216,48 @@ describe("install.sh", () => {
     assert(!existsSync(directory));
   });
 
+  it("accepts --version=, --dir= and --prefix= forms without hanging", async () => {
+    const equalsTarget = join(temporary(), "target-equals");
+    const versioned = await install(equalsTarget, [`--version=${patch}`]);
+    assert.equal(versioned.status, 0, versioned.stderr);
+    assert(existsSync(join(equalsTarget, "crewplane")));
+
+    const dirTarget = join(temporary(), "target-dir");
+    const dirFlag = await install(join(temporary(), "unused"), [
+      `--dir=${dirTarget}`,
+    ]);
+    assert.equal(dirFlag.status, 0, dirFlag.stderr);
+    assert(existsSync(join(dirTarget, "crewplane")));
+
+    const prefixTarget = join(temporary(), "target-prefix");
+    const prefix = await install(join(temporary(), "unused"), [
+      `--prefix=${prefixTarget}`,
+    ]);
+    assert.equal(prefix.status, 0, prefix.stderr);
+    assert(existsSync(join(prefixTarget, "crewplane")));
+  });
+
+  it("installs into a directory containing spaces", async () => {
+    const directory = join(temporary(), "bin dir");
+    const result = await install(directory);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Installed crewplane 9\.9\.9/);
+    assert(existsSync(join(directory, "crewplane")));
+  });
+
+  it("ignores CRLF checksum files", async () => {
+    release.checksumEol = "\r\n";
+    const result = await install(join(temporary(), "bin"));
+    assert.equal(result.status, 0, result.stderr);
+  });
+
+  it("refuses a checksum file naming another asset", async () => {
+    release.checksumName = "crewplane-v9.9.9-other-platform";
+    const result = await install(join(temporary(), "bin"));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unreadable checksum/);
+  });
+
   it("documents usage and rejects invalid arguments", async () => {
     const help = await install(join(temporary(), "bin"), ["--help"]);
     assert.equal(help.status, 0);
@@ -225,18 +273,24 @@ describe("install.sh", () => {
     assert.match(invalid.stderr, /invalid version/);
   });
 
-  it("rejects a checksum file that does not describe the asset", async () => {
+  it("rejects a missing checksum publication", async () => {
     release.checksum = null;
     const result = await install(join(temporary(), "bin"));
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /no checksum published/);
   });
 
-  it("cleans its temporary files after a failed download", async () => {
-    release.apiStatus = 500;
+  it("leaves no staged file behind when the checksum is missing", async () => {
+    release.checksum = null;
     const directory = join(temporary(), "bin");
-    await install(directory);
-    assert(!existsSync(directory) || readdirSync(directory).length === 0);
+    const result = await install(directory);
+    assert.notEqual(result.status, 0);
+    assert(existsSync(directory));
+    assert.deepEqual(
+      readdirSync(directory).filter((name) => name.includes("tmp")),
+      [],
+    );
+    assert(!existsSync(join(directory, "crewplane")));
     rmSync(directory, { recursive: true, force: true });
   });
 });

@@ -35,7 +35,7 @@ usage() {
   say "Usage: install.sh [--version TAG] [--dir DIR] [--dry-run] [--help]"
   say ""
   say "  --version TAG   exact release to install (default: latest)"
-  say "  --dir DIR       install directory (default: ~/.local/bin)"
+  say "  --dir DIR       install directory (default: ~/.local/bin; alias --prefix)"
   say "  --dry-run       print the resolved plan without downloading"
   say "  -h, --help      show this help"
   say ""
@@ -51,7 +51,28 @@ cleanup() {
   if [ -n "$stage" ]; then rm -f "$stage" || true; fi
   if [ -n "$tmp" ]; then rm -rf "$tmp" || true; fi
 }
-trap cleanup EXIT HUP INT TERM
+on_signal() {
+  cleanup
+  exit "$1"
+}
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+curl_fetch() {
+  url=$1
+  dest=$2
+  case "$url" in
+    https://*)
+      curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+      ;;
+    *)
+      curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+      ;;
+  esac
+}
 
 fetch() {
   url=$1
@@ -60,7 +81,7 @@ fetch() {
     die "curl is required to download release assets"
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"; then
+    if curl_fetch "$url" "$dest"; then
       return 0
     fi
     warn "download failed (attempt $attempt/3): $url"
@@ -89,6 +110,11 @@ hash_file() {
 normalize_version() {
   candidate=$1
   case "$candidate" in
+    "" | *[!A-Za-z0-9._+-]*)
+      die "invalid version '$1' (expected MAJOR.MINOR.PATCH)"
+      ;;
+  esac
+  case "$candidate" in
     v*) ;;
     *) candidate="v$candidate" ;;
   esac
@@ -108,24 +134,36 @@ resolve_latest() {
 }
 
 version="${CREWPLANE_VERSION:-latest}"
-dir="${CREWPLANE_INSTALL_DIR:-$HOME/.local/bin}"
+dir="${CREWPLANE_INSTALL_DIR:-}"
 dry_run=0
+pinned=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version)
       [ "$#" -ge 2 ] || die "--version requires a value"
       version=$2
+      pinned=1
       shift 2
       ;;
-    --version=*) version=${1#--version=} ;;
+    --version=*)
+      version=${1#--version=}
+      pinned=1
+      shift
+      ;;
     --dir | --prefix)
       [ "$#" -ge 2 ] || die "$1 requires a value"
       dir=$2
       shift 2
       ;;
-    --dir=*) dir=${1#--dir=} ;;
-    --prefix=*) dir=${1#--prefix=} ;;
+    --dir=*)
+      dir=${1#--dir=}
+      shift
+      ;;
+    --prefix=*)
+      dir=${1#--prefix=}
+      shift
+      ;;
     --dry-run)
       dry_run=1
       shift
@@ -137,10 +175,14 @@ while [ "$#" -gt 0 ]; do
     -*) die "unknown option $1 (try --help)" ;;
     *)
       version=$1
+      pinned=1
       shift
       ;;
   esac
 done
+
+if [ -z "$version" ]; then die "version must not be empty"; fi
+if [ "$version" = latest ]; then pinned=0; else pinned=1; fi
 
 case "$(uname -s)" in
   Linux) os=linux ;;
@@ -154,9 +196,13 @@ case "$(uname -m)" in
   *) die "unsupported architecture $(uname -m) (published: x86_64 and arm64)" ;;
 esac
 
+if [ -z "$dir" ]; then
+  [ -n "${HOME:-}" ] || die "HOME is unset; pass --dir DIR"
+  dir="$HOME/.local/bin"
+fi
 case "$dir" in
-  [~]) dir=$HOME ;;
-  [~]/*) dir="$HOME/${dir#?/}" ;;
+  [~]) dir=${HOME:?HOME is unset} ;;
+  [~]/*) dir="${HOME:?HOME is unset}/${dir#?/}" ;;
   /*) ;;
   *) dir="$PWD/$dir" ;;
 esac
@@ -164,8 +210,9 @@ esac
 if [ "$version" = latest ]; then
   tmp=$(mktemp -d 2>/dev/null) || die "cannot create a temporary directory"
   version=$(resolve_latest)
+else
+  version=$(normalize_version "$version")
 fi
-version=$(normalize_version "$version")
 
 asset="crewplane-$version-$os-$arch"
 base="${CREWPLANE_RELEASE_BASE:-https://github.com/$repo/releases/download}"
@@ -194,10 +241,11 @@ if [ -e "$target" ] || [ -L "$target" ]; then
   if [ -L "$target" ]; then
     warn "$target is a symbolic link and will be replaced by a real file"
   fi
-  previous=$("$target" --version 2>/dev/null || true)
+  previous=$("$target" --version </dev/null 2>/dev/null || true)
 fi
 
-stage="$dir/.crewplane.$$.tmp"
+stage=$(mktemp "$dir/.crewplane.XXXXXX" 2>/dev/null) ||
+  die "cannot create a staging file in $dir"
 say "Downloading crewplane $version ($os-$arch)"
 fetch "$base/$version/$asset" "$stage" ||
   die "no published binary for $os-$arch in $version"
@@ -209,6 +257,7 @@ expected=$(awk -v name="$asset" '
     hash = $1
     file = $2
     sub(/^\*/, "", file)
+    sub(/\r$/, "", file)
     if (file == "" || file == name) { print hash; exit }
   }
 ' "$tmp/$asset.sha256")
@@ -223,7 +272,7 @@ actual=$(hash_file "$stage")
   die "checksum mismatch for $asset; refusing to install"
 
 chmod +x "$stage"
-downloaded=$("$stage" --version 2>/dev/null || true)
+downloaded=$("$stage" --version </dev/null 2>/dev/null || true)
 [ -n "$downloaded" ] ||
   die "downloaded $asset does not run on this machine ($os-$arch)"
 [ "$downloaded" = "${version#v}" ] ||
@@ -231,7 +280,7 @@ downloaded=$("$stage" --version 2>/dev/null || true)
 
 mv -f "$stage" "$target"
 stage=""
-installed=$("$target" --version 2>/dev/null || true)
+installed=$("$target" --version </dev/null 2>/dev/null || true)
 [ -n "$installed" ] || installed=${version#v}
 
 if [ -n "$previous" ] && [ "$previous" != "$installed" ]; then
@@ -240,6 +289,10 @@ elif [ -n "$previous" ]; then
   say "Reinstalled crewplane $installed at $target"
 else
   say "Installed crewplane $installed at $target"
+fi
+if [ "$pinned" -eq 1 ]; then
+  say "Pinned $version is not sticky: release builds resume automatic updates."
+  say "Set CREWPLANE_NO_AUTO_UPDATE=1 to stay on this version."
 fi
 
 case ":${PATH:-}:" in
