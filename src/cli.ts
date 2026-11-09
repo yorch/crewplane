@@ -1,9 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
-import type { Config } from "./contracts.ts";
+import type { Config, State } from "./contracts.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
 import { createDashboard } from "./engine/dashboard.ts";
@@ -356,10 +362,97 @@ async function main() {
   }
   if (command === "status") {
     if (rest.length) throw new Error("status takes no options");
-    return output({
-      desired: await optional(join(directory, "desired.json")),
-      state: await optional(join(directory, "state.json")),
-    });
+    const desired = (await optional(join(directory, "desired.json"))) as {
+      desiredRunning?: boolean;
+    } | null;
+    const state = (await optional(
+      join(directory, "state.json"),
+    )) as State | null;
+    const config = (await optional(
+      join(directory, "config.json"),
+    )) as Config | null;
+    const pending: Array<{
+      id: string;
+      action: string;
+      at: string | null;
+      ageMs: number | null;
+    }> = [];
+    try {
+      for (const file of await readdir(join(directory, "commands"))) {
+        if (!/^[a-f0-9-]{36}\.json$/.test(file)) continue;
+        const id = file.slice(0, -5);
+        try {
+          const raw = JSON.parse(
+            await readFile(join(directory, "commands", file), "utf8"),
+          ) as { action?: unknown; at?: unknown };
+          const at =
+            typeof raw.at === "string" && Number.isFinite(Date.parse(raw.at))
+              ? raw.at
+              : null;
+          pending.push({
+            id,
+            action: typeof raw.action === "string" ? raw.action : "invalid",
+            at,
+            ageMs: at ? Date.now() - Date.parse(at) : null,
+          });
+        } catch {
+          pending.push({ id, action: "invalid", at: null, ageMs: null });
+        }
+      }
+    } catch {
+      /* no commands directory yet */
+    }
+    let view: unknown = null;
+    if (state) {
+      const lanes = Object.fromEntries(
+        Object.keys(config?.lanes ?? {}).map((id) => {
+          const records = Object.values(state.records ?? {}).filter(
+            (record) => record.lane === id,
+          );
+          return [
+            id,
+            {
+              intent: {
+                held:
+                  state.instanceHeld === true ||
+                  (state.held ?? []).includes(id),
+                rev: state.laneRev?.[id] ?? 0,
+              },
+              observed: records.map((record) => ({
+                run: record.runId ?? null,
+                task: record.task,
+                phase: record.status,
+                cancelRequested: record.cancelRequested === true,
+              })),
+              pauses: records
+                .filter((record) => record.status === "paused")
+                .map((record) => ({
+                  kind: record.pauseKind ?? "failure",
+                  reason: record.reason,
+                  pauseId: record.pauseId ?? null,
+                })),
+            },
+          ];
+        }),
+      );
+      const heartbeat = Date.parse(state.checkedAt ?? "");
+      view = {
+        supervisor: {
+          intent: desired?.desiredRunning === false ? "stopped" : "running",
+          observed: state.running ? "running" : "dead",
+          heartbeatAgeMs: Number.isFinite(heartbeat)
+            ? Date.now() - heartbeat
+            : null,
+          held: state.instanceHeld === true,
+        },
+        lanes,
+        pendingControls: pending.sort((a, b) =>
+          (a.at ?? "").localeCompare(b.at ?? ""),
+        ),
+        recentControls: (state.controlLog ?? []).slice(-10),
+      };
+    }
+    return output({ desired, state, view });
   }
   if (
     ["pause", "resume", "retry", "nudge", "stop", "rollout"].includes(command)

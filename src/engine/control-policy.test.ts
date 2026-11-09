@@ -93,3 +93,87 @@ it("validates control outcomes and per-record denial/cost/reset metadata", () =>
   value.records.builder.reportedCostUsd = Number.POSITIVE_INFINITY;
   expect(validState(value)).toBe(false);
 });
+
+it("binds each control action to a truthful target and rejects unused fields", () => {
+  expect(
+    control({ v: 2, action: "stop", at: new Date().toISOString() }).action,
+  ).toBe("stop");
+  for (const invalid of [
+    { v: 2, action: "stop", lane: "builder" },
+    { v: 2, action: "rollout", text: "x" },
+    { v: 2, action: "pause", lane: "builder", text: "x" },
+    { v: 2, action: "pause", lane: "builder", all: true },
+    { v: 2, action: "resume" },
+    { v: 2, action: "nudge", lane: "builder" },
+    { v: 2, action: "cancel", lane: "builder" },
+    { v: 2, action: "cancel", all: true, lane: "builder" },
+    {
+      v: 2,
+      action: "resolve",
+      lane: "reviewer",
+      task: "T1",
+      text: "ok",
+      resolution: "approve",
+    },
+    {
+      v: 2,
+      action: "retry",
+      lane: "builder",
+      task: "T1",
+      newSession: true,
+    },
+    { v: 2, action: "retry", lane: "builder", confirmCleanup: true },
+    { v: 2, action: "pause", lane: "builder", at: "tomorrow" },
+    { v: 2, action: "retry", lane: "builder", expectRev: -1 },
+  ])
+    expect(control(invalid).action).toBe("invalid");
+  expect(
+    control({
+      v: 2,
+      action: "resolve",
+      lane: "reviewer",
+      task: "T1",
+      text: "Approved with evidence",
+      resolution: "approve",
+      pauseId: "00000000-0000-4000-8000-000000000001",
+      expectRev: 3,
+      at: new Date().toISOString(),
+    }),
+  ).toMatchObject({ action: "resolve", resolution: "approve", expectRev: 3 });
+  expect(
+    control({
+      v: 1,
+      action: "nudge",
+      lane: "builder",
+      text: "Legacy nudge",
+    }).action,
+  ).toBe("nudge");
+});
+it("validates v2 control logs, holds and revisions", () => {
+  const value = state();
+  value.version = 2;
+  value.instanceHeld = true;
+  value.laneRev = { builder: 2 };
+  value.controlSeq = 1;
+  value.controlLog = [
+    {
+      id: "00000000-0000-4000-8000-000000000001",
+      seq: 1,
+      action: "pause",
+      scope: "lane",
+      target: "builder",
+      outcome: "applied",
+      code: "HELD",
+      at: new Date().toISOString(),
+      issuer: "operator",
+    },
+  ];
+  expect(validState(value)).toBe(true);
+  const entry = value.controlLog?.[0];
+  if (!entry) throw new Error("Missing control log fixture");
+  entry.outcome = "unknown" as never;
+  expect(validState(value)).toBe(false);
+  entry.outcome = "applied";
+  value.laneRev = { builder: -1 };
+  expect(validState(value)).toBe(false);
+});
