@@ -14,7 +14,11 @@ import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import pkg from "../package.json" with { type: "json" };
 import { main } from "../src/engine/agents.mjs";
-import { ProjectVersionError, projectPolicy } from "../src/project.ts";
+import {
+  ProjectVersionError,
+  printablePath,
+  projectPolicy,
+} from "../src/project.ts";
 import { projectAgentPrompt } from "../src/prompts.ts";
 
 const env = {
@@ -263,11 +267,11 @@ it("repins the project at the running release and preserves the rest of the poli
     });
     writeFileSync(
       join(f.root, ".crewplane-state", "supervisor", "state.json"),
-      JSON.stringify({ running: true }),
+      JSON.stringify({ running: true, supervisorVersion: "0.1.0" }),
     );
     const running = pin("--confirm", "true");
     expect(running.status).toBe(1);
-    expect(running.stderr).toContain("Stop the supervisor");
+    expect(running.stderr).toContain("Stop the supervisor (0.1.0)");
     expect(read().requiredVersion).toBe("0.3.0");
 
     f.save({ ...f.policy, requiredVersion: undefined });
@@ -277,6 +281,112 @@ it("repins the project at the running release and preserves the rest of the poli
     f.save({ version: 1, requiredVersion: pkg.version });
     expect(pin("--confirm", "true").stderr).toContain(
       "require project policy version 2",
+    );
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("keeps the pin message safe for the supervisor's pause-reason slice", () => {
+  const f = fixture();
+  try {
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    let raised: ProjectVersionError | undefined;
+    try {
+      projectPolicy(f.root);
+    } catch (error) {
+      raised = error as ProjectVersionError;
+    }
+    // The supervisor slices a paused lane's reason at 500 characters and
+    // persists it, so recovery hints must never enter the message itself.
+    expect(raised?.message).not.toContain("\n");
+    expect(raised?.message.length ?? 0).toBeLessThan(500);
+    expect(raised?.message).not.toContain("pin:");
+    expect(raised?.message).not.toContain("docs/USAGE.md");
+    expect(raised?.message).not.toContain("curl");
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("sanitizes control bytes before printing a project path", () => {
+  expect(printablePath("/tmp/a\u001b[2Jb\u0000c")).toBe("/tmp/a?[2Jb?c");
+  expect(printablePath("/plain/path")).toBe("/plain/path");
+});
+it("names the primary pin when a linked worktree disagrees with it", () => {
+  const f = fixture();
+  try {
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    execFileSync("git", ["add", "."], { cwd: f.root, env });
+    execFileSync("git", ["commit", "-qm", "test: pin the project"], {
+      cwd: f.root,
+      env,
+    });
+    const worker = join(f.outer, "worker");
+    execFileSync("git", ["worktree", "add", "-qb", "worker", worker], {
+      cwd: f.root,
+      env,
+    });
+    // A divergent copy inside the worktree must not decide the pin.
+    writeFileSync(
+      join(worker, "crewplane.json"),
+      JSON.stringify({ ...f.policy, requiredVersion: "9.9.9" }),
+    );
+    const refused = spawnSync(
+      resolve("dist/crewplane"),
+      ["--project", worker, "status"],
+      { cwd: worker, env, encoding: "utf8" },
+    );
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toContain("Project requires Crewplane 0.3.0");
+    expect(refused.stderr).toContain(`requiredVersion in ${f.root}`);
+    expect(refused.stderr).not.toContain(worker);
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("warns when the live supervisor's release may ignore a queued verb", () => {
+  const f = fixture();
+  try {
+    const bin = resolve("dist/crewplane");
+    const stateFile = join(
+      f.root,
+      ".crewplane-state",
+      "supervisor",
+      "state.json",
+    );
+    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
+      recursive: true,
+    });
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    const queue = () =>
+      spawnSync(bin, ["--project", f.root, "stop"], {
+        cwd: f.root,
+        env,
+        encoding: "utf8",
+      });
+
+    writeFileSync(
+      stateFile,
+      JSON.stringify({ running: true, supervisorVersion: "0.1.0" }),
+    );
+    const named = queue();
+    expect(named.status).toBe(0);
+    expect(named.stderr).toContain(
+      "supervisor 0.1.0 interprets queued commands",
+    );
+
+    // The same release understands every verb, so silence is the contract.
+    writeFileSync(
+      stateFile,
+      JSON.stringify({ running: true, supervisorVersion: pkg.version }),
+    );
+    const same = queue();
+    expect(same.status).toBe(0);
+    expect(same.stderr).not.toContain("may ignore");
+
+    // A supervisor older than the recording field is the likely real case.
+    writeFileSync(stateFile, JSON.stringify({ running: true }));
+    expect(queue().stderr).toContain(
+      "the running supervisor's release is unknown",
     );
   } finally {
     rmSync(f.outer, { recursive: true, force: true });

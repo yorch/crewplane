@@ -77,6 +77,8 @@ export interface ControlLogEntry {
 export interface State {
   version: 1 | 2;
   running: boolean;
+  /** Release that owns this state; absent on states written by older builds. */
+  supervisorVersion?: string;
   generation?: string;
   checkedAt: string;
   pid: number;

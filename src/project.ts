@@ -34,6 +34,8 @@ export const validId = (value: unknown): value is string =>
   !["prototype", "all"].includes(value);
 export const validTaskId = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(value);
+/** Terminal-safe rendering: untrusted paths never carry control bytes out. */
+export const printablePath = (value: string) => value.replace(/\p{Cc}/gu, "?");
 export type ReviewerRole = "code" | "visual";
 export const reviewerRoleOf = (
   config: Roles | null | undefined,

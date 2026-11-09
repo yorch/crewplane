@@ -32,6 +32,7 @@ import {
   discoverProject,
   type ProjectPolicy,
   ProjectVersionError,
+  printablePath,
   projectPolicy,
   writeProjectPin,
 } from "./project.ts";
@@ -208,7 +209,6 @@ const pinMismatchBypass = new Set([
   "resolve",
   "pin",
 ]);
-const printable = (value: string) => value.replace(/\p{Cc}/gu, "?");
 const standaloneBinary = () =>
   (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
     ?.isStandaloneExecutable === true;
@@ -223,10 +223,10 @@ function versionPinHint(error: ProjectVersionError): string {
       ? "this project pins an OLDER release; `crewplane update` only installs the latest release"
       : `this project requires a NEWER release; \`crewplane update\` installs the latest, which may not be ${error.required}`;
   const lines = [
-    `  pin:     requiredVersion in ${printable(error.policyPath)} (primary checkout; applies to every worktree)`,
+    `  pin:     requiredVersion in ${printablePath(error.policyPath)} (primary checkout; applies to every worktree)`,
   ];
   if (standaloneBinary())
-    lines.push(`  binary:  ${printable(process.execPath)}`);
+    lines.push(`  binary:  ${printablePath(process.execPath)}`);
   lines.push(
     `  ${direction}`,
     `  cure:    install ${error.required} into its own directory and invoke it by absolute path`,
@@ -279,6 +279,7 @@ async function main() {
   }
   let ctx: ProjectContext;
   let policy: ProjectPolicy;
+  let bypassedPin = false;
   try {
     ctx = (await agents(["init"], requested)) as ProjectContext;
     policy = projectPolicy(ctx.projectRoot);
@@ -297,6 +298,7 @@ async function main() {
       projectRoot: identity.primary,
     };
     policy = projectPolicy(identity.primary, { checkVersion: false });
+    bypassedPin = true;
     if (command !== "pin")
       console.error(
         `crewplane: queuing ${command} despite the release mismatch; every other project command stays blocked`,
@@ -316,9 +318,12 @@ async function main() {
       );
     const state = (await optional(join(directory, "state.json"))) as {
       running?: boolean;
+      supervisorVersion?: string;
     } | null;
     if (state?.running)
-      throw new Error("Stop the supervisor before changing the project pin");
+      throw new Error(
+        `Stop the supervisor${state.supervisorVersion ? ` (${state.supervisorVersion})` : ""} before changing the project pin`,
+      );
     if (policy.requiredVersion === pkg.version)
       return output({
         version: 1,
@@ -622,7 +627,21 @@ async function main() {
         }
       >;
       controlLog?: Array<{ id: string; outcome: string; code: string }>;
+      running?: boolean;
+      supervisorVersion?: string;
     } | null;
+    // A queued verb is interpreted by the release that owns the live supervisor,
+    // so a mismatched binary has to say when its own vocabulary may not apply.
+    if (
+      bypassedPin &&
+      state?.running &&
+      state.supervisorVersion !== pkg.version
+    )
+      console.error(
+        state.supervisorVersion
+          ? `crewplane: supervisor ${state.supervisorVersion} interprets queued commands; it may ignore ${command}. Queue it with that release's binary instead`
+          : `crewplane: the running supervisor's release is unknown; it may ignore ${command}. Queue it with the pinned release's binary instead`,
+      );
     const lane = opts["--lane"];
     const task = opts["--task"];
     const widening = ["retry", "resolve", "resume"].includes(command);
