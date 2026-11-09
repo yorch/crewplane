@@ -24,6 +24,9 @@ import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
+  version: string;
+};
 const temp = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-binary-")));
 const root = join(temp, "project"),
   tools = join(temp, "tools"),
@@ -544,6 +547,8 @@ try {
       CREWPLANE_RELEASE_BASE: `http://127.0.0.1:${port}/download`,
       CREWPLANE_CACHE_DIR: join(temp, "update-cache"),
       CREWPLANE_NO_AUTO_UPDATE: "1",
+      // The plain build is release-marked at runtime for this acceptance.
+      CREWPLANE_RELEASE_BUILD: "1",
     };
     // Async execution keeps this process's release server responsive.
     const update = (args: string[]) =>
@@ -572,9 +577,9 @@ try {
       latest: string;
     };
     assert.equal(available.status, "available");
-    assert.equal(available.current, "0.2.0");
+    assert.equal(available.current, pkg.version);
     assert.equal(available.latest, "9.9.9");
-    assert.equal((await version()).stdout.trim(), "0.2.0");
+    assert.equal((await version()).stdout.trim(), pkg.version);
 
     const updated = await update(["update"]);
     assert.equal(updated.status, 0, updated.stderr);
@@ -596,12 +601,26 @@ try {
       CREWPLANE_RELEASE_API: updateEnv.CREWPLANE_RELEASE_API,
       CREWPLANE_RELEASE_BASE: updateEnv.CREWPLANE_RELEASE_BASE,
       CREWPLANE_CACHE_DIR: join(temp, "auto-cache"),
+      CREWPLANE_RELEASE_BUILD: "1",
+      CREWPLANE_NO_AUTO_UPDATE: "",
     };
+    // A project .env must not be able to disable or redirect the updater.
+    const dotenvDirectory = join(temp, "dotenv-project");
+    mkdirSync(dotenvDirectory, { recursive: true });
+    writeFileSync(
+      join(dotenvDirectory, ".env"),
+      "CREWPLANE_NO_AUTO_UPDATE=1\n",
+    );
     const ran = await new Promise<{ status: number; stderr: string }>((done) =>
       execFile(
         autoBin,
         ["--project", root, "status"],
-        { env: autoEnv, encoding: "utf8", timeout: 30000 },
+        {
+          env: autoEnv,
+          cwd: dotenvDirectory,
+          encoding: "utf8",
+          timeout: 30000,
+        },
         (error, _stdout, stderr) =>
           done({
             status: error
