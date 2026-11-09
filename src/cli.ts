@@ -55,7 +55,7 @@ Usage: crewplane [--project PATH] COMMAND
                                Acknowledge inspected unverified descendants
   retry --lane ID --task ID --new-session true --text NOTE
                                Start a fresh native session for one task
-  resolve --lane ID --task ID --pause UUID (--approve|--deny) --text NOTE
+  resolve --lane ID [--task ID] --pause UUID (--approve true|--deny true) --text NOTE
                                Record an operator decision for a decision pause
   pause|resume --all [--wait N] Hold/release every lane without stopping
   cancel (--run RUN | --all true) [--wait N]
@@ -537,8 +537,10 @@ async function main() {
       ...(task ? { task } : {}),
       ...(opts["--new-session"] === "true" ? { newSession: true } : {}),
       ...(opts["--text"] ? { text: opts["--text"] } : {}),
-      ...(opts["--approve"] ? { resolution: "approve" as const } : {}),
-      ...(opts["--deny"] ? { resolution: "deny" as const } : {}),
+      ...(opts["--approve"] === "true"
+        ? { resolution: "approve" as const }
+        : {}),
+      ...(opts["--deny"] === "true" ? { resolution: "deny" as const } : {}),
       ...(opts["--pause"] ? { pauseId: opts["--pause"] } : {}),
       ...(opts["--all"] === "true" ? { all: true } : {}),
       ...(opts["--run"] ? { run: opts["--run"] } : {}),
@@ -560,6 +562,18 @@ async function main() {
           : {}),
       at: new Date().toISOString(),
     });
+    if (command === "resolve") {
+      const approve = opts["--approve"];
+      const deny = opts["--deny"];
+      if (
+        (approve === undefined) === (deny === undefined) ||
+        (approve !== undefined && approve !== "true") ||
+        (deny !== undefined && deny !== "true")
+      )
+        throw new Error(
+          "Resolve requires exactly one of --approve true or --deny true",
+        );
+    }
     if (value.action === "invalid")
       throw new Error("Invalid control; check the action, target and options");
     if (opts["--wait"] !== undefined) {

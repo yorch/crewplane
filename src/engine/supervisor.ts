@@ -486,6 +486,9 @@ export async function serve(
     if (!validState(state))
       throw new Error("Invalid supervisor state; inspect before starting");
     state.version = 2;
+    for (const record of Object.values(state.records))
+      if (record.pauseKind === "decision" && !record.pauseId)
+        record.pauseId = randomUUID();
   } catch (error) {
     await unregister();
     await release();
@@ -974,7 +977,9 @@ export async function serve(
             }
           }
         } else if (c.action === "resolve") {
-          const matches = laneRecords.filter((r) => r.task === c.task);
+          const matches = laneRecords.filter(
+            (r) => r.task === (c.task ?? null),
+          );
           const targetRecord = matches.length === 1 ? matches[0] : undefined;
           if (!lane || !laneKnown) code = "UNKNOWN_TARGET";
           else if (matches.length > 1) code = "AMBIGUOUS_TARGET";
@@ -1129,8 +1134,7 @@ export async function serve(
                 : Math.min(oldest, progressAt);
             }, null),
         };
-        if (state.instanceHeld) break;
-        for (const work of evaluation.work) {
+        for (const work of state.instanceHeld ? [] : evaluation.work) {
           if (children.size >= config.maxParallel) break;
           if (
             [...children.keys()].some(
@@ -1238,7 +1242,12 @@ export async function serve(
           const runId = `${Date.now()}-${randomUUID()}`;
           const logs = join(directory, "runs", work.lane);
           const output = join(logs, `${runId}.result.json`);
-          const notes = state.notices[work.lane] ?? [];
+          const allNotes = state.notices[work.lane] ?? [];
+          const notes = allNotes.filter(
+            (note) =>
+              !note.startsWith("[task:") ||
+              note.startsWith(`[task:${work.task}]`),
+          );
           let invocation: ReturnType<typeof command>;
           let promptText: string;
           try {
@@ -1347,8 +1356,13 @@ export async function serve(
             record.processGroupId = child.pid;
           }
           children.set(work.key, child);
-          delete state.notices[work.lane];
-          if (state.noticeQueuedAt) delete state.noticeQueuedAt[work.lane];
+          state.notices[work.lane] = allNotes.filter(
+            (note) => !notes.includes(note),
+          );
+          if (state.notices[work.lane]?.length === 0) {
+            delete state.notices[work.lane];
+            if (state.noticeQueuedAt) delete state.noticeQueuedAt[work.lane];
+          }
           const stream: HarnessStream = {
             expectedCwd: cwd,
             ...(record.sessionId ? { sessionId: record.sessionId } : {}),

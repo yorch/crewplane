@@ -142,8 +142,7 @@ export function control(value: unknown): Control {
       if (
         !lane ||
         all ||
-        !task ||
-        !validTaskId(task) ||
+        (task !== undefined && !validTaskId(task)) ||
         !textRequired() ||
         !c.pauseId ||
         typeof c.pauseId !== "string" ||
