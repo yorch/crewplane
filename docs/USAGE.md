@@ -114,9 +114,9 @@ crewplane doctor
 
 `configure` installs a private configuration, overriding its root and roles from the selected project; it does not launch anything. Reconfiguration requires stopped state. Configured models are optional and remain distinct from observed models. Existing harness credentials and permissions apply; Crewplane does not log in or act as an OS sandbox. `doctor` validates configuration and binary presence; it does not certify credentials, provider operation or harness-version compatibility.
 
-The retained Codex adapter uses the extracted native exec/schema/resume protocol. Pi is explicitly restricted to `no-tools`, requires a fresh `sessionEpoch`, separate provider/model fields and a configured absolute `binaries.pi` path. Pi is not an implementation-capable substitute under this policy.
+The retained Codex adapter uses the extracted native exec/schema/resume protocol. Pi is explicitly restricted to `no-tools`, requires a fresh `sessionEpoch`, separate provider/model fields and a configured absolute `binaries.pi` path. Because a no-tools turn cannot read files, run the board CLI or inspect a SHA, Pi lanes are accepted only for configured reviewers: their prompt inlines bounded JSON-encoded global/lane instructions and the task card pinned at the assignment base commit, and the turn ends as a paused advisory decision whose summary is surfaced for operator relay. Pi is neither an implementer nor a code reviewer under this policy.
 
-Claude Code (probed with CLI 2.1.319) requires an explicit `model` and a non-bypass `claudePermissionMode` (`acceptEdits`, `auto`, `dontAsk` or `plan`). It receives the result schema as inline `--json-schema`, binds a generated UUID with `--session-id` on a fresh run and resumes with `--resume`; it exposes tool permissions to the harness and never enables `bypassPermissions`. OpenCode (probed with CLI 2.2.5) requires an explicit `model` in `provider/model` or `provider/model#variant` form and runs `opencode run --standalone --format json`. Its JSON stream has no schema-enforced result, so the agent receives the JSON-only instruction; the server-generated `ses_...` session is captured and resumed with `--session`. Because that flag also creates a missing session, OpenCode resume is best-effort identity continuity, not proof the prior context survived. `opencodeAuto: true` is the only auto-approval opt-in and is off by default.
+Claude Code (probed with CLI 2.1.319) requires an explicit `model`, a non-bypass `claudePermissionMode` (`acceptEdits`, `auto`, `dontAsk` or `plan`), `claudeMcp` (`strict` or `inherit`) and `claudeSettingSources` (for example `["project"]`). `strict` adds `--strict-mcp-config`; the sources select `--setting-sources`. Optional `claudeTools` is the availability allowlist (`--tools`, must include `Bash` for board operations), `claudeAllowedTools`/`claudeDisallowedTools` pass approval and denial rules, and `maxCostUsdPerRun` passes `--max-budget-usd`. It receives the result schema as inline `--json-schema`, binds a generated UUID with `--session-id` on a fresh run and resumes with `--resume`; bypass and manual permission modes remain unavailable. OpenCode (probed with CLI 2.2.5) requires an explicit `model` in `provider/model` or `provider/model#variant` form and runs `opencode run --standalone --format json`. Its JSON stream has no schema-enforced result, so the agent receives the JSON-only instruction; the server-generated `ses_...` session is captured and resumed with `--session`. Because that flag also creates a missing session, OpenCode resume is best-effort identity continuity, not proof the prior context survived. `opencodeAuto: true` is the only auto-approval opt-in and is off by default.
 
 Both new adapters require an explicit absolute `binaries.claude` or `binaries.opencode` entry; only Codex falls back to the legacy `binary` path. A mixed configuration can look like this fragment inside the full shape above:
 
@@ -132,25 +132,49 @@ Both new adapters require an explicit absolute `binaries.claude` or `binaries.op
       "enabled": true,
       "harness": "claude",
       "model": "opus",
-      "claudePermissionMode": "plan"
+      "claudePermissionMode": "plan",
+      "claudeMcp": "strict",
+      "claudeSettingSources": ["project"],
+      "instructionsPath": "docs/captain.md"
     },
     "builder": {
       "enabled": true,
       "harness": "claude",
       "model": "claude-opus-5-5",
-      "claudePermissionMode": "acceptEdits"
+      "claudePermissionMode": "acceptEdits",
+      "claudeMcp": "strict",
+      "claudeSettingSources": ["project"],
+      "claudeTools": ["Bash", "Read", "Edit", "Write"],
+      "maxRunsPerHour": 10,
+      "maxRunMinutes": 20,
+      "maxCostUsdPerRun": 2
     },
     "inspector": {
       "enabled": true,
       "harness": "opencode",
       "model": "opencode-go/claude-haiku-5-5",
-      "opencodeAuto": true
+      "opencodeAuto": true,
+      "opencodeAgent": "review"
     }
   }
 }
 ```
 
 Harness settings never cross harnesses: Pi, Claude and OpenCode fields on the wrong harness are rejected. Reported input/output counters are harness-reported fields only: Claude excludes cache creation/read tokens from `input_tokens`, OpenCode reports cache and reasoning separately, and neither is a billing total. Live native harness compatibility is limited to the probed CLI protocols above and must be rechecked before real activation; acceptance uses synthetic events and lifecycle fixtures, not live provider calls.
+
+### Lane guidance and isolation
+
+- Global policy is `crewplane.json` → `instructionsPath` (default `AGENTS.md`); a missing global file is reported by `doctor` and at prompt time, not treated as a hard failure.
+- `lanes.<id>.instructionsPath` adds per-lane guidance. It must be a safe relative path to an existing regular file under the primary project root, at most 32 KiB, and cannot use `.git`, `.crewplane-state` or `.crewplane-local` segments. Tool-capable agents are given the absolute live path; no-tools agents receive its JSON-encoded content.
+- Task cards are read from the assignment's pinned base commit with `git show`, not the mutable working tree.
+- Claude isolation is explicit: `claudeMcp` and `claudeSettingSources` are required; `claudeTools` restricts availability, while allow/deny lists only affect approval. `project` settings are agent-writable in the checkout and are not a least-privilege boundary.
+- OpenCode loads its own configuration, plugins and MCP servers; `opencodeAgent` selects an agent profile but Crewplane does not sandbox OpenCode.
+
+### Budgets, denials and session recovery
+
+- Per-lane `maxRunsPerHour` and `maxRunMinutes` may only tighten the global values. `maxCostUsdPerRun` is Claude-only, applies per invocation (so hourly overshoot is possible) and is not a billing total. Reported cost is per invocation for Claude and per step for OpenCode; unknown stays unknown.
+- Claude `permission_denials` are counted. A task-owning turn that returns `ready` with known denials pauses as a failure without recording completion evidence; coordinator turns record the count only. This pauses the lane but cannot retract a board `ready` the agent may have published; inspect the board before accepting. Denial and budget pauses remain failures even when the lane is held.
+- `crewplane retry --lane ID --task ID --new-session true --text NOTE` clears exactly one native session after atomic checks (single matching record, no live or unverified process, matching harness/epoch, lane not held) and records the outcome in `state.controlOutcome`. Ambiguous matches are refused. It never lifts a hold and cannot be combined with `--confirm-cleanup`.
 
 ## Assign and supervise
 
@@ -165,7 +189,7 @@ crewplane start
 
 `start` runs the supervisor in the foreground. Use the compiled executable for startup so every agent can invoke the same binary. Each implementation task gets a branch/worktree at its approved base; agents claim it themselves and use project-specific setup/verification. Reviewer turns use separate control directories and inspect the exact requested SHA. The coordinator currently runs in the primary project; it is not a second concurrent primary writer.
 
-The scheduler retains a four-process ceiling, reserves coordinator capacity when enabled, and applies holds/dependencies/authorization before priority and FIFO/aging. Scoped overlap is serialized. Unknown scopes remain protocol-governed: publish known scope before pipelining. Budgets are run/time limits, not a dollar or provider-token cap.
+The scheduler retains a four-process ceiling, reserves coordinator capacity when enabled, and applies holds/dependencies/authorization before priority and FIFO/aging. Scoped overlap is serialized. Unknown scopes remain protocol-governed: publish known scope before pipelining. Global budgets are run/time limits; per-lane overrides may only tighten them, and `maxCostUsdPerRun` is a native Claude invocation cap rather than a dollar budget.
 
 ```sh
 crewplane task list

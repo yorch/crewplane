@@ -269,6 +269,12 @@ it("binds fresh Claude UUIDs, resumes exactly and rejects bypass or foreign sess
       harness: "claude" as const,
       model: "opus",
       claudePermissionMode: "plan" as const,
+      claudeMcp: "strict" as const,
+      claudeSettingSources: ["project"] as ("user" | "project" | "local")[],
+      claudeTools: ["Bash", "Read"],
+      claudeAllowedTools: ["Bash(git *)"],
+      claudeDisallowedTools: ["WebSearch"],
+      maxCostUsdPerRun: 1,
       sessionEpoch: "claude-one",
     };
     const fresh = harnessCommand(
@@ -293,6 +299,15 @@ it("binds fresh Claude UUIDs, resumes exactly and rejects bypass or foreign sess
     expect(fresh.args[fresh.args.indexOf("--permission-mode") + 1]).toBe(
       "plan",
     );
+    expect(fresh.args).toContain("--strict-mcp-config");
+    for (const [flag, value] of [
+      ["--setting-sources", "project"],
+      ["--tools", "Bash,Read"],
+      ["--allowedTools", "Bash(git *)"],
+      ["--disallowedTools", "WebSearch"],
+      ["--max-budget-usd", "1"],
+    ] as const)
+      expect(fresh.args[fresh.args.indexOf(flag) + 1]).toBe(value);
     const session = fresh.args[fresh.args.indexOf("--session-id") + 1];
     expect(validSessionId("claude", session)).toBe(true);
     expect(fresh.expectedSessionId).toBe(session);
@@ -471,6 +486,132 @@ it("fails closed on new harness models, permissions and foreign settings", () =>
       { harness: "claude", model: "opus", claudePermissionMode: "plan" },
     ),
   ).toThrow("Missing absolute claude binary");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeSettingSources: ["project"],
+    } as never),
+  ).toThrow("claudeMcp");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+    } as never),
+  ).toThrow("claudeSettingSources");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["user", "user"],
+    } as never),
+  ).toThrow("duplicates");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["bogus"],
+    } as never),
+  ).toThrow("user, project or local");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      claudeTools: ["Read"],
+    } as never),
+  ).toThrow("include Bash");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      claudeDisallowedTools: ["Bash"],
+    } as never),
+  ).toThrow("blanket-deny");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      claudeTools: ["-x"],
+    } as never),
+  ).toThrow("tool name");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      claudeAllowedTools: ["a,b"],
+    } as never),
+  ).toThrow("invalid rule");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      maxCostUsdPerRun: 0.001,
+    } as never),
+  ).toThrow("0.01-100");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "claude",
+      model: "opus",
+      claudePermissionMode: "plan",
+      claudeMcp: "strict",
+      claudeSettingSources: ["project"],
+      maxRunsPerHour: 61,
+    } as never),
+  ).toThrow("1 to 60");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "opencode",
+      model: "provider/model",
+      opencodeAgent: "-x",
+    } as never),
+  ).toThrow("agent identifier");
+  expect(() =>
+    validateHarness(extended, {
+      harness: "opencode",
+      model: "provider/model",
+      maxCostUsdPerRun: 1,
+    } as never),
+  ).toThrow("Harness-specific");
+  for (const bad of [
+    "/absolute",
+    "../escape",
+    "a/../b",
+    ".git/config",
+    ".crewplane-state/x",
+    "a\\b",
+    "",
+  ])
+    expect(() =>
+      validateHarness(extended, { harness: "codex", instructionsPath: bad }),
+    ).toThrow("instructionsPath");
+  expect(
+    validateHarness(extended, {
+      harness: "codex",
+      instructionsPath: "docs/guide.md",
+    }),
+  ).toBeTruthy();
   expect(validSessionId("opencode", "ses_abc123")).toBe(true);
   expect(validSessionId("opencode", id)).toBe(false);
   expect(validSessionId("claude", "ses_abc123")).toBe(false);
@@ -838,4 +979,73 @@ it("declares native versus prompted results consistently with prompt suffixes", 
   expect(adapters.codex.strictStream).toBeUndefined();
   expect(adapters.claude.capabilities.observedCwd).toBe(true);
   expect(adapters.opencode.capabilities.observedModel).toBe(false);
+});
+it("records Claude denials, per-invocation cost and the native budget error", () => {
+  const stream = emptyStream();
+  consumeEvent("claude", stream, {
+    type: "system",
+    subtype: "init",
+    session_id: id,
+    cwd: process.cwd(),
+  });
+  consumeEvent("claude", stream, {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    session_id: id,
+    usage: { input_tokens: 2, output_tokens: 3 },
+    permission_denials: [{ tool_name: "Bash" }, { tool_name: "Edit" }],
+    total_cost_usd: 0.42,
+    structured_output: { state: "ready", summary: "Denied" },
+  });
+  expect(stream.permissionDenialsKnown).toBe(true);
+  expect(stream.permissionDenials).toBe(2);
+  expect(stream.costKnown).toBe(true);
+  expect(stream.reportedCostUsd).toBe(0.42);
+  const budget = emptyStream();
+  consumeEvent("claude", budget, {
+    type: "result",
+    subtype: "error_max_budget_usd",
+    is_error: true,
+    session_id: id,
+    usage: { input_tokens: 1, output_tokens: 1 },
+    total_cost_usd: 0.06,
+  });
+  expect(budget.budgetExceeded).toBe(true);
+  expect(budget.invalid).toBe(true);
+  expect(budget.costKnown).toBe(true);
+  expect(budget.reportedCostUsd).toBe(0.06);
+  const missing = emptyStream();
+  consumeEvent("claude", missing, {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    session_id: id,
+    usage: { input_tokens: 1, output_tokens: 1 },
+    structured_output: { state: "ready", summary: "Unknown denials" },
+  });
+  expect(missing.permissionDenialsKnown).toBeUndefined();
+  expect(missing.permissionDenials).toBeUndefined();
+});
+it("sums OpenCode per-step reported cost without treating it as billing", () => {
+  const session = "ses_00000000000000000000000000";
+  const stream = emptyStream();
+  consumeEvent("opencode", stream, { type: "step_start", sessionID: session });
+  consumeEvent("opencode", stream, {
+    type: "step_finish",
+    sessionID: session,
+    part: {
+      reason: "tool-calls",
+      tokens: { input: 1, output: 1 },
+      cost: 0.25,
+    },
+  });
+  consumeEvent("opencode", stream, {
+    type: "step_finish",
+    sessionID: session,
+    part: { reason: "stop", tokens: { input: 1, output: 1 }, cost: 0.5 },
+  });
+  expect(stream.costKnown).toBe(true);
+  expect(stream.reportedCostUsd).toBeCloseTo(0.75);
+  expect(stream.reportedCostUsd).toBeLessThan(1e6);
 });

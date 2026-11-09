@@ -37,6 +37,15 @@ export interface RecordState {
   cleanupUnverified?: boolean;
   inputTokensKnown?: boolean;
   outputTokensKnown?: boolean;
+  permissionDenials?: number;
+  permissionDenialsKnown?: boolean;
+  reportedCostUsd?: number;
+  costKnown?: boolean;
+  lastSessionReset?: {
+    at: string;
+    previousSessionId: string;
+    note: string;
+  };
   seen: string[];
   seenMessagesThrough?: string;
   seenMessagesAtBoundary?: string[];
@@ -64,6 +73,17 @@ export interface State {
   records: Record<string, RecordState>;
   retiredRuns?: Partial<Record<Lane, number[]>>;
   notices: Partial<Record<Lane, string[]>>;
+  controlOutcome?: Partial<
+    Record<
+      Lane,
+      {
+        action: string;
+        outcome: "applied" | "refused";
+        reason: string;
+        at: string;
+      }
+    >
+  >;
   attention?: {
     oldestUnhandledAt: number | null;
     planningSince: number | null;

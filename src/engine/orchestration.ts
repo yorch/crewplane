@@ -541,7 +541,8 @@ export function evaluateOrchestration(
           .flatMap((r) => r.runs),
         ...(state.retiredRuns?.[lane] ?? []),
       ].filter((t) => t <= now && now - t < 3600000).length,
-      maxRunsPerHour: config.maxRunsPerHour,
+      maxRunsPerHour:
+        config.lanes[lane]?.maxRunsPerHour ?? config.maxRunsPerHour,
     })),
     tasks: [...projectedTasks.values()],
     candidates: projectedCandidates,

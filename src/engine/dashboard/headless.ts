@@ -168,6 +168,15 @@ export function projectHeadless(
           ? `Operator hold${r?.reason ? ` · ${r.reason.slice(0, 500)}` : ""}`
           : (r?.reason?.slice(0, 500) ??
             (enabled ? "No run recorded" : "Lane disabled / on demand")),
+        permissionDenials:
+          r?.permissionDenialsKnown === true
+            ? count(r.permissionDenials)
+            : null,
+        reportedCostUsd:
+          r?.costKnown === true && typeof r.reportedCostUsd === "number"
+            ? r.reportedCostUsd
+            : null,
+        lastSessionReset: r?.lastSessionReset ?? null,
         usage: {
           inputTokens:
             r?.inputTokensKnown === true ? count(r.inputTokens) : null,

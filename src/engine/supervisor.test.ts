@@ -252,6 +252,8 @@ it("rejects a retained native session when a disabled lane switches harness with
           harness: "claude",
           model: "opus",
           claudePermissionMode: "plan",
+          claudeMcp: "strict",
+          claudeSettingSources: ["project"],
         },
       },
     };
@@ -262,7 +264,7 @@ it("rejects a retained native session when a disabled lane switches harness with
     await rm(root, { recursive: true, force: true });
   }
 }, 20000);
-it.each(["codex", "pi", "claude", "opencode"] as const)(
+it.each(["codex", "claude", "opencode"] as const)(
   "runs controlled %s, persists its native identity, resumes exactly and drains",
   async (harness) => {
     const { mkdtemp, mkdir, writeFile, readFile, rename, rm } = await import(
@@ -347,24 +349,21 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
           reviewer: { enabled: false },
           coordinator: {
             enabled: true,
-            ...(harness === "pi"
-              ? ({
-                  harness: "pi",
-                  piPermissions: "no-tools",
-                  sessionEpoch: "fixture",
-                } as const)
-              : harness === "claude"
-                ? ({
-                    harness: "claude",
-                    model: "opus",
-                    claudePermissionMode: "acceptEdits",
-                  } as const)
-                : harness === "opencode"
-                  ? ({
-                      harness: "opencode",
-                      model: "fixture/model",
-                    } as const)
-                  : {}),
+            ...(harness === "claude"
+              ? {
+                  harness: "claude" as const,
+                  model: "opus",
+                  claudePermissionMode: "acceptEdits" as const,
+                  claudeMcp: "strict" as const,
+                  claudeSettingSources: ["project"] as (
+                    | "user"
+                    | "project"
+                    | "local"
+                  )[],
+                }
+              : harness === "opencode"
+                ? { harness: "opencode" as const, model: "fixture/model" }
+                : {}),
           },
         },
       };
@@ -453,11 +452,7 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
         );
       expect(first?.inputTokens).toBe(5);
       expect(first?.observedModel).toBe(
-        harness === "claude"
-          ? "claude-opus-5-5"
-          : harness === "pi"
-            ? "fixture/synthetic"
-            : undefined,
+        harness === "claude" ? "claude-opus-5-5" : undefined,
       );
       const traceDirectory = join(root, ".crewplane-state/operational-traces");
       const traceText = await readFile(
@@ -489,11 +484,6 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
           "resume",
           "00000000-0000-4000-8000-000000000001",
           "-",
-        ]);
-      else if (harness === "pi")
-        expect(args[1].slice(-2)).toEqual([
-          "--session",
-          "00000000-0000-4000-8000-000000000001",
         ]);
       else if (harness === "claude") {
         expect(args[1].slice(-2)).toEqual(["--resume", nativeSession]);
@@ -615,17 +605,23 @@ if (mode === 'malformed') process.stdout.write('{"type":"broken');
       const directory = join(root, ".crewplane-state/supervisor");
       const lane =
         harness === "claude"
-          ? ({
+          ? {
               enabled: true,
-              harness: "claude",
+              harness: "claude" as const,
               model: "opus",
-              claudePermissionMode: "acceptEdits",
-            } as const)
-          : ({
+              claudePermissionMode: "acceptEdits" as const,
+              claudeMcp: "strict" as const,
+              claudeSettingSources: ["project"] as (
+                | "user"
+                | "project"
+                | "local"
+              )[],
+            }
+          : {
               enabled: true,
-              harness: "opencode",
+              harness: "opencode" as const,
               model: "fixture/model",
-            } as const);
+            };
       const strict: Config = {
         ...config,
         root,
@@ -688,6 +684,61 @@ if (mode === 'malformed') process.stdout.write('{"type":"broken');
   },
   20000,
 );
+it("rejects no-tools lanes outside review, loose budgets and unknown lane fields", () => {
+  const base = {
+    ...config,
+    root: process.cwd(),
+    binaries: { pi: process.execPath },
+    lanes: { coordinator: { enabled: true } },
+  };
+  expect(() =>
+    validateConfig({
+      ...base,
+      lanes: {
+        coordinator: {
+          enabled: true,
+          harness: "pi",
+          piPermissions: "no-tools",
+          piModel: { provider: "synthetic", id: "local" },
+          sessionEpoch: "pi",
+        },
+      },
+    }),
+  ).toThrow("reviewer lanes");
+  expect(() =>
+    validateConfig({
+      ...base,
+      lanes: {
+        coordinator: { enabled: true },
+        builder: {
+          enabled: true,
+          harness: "pi",
+          piPermissions: "no-tools",
+          piModel: { provider: "synthetic", id: "local" },
+          sessionEpoch: "pi",
+        },
+      },
+    }),
+  ).toThrow("reviewer lanes");
+  expect(() =>
+    validateConfig({
+      ...base,
+      lanes: { coordinator: { enabled: true, bogusField: true } as never },
+    }),
+  ).toThrow("Unknown lane field");
+  expect(() =>
+    validateConfig({
+      ...base,
+      lanes: { coordinator: { enabled: true, maxRunsPerHour: 21 } },
+    }),
+  ).toThrow("must not exceed");
+  expect(() =>
+    validateConfig({
+      ...base,
+      lanes: { coordinator: { enabled: true, maxRunMinutes: 26 } },
+    }),
+  ).toThrow("must not exceed");
+});
 it("schedules visual only for pinned coordinator requests, separately from reviewer within existing limits", () => {
   const cfg: Config = {
     ...config,
@@ -779,3 +830,301 @@ it("waits without repeat wake, wakes for fresh answer, preserves failure pause a
   s.held = ["B"];
   expect(plan(b, s, config).some((item) => item.lane === "B")).toBe(false);
 });
+
+it("applies or refuses an audited new-session reset atomically", async () => {
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import(
+    "node:fs/promises"
+  );
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const { serve } = await import("./supervisor.ts");
+  const root = await mkdtemp(join(tmpdir(), "relay-reset-"));
+  try {
+    await writeFile(join(root, ".gitignore"), ".crewplane-state/\n");
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: root, stdio: "pipe" });
+    git("init", "-q", "--initial-branch=main");
+    git("config", "user.name", "Synthetic");
+    git("config", "user.email", "synthetic@example.invalid");
+    git("add", ".");
+    git("commit", "-qm", "test: reset fixture");
+    const directory = join(root, ".crewplane-state/supervisor");
+    await mkdir(directory, { recursive: true });
+    const session = "00000000-0000-4000-8000-000000000001";
+    const base = {
+      version: 1,
+      checkedAt: new Date().toISOString(),
+      pid: process.pid,
+      draining: false,
+      commands: [],
+      notices: {},
+      records: {
+        "builder:CP-101": {
+          key: "builder:CP-101",
+          lane: "builder",
+          task: "CP-101",
+          cwd: root,
+          harness: "codex",
+          sessionId: session,
+          status: "paused",
+          pauseKind: "failure",
+          reason: "Synthetic failure",
+          seen: [],
+          runs: [],
+          noProgress: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+        },
+      },
+    };
+    const writeConfig = async () => {
+      const value: Config = {
+        ...config,
+        root,
+        binary: process.execPath,
+        allowedTasks: [],
+        intervalSeconds: 1,
+        lanes: {
+          coordinator: { enabled: false },
+          builder: { enabled: true, harness: "codex" },
+        },
+      };
+      await writeFile(join(directory, "config.json"), JSON.stringify(value));
+      return value;
+    };
+    const writeState = async (held: string[] = []) =>
+      writeFile(
+        join(directory, "state.json"),
+        JSON.stringify({ ...base, running: false, held }),
+      );
+    const writeCommand = async () =>
+      writeFile(
+        join(directory, "commands/00000000-0000-4000-8000-000000000201.json"),
+        JSON.stringify({
+          action: "retry",
+          lane: "builder",
+          task: "CP-101",
+          newSession: true,
+          text: "Reset after inspected transcript",
+          at: new Date(Date.now() + 60000).toISOString(),
+        }),
+      );
+    const load = async () =>
+      JSON.parse(
+        await readFile(join(directory, "state.json"), "utf8"),
+      ) as State;
+    const until = async (check: () => Promise<boolean>) => {
+      const deadline = Date.now() + 7000;
+      while (!(await check())) {
+        if (Date.now() > deadline) throw new Error("Reset fixture timed out");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+
+    await writeState();
+    const applied = await writeConfig();
+    await mkdir(join(directory, "commands"), { recursive: true });
+    await writeCommand();
+    const controller = new AbortController();
+    const running = serve(applied, directory, controller.signal);
+    await until(async () => !!(await load()).controlOutcome?.builder);
+    const state = await load();
+    expect(state.controlOutcome?.builder).toMatchObject({
+      outcome: "applied",
+      action: "retry-new-session",
+    });
+    expect(state.records["builder:CP-101"]?.sessionId).toBeUndefined();
+    expect(
+      state.records["builder:CP-101"]?.lastSessionReset?.previousSessionId,
+    ).toBe(session);
+    expect(state.notices.builder?.at(-1)).toContain("inspected transcript");
+    controller.abort();
+    await running;
+
+    await writeState(["builder"]);
+    const refusedConfig = await writeConfig();
+    await writeCommand();
+    const second = new AbortController();
+    const secondRun = serve(refusedConfig, directory, second.signal);
+    await until(
+      async () => (await load()).controlOutcome?.builder?.outcome === "refused",
+    );
+    const refused = await load();
+    expect(refused.controlOutcome?.builder?.reason).toContain("held");
+    expect(refused.records["builder:CP-101"]?.sessionId).toBe(session);
+    expect(refused.notices.builder).toBeUndefined();
+    second.abort();
+    await secondRun;
+  } finally {
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  }
+}, 25000);
+
+it("runs a no-tools reviewer as a bounded advisory turn that cannot relaunch", async () => {
+  const { mkdtemp, mkdir, readFile, rm, writeFile } = await import(
+    "node:fs/promises"
+  );
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { execFileSync } = await import("node:child_process");
+  const { serve } = await import("./supervisor.ts");
+  const root = await mkdtemp(join(tmpdir(), "relay-advisory-"));
+  const old = process.env.CREWPLANE_COORD_DIR;
+  process.env.CREWPLANE_COORD_DIR = "";
+  const controller = new AbortController();
+  let running: Promise<void> | undefined;
+  try {
+    await mkdir(join(root, "tasks"), { recursive: true });
+    await writeFile(join(root, "tasks/T1.md"), "# T1\nOwner: builder.\n");
+    await writeFile(join(root, ".gitignore"), ".crewplane-state/\n");
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: root, stdio: "pipe" });
+    git("init", "-q", "--initial-branch=main");
+    git("config", "user.name", "Synthetic");
+    git("config", "user.email", "synthetic@example.invalid");
+    git("add", ".");
+    git("commit", "-qm", "test: advisory fixture");
+    const base = git("rev-parse", "HEAD").toString().trim();
+    const cli = fileURLToPath(new URL("./agents.mjs", import.meta.url));
+    const agents = (...args: string[]) =>
+      execFileSync(process.execPath, [cli, ...args], {
+        cwd: root,
+        stdio: "pipe",
+      });
+    agents(
+      "assign",
+      "--agent",
+      "coordinator",
+      "--task",
+      "T1",
+      "--owner",
+      "builder",
+      "--ref",
+      base,
+      "--text",
+      "Synthetic assignment",
+    );
+    agents(
+      "send",
+      "--agent",
+      "coordinator",
+      "--to",
+      "reviewer",
+      "--kind",
+      "request",
+      "--task",
+      "T1",
+      "--commit",
+      base,
+      "--text",
+      "Synthetic pinned review",
+    );
+    const binary = join(root, "fake-pi.mjs");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env node
+import {writeFileSync} from 'node:fs';
+let input='';for await(const chunk of process.stdin)input+=chunk;
+if(!input.includes('You have no tools'))process.exit(3);
+if(!input.includes('Committed task card (JSON-encoded data'))process.exit(4);
+const args=process.argv.slice(2);
+const dir=args[args.indexOf('--session-dir')+1];
+if(!dir)process.exit(5);
+writeFileSync('.advisory-input',input);
+console.log(JSON.stringify({type:'session',id:'00000000-0000-4000-8000-000000000001',cwd:process.cwd()}));
+console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',model:'synthetic',provider:'fixture',usage:{input:1,output:1},content:[{type:'text',text:JSON.stringify({state:'ready',summary:'Advisory findings recorded'})}]}}));
+console.log(JSON.stringify({type:'agent_settled',aborted:false}));
+`,
+      { mode: 0o700 },
+    );
+    const directory = join(root, ".crewplane-state/supervisor");
+    const value: Config = {
+      ...config,
+      root,
+      binary: process.execPath,
+      binaries: { pi: binary },
+      allowedTasks: ["T1"],
+      intervalSeconds: 1,
+      lanes: {
+        coordinator: { enabled: false },
+        reviewer: {
+          enabled: true,
+          harness: "pi",
+          piPermissions: "no-tools",
+          piModel: { provider: "synthetic", id: "local" },
+          sessionEpoch: "pi-advisory",
+        },
+      },
+    };
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "config.json"), JSON.stringify(value));
+    const { snapshot: readSnapshot } = await import("./read-model.ts");
+    running = serve(value, directory, controller.signal, {
+      readBoard: async (projectRoot) => {
+        const actual = await readSnapshot(projectRoot);
+        const task = actual.tasks.find((candidate) => candidate.id === "T1");
+        if (task?.live) {
+          task.live.status = {
+            state: "ready",
+            at: new Date().toISOString(),
+            commit: base,
+            text: "Synthetic ready submission",
+          };
+        }
+        return actual;
+      },
+    });
+    const load = async (): Promise<State | undefined> => {
+      try {
+        return JSON.parse(
+          await readFile(join(directory, "state.json"), "utf8"),
+        ) as State;
+      } catch {
+        return undefined;
+      }
+    };
+    const until = async (check: () => Promise<boolean>) => {
+      const deadline = Date.now() + 7000;
+      while (!(await check())) {
+        if (Date.now() > deadline)
+          throw new Error("Advisory fixture timed out");
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    await until(async () =>
+      Object.values((await load())?.records ?? {}).some(
+        (r) => r.lane === "reviewer" && r.status === "paused",
+      ),
+    );
+    const record = Object.values((await load())?.records ?? {}).find(
+      (r) => r.lane === "reviewer",
+    );
+    expect(record?.pauseKind).toBe("decision");
+    expect(record?.reason).toContain("Advisory output recorded");
+    expect(record?.summary).toBe("Advisory findings recorded");
+    expect(record?.sessionId).toBe("00000000-0000-4000-8000-000000000001");
+    expect(record?.seenMessagesThrough).toBeTruthy();
+    const input = await readFile(
+      join(root, ".crewplane-local/headless/control/reviewer/.advisory-input"),
+      "utf8",
+    );
+    expect(input).not.toContain("agents inbox/brief");
+    expect(input).toContain("JSON-encoded data");
+    const recordKey = record?.key ?? "";
+    const before = (await load())?.records[recordKey]?.runs.length ?? 0;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect((await load())?.records[recordKey]?.runs.length ?? 0).toBe(before);
+  } finally {
+    controller.abort();
+    if (running) await running;
+    if (old === undefined) delete process.env.CREWPLANE_COORD_DIR;
+    else process.env.CREWPLANE_COORD_DIR = old;
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25000);

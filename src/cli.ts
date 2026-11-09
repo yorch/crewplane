@@ -12,7 +12,10 @@ import type {
   EvidenceRunInput,
 } from "./engine/evidence/contract.ts";
 import { createEvidenceStore } from "./engine/evidence/store.ts";
-import { harnessCapabilities } from "./engine/harness.ts";
+import {
+  harnessCapabilities,
+  instructionFileProblem,
+} from "./engine/harness.ts";
 import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
@@ -44,6 +47,8 @@ Usage: crewplane [--project PATH] COMMAND
   pause|resume|retry|nudge --lane ID [--text TEXT]
   retry --lane ID --confirm-cleanup true --text NOTE
                                Acknowledge inspected unverified descendants
+  retry --lane ID --task ID --new-session true --text NOTE
+                               Start a fresh native session for one task
   stop                         Request intentional stop and drain
   rollout                      Request an authorized drain; no automatic restart
   dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
@@ -267,6 +272,15 @@ async function main() {
       reviewers: policy.reviewers,
       reviewerRoles: policy.reviewerRoles,
     } as unknown as Config);
+    for (const [laneId, lane] of Object.entries(config.lanes)) {
+      if (!lane.instructionsPath) continue;
+      const problem = instructionFileProblem(
+        config.root,
+        lane.instructionsPath,
+      );
+      if (problem)
+        throw new Error(`Lane ${laneId} instructions unavailable: ${problem}`);
+    }
     const release = await acquire(directory);
     try {
       const state = await optional(join(directory, "state.json"));
@@ -302,8 +316,40 @@ async function main() {
             capabilities: harnessCapabilities[lane.harness ?? "codex"],
             permissions: lanePermissions(lane),
             model: lane.piModel ?? lane.model ?? null,
+            instructions: lane.instructionsPath
+              ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
+              : "none",
+            budgets: {
+              maxRunsPerHour: lane.maxRunsPerHour ?? null,
+              maxRunMinutes: lane.maxRunMinutes ?? null,
+            },
+            claude:
+              lane.harness === "claude"
+                ? {
+                    mcp: lane.claudeMcp ?? null,
+                    settingSources: lane.claudeSettingSources ?? null,
+                    tools: lane.claudeTools ?? null,
+                    allowedTools: lane.claudeAllowedTools ?? null,
+                    disallowedTools: lane.claudeDisallowedTools ?? null,
+                    maxCostUsdPerRun: lane.maxCostUsdPerRun ?? null,
+                  }
+                : null,
+            opencode:
+              lane.harness === "opencode"
+                ? {
+                    agent: lane.opencodeAgent ?? null,
+                    auto: lane.opencodeAuto === true,
+                  }
+                : null,
           }))
         : [],
+      globalInstructions: (() => {
+        const problem = instructionFileProblem(
+          root,
+          projectPolicy(root).instructionsPath,
+        );
+        return problem ?? "ok";
+      })(),
       providerCredentials: "not-probed",
       servicesStarted: false,
     });
@@ -318,12 +364,20 @@ async function main() {
   if (
     ["pause", "resume", "retry", "nudge", "stop", "rollout"].includes(command)
   ) {
-    const opts = options(rest, ["--lane", "--text", "--confirm-cleanup"]);
+    const opts = options(rest, [
+      "--lane",
+      "--text",
+      "--confirm-cleanup",
+      "--task",
+      "--new-session",
+    ]);
     if (
       opts["--confirm-cleanup"] !== undefined &&
       opts["--confirm-cleanup"] !== "true"
     )
       throw new Error("Cleanup confirmation must be true");
+    if (opts["--new-session"] !== undefined && opts["--new-session"] !== "true")
+      throw new Error("New session selection must be true");
     const value = control({
       action: command,
       ...(opts["--confirm-cleanup"] === "true" ? { confirmCleanup: true } : {}),
@@ -333,6 +387,8 @@ async function main() {
         } | null
       )?.generation,
       ...(opts["--lane"] ? { lane: opts["--lane"] } : {}),
+      ...(opts["--task"] ? { task: opts["--task"] } : {}),
+      ...(opts["--new-session"] === "true" ? { newSession: true } : {}),
       ...(opts["--text"] ? { text: opts["--text"] } : {}),
       at: new Date().toISOString(),
     });
