@@ -17,3 +17,67 @@ Breaking persisted or command meanings require a new version and an explicit mig
 Project policy v2 adds optional exact requiredVersion and per-agent ordered promptFiles. Older policy v1 remains supported but cannot declare these fields. Version mismatch fails before project store preparation and a configured pin disables project-command automatic update scheduling. The pin is decoded before role and schema-version validation so a project owned by a newer release still names the pin. The mismatch message stays a single line because the supervisor persists it as a pause reason; recovery context (pin path, running binary, direction, docs pointer) is rendered by the CLI only and never includes an executable install command, since lanes read CLI stderr and a repository controls its own pin. The control verbs stop, pause, resume, cancel and resolve stay queueable under a mismatch so an operator can halt, cancel or answer live work, and the pin command runs because repointing a stale pin is the case it exists for; every other project command remains blocked. The pin command may only target the running release: it cannot install a release, cannot pin to a different version, refuses while a supervisor runs or without --confirm true, and rewrites nothing when the pin already matches. Supervisors record their release as an optional supervisorVersion in their state so a mismatched CLI can name the release that will interpret a queued verb and warn that it may be ignored; the field is absent for supervisors older than the recording, which the CLI reports rather than guessing. Prompt rendering uses bounded canonical-primary files, preserving built-in reviewer/visual role boundaries. Store/native configuration protocols remain unchanged; these fields never authorize execution or migrate private state.
 
 Operator controls are a versioned command protocol: scoped (instance/lane/task/run), generation- and revision-bound, applied serially by the supervisor, and recorded with exactly one outcome and a bounded audit log. Narrowing controls (holds, drain, cancel) are safe to apply late; widening controls (release, retry, cleanup acknowledgement, new-session, resolve) must match the observed generation, revision, run or session. Controls never lift holds implicitly, signal a process that is not a live child of the current generation, clear an unobserved failure, raise budgets, write board state, or release ownership before completion is persisted. State v2 adds instance holds, lane revisions, control sequence/log and decision pause ids while remaining backward-readable from v1. Dashboard mutations, when explicitly enabled, expose only hold and cancel behind Origin, token and JSON checks; the default dashboard remains read-only.
+
+## CLI output contract
+
+The CLI is both an operator interface and a scripting surface. These rules
+describe what a consumer may rely on today. `--help` is the enumerated command
+and flag list, and `src/help.test.ts` asserts that every control form printed
+there is accepted by the control policy.
+
+**Streams.** stdout carries only the command's result. stderr carries
+diagnostics, advisory warnings, banners and errors. A failing command writes
+nothing to stdout, except `update` (which reports its failure as a JSON
+document) and a `--wait` control, whose outcome is the result.
+
+**Human-only output.** `--help`, `--version`, the `agents` usage text,
+`agents prompt` and the `dashboard` startup banner are prose on stdout. Every
+other successful command writes JSON. `monitor` is the exception: it writes a
+prose startup banner and then one compact JSON object per observation.
+
+**Reports.** A report is an object pretty-printed with two spaces and exactly
+one trailing newline; two legacy commands still print a bare array
+(`agents inbox`) or a bare `null` (`watchdog status`). `null` means unknown or
+not applicable, `[]` means known empty, and `0` is a measured value. Fields
+named `reason`, `detail`, `label` or `text` may contain prose; enum-like fields
+use closed values. Key order is construction order and is not a contract; array
+order is (tasks and messages are sorted, lanes follow configuration order).
+
+**Exit codes.** `0` success, including a queued control without `--wait` and an
+`applied` or `noop` `--wait` outcome; `1` operational failure, invalid local
+input, unconfigured project or release-pin mismatch; `2` a supervisor
+`refused` or `invalid` outcome under `--wait`; `3` a `stale` outcome under
+`--wait`; `124` a `--wait` timeout, where the command remains queued and may
+still apply.
+
+**Errors.** Errors go to stderr, never stdout. The first line is
+`crewplane: MESSAGE`; continuation lines are indented and carry recovery
+context. The release-pin message stays one line because the supervisor persists
+it as a lane pause reason; the CLI-only recovery context never contains an
+executable install command.
+
+**Controls.** A control verb queues a private command file and prints
+`{queued, id, activation}`; it never applies the control itself. With `--wait`,
+the outcome document replaces that shape and `activation` is always `false`.
+Boolean flags take an explicit `true`: the forms in `--help` are the accepted
+grammar, not shorthand.
+
+**Holds.** `agent list` and the dashboard report both lane-scoped `held` and the
+instance-wide `instanceHeld` flag; a lane is paused when either applies.
+`status.view` reports the same intent per lane.
+
+**Privacy.** Reports are explicit projections. `status` is the documented
+exception: it includes the raw persisted `state` alongside `view` so an
+operator can inspect recovery evidence. Agent-authored text is data, never
+instruction.
+
+**Deferred to output schema v1 (breaking; do not treat as stable).** Report
+version markers are inconsistent (`version: 1`, `schemaVersion: 1`, or none),
+and `status` carries none. `agents inbox` returns a bare array and
+`watchdog status` a bare `null`. `monitor --status` and the `monitor` event
+stream use different keys for the same fields. `pin` omits `next` when nothing
+changed. Usage and precondition failures exit `1` rather than dedicated codes,
+so scripts cannot separate "bad flag" from "not configured" or "wrong release".
+Several always-false fields (`activation`, `started`, `servicesStarted`,
+`init.running`) are reported as if they were observations. `agent list` exposes
+prose in `configState` and `harness`, which the dashboard parses.
