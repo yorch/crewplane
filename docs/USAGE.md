@@ -4,7 +4,7 @@ Build with Bun 1.4.1 (`bun run build`), then place `dist/crewplane` on PATH or i
 
 ## Install and update the CLI
 
-The installer resolves a GitHub release, downloads the asset for the host platform, and verifies its published SHA-256 before replacing anything:
+The installer resolves a GitHub release, downloads the asset for the host platform, and verifies it before replacing anything:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
@@ -14,33 +14,51 @@ curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | s
 | Option          | Environment              | Meaning                                                         |
 | --------------- | ------------------------ | --------------------------------------------------------------- |
 | `--version TAG` | `CREWPLANE_VERSION`      | Exact release, e.g. `v0.2.0`; default is the latest tag         |
-| `--dir DIR`     | `CREWPLANE_INSTALL_DIR`  | Install directory; default `~/.local/bin`                       |
+| `--dir DIR`     | `CREWPLANE_INSTALL_DIR`  | Install directory; default `~/.local/bin` (aliases `--prefix`)  |
 | `--dry-run`     | —                        | Print the resolved asset, source and target without downloading |
 | —               | `CREWPLANE_RELEASE_API`  | Latest-release JSON, default the GitHub API                     |
 | —               | `CREWPLANE_RELEASE_BASE` | Release download base URL                                       |
 
-The installer downloads into the target directory, verifies the checksum and the reported `--version` of the staged file, then renames it into place. It never runs under sudo, never skips verification, and leaves an existing installation untouched when any check fails. Linux assets are built against glibc; musl/Alpine is not verified. Windows is unsupported.
+Custom release sources must use `https`, except loopback test servers (`127.0.0.1`, `localhost`, `::1`). The installer stages the download inside the target directory, verifies the published checksum, runs the staged file with `--version`, requires that version to match the tag, and only then renames it into place. It never invokes `sudo`, never skips verification, and leaves an existing installation untouched when any check fails. A symlinked target is replaced by a real file after a warning. Linux assets are built against glibc; musl/Alpine is not verified. Windows is unsupported.
 
-An installed release binary updates itself. At most once every 24 hours a project command starts a detached check; when a newer release is published and verified it replaces the running executable, and the new version takes effect on the next invocation. The swap is skipped for `start`, `dashboard`, `watchdog` and `monitor`, and while this project's supervisor reports running, so long-lived coordination is never affected. The check never delays or fails the foreground command, and no project state, hold, budget or queued control is touched.
+A pinned install is not sticky: see below for how to stay on a version.
+
+### Automatic updates
+
+Release-marked binaries update themselves. A local `bun run build` binary is not release-marked and reports `unsupported`; `bun run build:release` is the marker `install.sh` installs. At most once every 24 hours an eligible project command starts a detached check; when a newer release is published and verifies, the updater replaces the running executable and the new version takes effect on the next invocation.
+
+The check never delays or fails the foreground command, and no project state, hold, budget, lease or queued control is read or written. Automatic replacement is skipped when:
+
+- the command is `start`, `dashboard`, `watchdog` or `monitor`;
+- any supervisor reports running through its per-user registration (files under `$CREWPLANE_CACHE_DIR/crewplane/supervisors`, keyed by PID);
+- a recent check is recorded for the same executable;
+- automatic updates are disabled.
+
+Registration is best effort and PID-based, so a reused PID can postpone an automatic update but never force one. The updater re-checks immediately before the rename; a supervisor that starts during the download cancels the replacement. A supervisor that is already running keeps the binary it started with, but its later CLI child invocations use the updated file.
+
+### Explicit updates
 
 ```sh
 crewplane update           # apply now; prints a JSON outcome
 crewplane update --check   # report without downloading or replacing
+crewplane update --force   # replace even while a supervisor is running
 ```
 
-The outcome is one of `current`, `available`, `updated`, `unsupported` (source run, foreign platform, or disabled) or `failed`. Updates verify the published SHA-256 and the platform executable header, then rename a verified copy atomically inside the install directory; running processes keep the binary they started with. Downgrades are not automatic: install a pin with `install.sh --version TAG`.
+The outcome is one of `current`, `available`, `updated`, `unsupported` (source run, foreign platform, or disabled) or `failed`. Failures still print a JSON outcome and exit non-zero with the reason on stderr. `update` refuses while any supervisor is registered unless `--force` is given; explicit updates keep the caller's environment, including `GITHUB_TOKEN`. Automatic checks run with a filtered environment and never inherit credentials. Updates verify the published SHA-256, the platform executable header, and the staged binary's reported version, then rename a verified copy inside the install directory; running processes keep the binary they started with. Downgrades are not automatic: install a pin with `install.sh --version TAG` and set `CREWPLANE_NO_AUTO_UPDATE=1` to keep it.
 
-| Environment                       | Meaning                                                                                              |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `CREWPLANE_NO_AUTO_UPDATE=1`      | Disable automatic checks and swaps                                                                   |
-| `CREWPLANE_UPDATE=off`            | Same opt-out, by mode                                                                                |
-| `CREWPLANE_UPDATE_INTERVAL_HOURS` | Minimum hours between automatic checks (default 24)                                                  |
-| `CREWPLANE_CACHE_DIR`             | Directory for `crewplane/update.json` and its lock (default `$XDG_CACHE_HOME` or `~/Library/Caches`) |
-| `CREWPLANE_UPDATE_TIMEOUT_MS`     | Per-request timeout for release requests (default 20000)                                             |
-| `CREWPLANE_UPDATE_MAX_BYTES`      | Download size limit (default 256 MiB)                                                                |
-| `GITHUB_TOKEN` / `GH_TOKEN`       | Optional; sent only to `api.github.com` for release lookups                                          |
+| Environment                            | Meaning                                                                                                                        |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `CREWPLANE_NO_AUTO_UPDATE=1`           | Disable automatic checks and swaps                                                                                             |
+| `CREWPLANE_UPDATE=off`                 | Same opt-out, by mode                                                                                                          |
+| `CREWPLANE_UPDATE_INTERVAL_HOURS`      | Minimum hours between automatic checks (default 24)                                                                            |
+| `CREWPLANE_CACHE_DIR`                  | Directory for `crewplane/update.json`, its lock and supervisor registrations (default `$XDG_CACHE_HOME` or `~/Library/Caches`) |
+| `CREWPLANE_UPDATE_TIMEOUT_MS`          | Timeout for release metadata requests (default 20000)                                                                          |
+| `CREWPLANE_UPDATE_DOWNLOAD_TIMEOUT_MS` | Timeout for the asset download (default 300000)                                                                                |
+| `CREWPLANE_UPDATE_MAX_BYTES`           | Streamed asset download limit (default 256 MiB; metadata is capped at 1 MiB)                                                   |
+| `CREWPLANE_RELEASE_BUILD=1`            | Treat this binary as a release build (used by acceptance tests)                                                                |
+| `GITHUB_TOKEN` / `GH_TOKEN`            | Optional; sent only to `https://api.github.com` for explicit release lookups                                                   |
 
-The update cache records `lastAttemptAt`, `latest`, `updatedAt` and the last `error`. Releases are not signed or notarized yet, so checksum verification assumes the GitHub release account and file storage are not compromised.
+The update cache records `target`, `lastAttemptAt`, `latest`, `updatedAt` and the last `error`. Release metadata and checksums are unsigned: verification proves transport integrity and the published release contents, not publisher identity. Code signing and notarization are deferred, so this assumes the GitHub release account and storage are not compromised.
 
 ## Initialize a project
 
