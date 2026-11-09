@@ -1,8 +1,12 @@
+import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
+import { publishJson } from "../io.ts";
 import { validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
+import { control } from "./control-policy.ts";
 import { createEvidenceStore } from "./evidence/store.ts";
 import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
@@ -15,7 +19,10 @@ export {
   plannedTasks,
   snapshot,
 } from "./read-model.ts";
-export function createDashboard(root: string) {
+export function createDashboard(
+  root: string,
+  options: { controls?: { token: string } } = {},
+) {
   let traces: ReturnType<typeof createTraceStore> | undefined;
   const getTraces = () =>
     (traces ??= (async () => {
@@ -53,6 +60,68 @@ export function createDashboard(root: string) {
         request.headers.origin !== `http://${expectedHost}`)
     ) {
       response.writeHead(403).end("Forbidden");
+      return;
+    }
+    if (request.method === "POST" && request.url === "/api/control") {
+      const controls = options.controls;
+      if (
+        !controls ||
+        request.headers.origin !== `http://${expectedHost}` ||
+        request.headers["x-crewplane-token"] !== controls.token ||
+        request.headers["content-type"] !== "application/json"
+      ) {
+        response.writeHead(403).end("Forbidden");
+        return;
+      }
+      let size = 0;
+      const chunks: Buffer[] = [];
+      for await (const chunk of request) {
+        size += (chunk as Buffer).length;
+        if (size > 4096) {
+          response.writeHead(413).end("Too large");
+          return;
+        }
+        chunks.push(chunk as Buffer);
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      } catch {
+        response.writeHead(400).end("Invalid JSON");
+        return;
+      }
+      const raw = (body ?? {}) as Record<string, unknown>;
+      if (raw.action !== "pause" && raw.action !== "cancel") {
+        response.writeHead(400).end("Unsupported control");
+        return;
+      }
+      const value = control({
+        v: 2,
+        action: raw.action,
+        ...(typeof raw.lane === "string" ? { lane: raw.lane } : {}),
+        ...(typeof raw.run === "string" ? { run: raw.run } : {}),
+        ...(raw.all === true ? { all: true } : {}),
+        ...(typeof raw.expectRev === "number"
+          ? { expectRev: raw.expectRev }
+          : {}),
+        issuer: "dashboard",
+        at: new Date().toISOString(),
+      });
+      if (value.action === "invalid") {
+        response.writeHead(400).end("Invalid control");
+        return;
+      }
+      const { store } = (await coordination(["init"], root)) as {
+        store: string;
+      };
+      const directory = join(store, "supervisor", "commands");
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const id = randomUUID();
+      await publishJson(join(directory, `${id}.json`), value);
+      response.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+      });
+      response.end(JSON.stringify({ queued: value.action, id }));
       return;
     }
     if (request.method !== "GET") {
