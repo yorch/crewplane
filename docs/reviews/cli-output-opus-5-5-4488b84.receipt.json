@@ -1,0 +1,17 @@
+{
+  "baseline": "4488b84",
+  "corpusBaseline": "a53e4e9",
+  "cliVersion": "2.1.319",
+  "canonicalModels": ["claude-opus-5-5"],
+  "mode": "review",
+  "permission": "readonly",
+  "tools": ["Read", "Grep", "Glob", "Bash"],
+  "permissionDenials": [],
+  "turns": 24,
+  "durationMs": 382700,
+  "costUsd": 2.2057,
+  "isError": false,
+  "subtype": "success",
+  "delegatedAgents": 0,
+  "session": "e7b7af26-a2f8-474b-9387-d5518e7ea75b"
+}
