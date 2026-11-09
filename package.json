@@ -1,6 +1,6 @@
 {
   "name": "crewplane",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Local orchestration for coding agents across harnesses.",
   "license": "MIT",

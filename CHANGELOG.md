@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/yorch/crewplane/compare/v0.3.0...v0.4.0) (2026-11-09)
+
+
+### Features
+
+* **policy:** add lane guidance, isolation and budgets ([0f8e20a](https://github.com/yorch/crewplane/commit/0f8e20a2a83d8b0faa50dc9e92d2abdf2ae9262b))
+
 ## [0.3.0](https://github.com/yorch/crewplane/compare/v0.2.0...v0.3.0) (2026-11-09)
 
 
