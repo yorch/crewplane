@@ -1679,6 +1679,7 @@ export async function serve(
               record.pauseId = randomUUID();
             record.summary = valid ? final.summary : "";
             record.status = pause ? "paused" : "idle";
+            delete record.cancelRequested;
             bumpLane(work.lane);
             record.reason =
               pause ?? (valid ? final.summary.slice(0, 500) : "Turn complete");
