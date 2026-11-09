@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -13,7 +14,7 @@ import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import pkg from "../package.json" with { type: "json" };
 import { main } from "../src/engine/agents.mjs";
-import { projectPolicy } from "../src/project.ts";
+import { ProjectVersionError, projectPolicy } from "../src/project.ts";
 import { projectAgentPrompt } from "../src/prompts.ts";
 
 const env = {
@@ -99,6 +100,184 @@ it("rejects malformed version pins and mismatches before preparing state", async
       `Project requires Crewplane 999.0.0; running ${pkg.version}`,
     );
     expect(existsSync(join(f.root, ".crewplane-state"))).toBe(false);
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("reports an unsupported schema after the pin, and the pin before role errors", () => {
+  const f = fixture();
+  try {
+    f.save({ ...f.policy, version: 3, requiredVersion: "0.3.0" });
+    expect(() => projectPolicy(f.root)).toThrow(ProjectVersionError);
+    f.save({ ...f.policy, version: 3 });
+    expect(() => projectPolicy(f.root)).toThrow(
+      "Unsupported project policy version",
+    );
+    f.save({
+      ...f.policy,
+      requiredVersion: "0.3.0",
+      coordinator: "NOT VALID",
+    });
+    expect(() => projectPolicy(f.root)).toThrow(ProjectVersionError);
+    f.save(f.policy);
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("renders pin recovery context in the CLI without widening the error message", () => {
+  const f = fixture();
+  try {
+    const bin = resolve("dist/crewplane");
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    let raised: unknown;
+    try {
+      projectPolicy(f.root);
+    } catch (error) {
+      raised = error;
+    }
+    expect(raised).toBeInstanceOf(ProjectVersionError);
+    expect((raised as ProjectVersionError).required).toBe("0.3.0");
+    expect((raised as ProjectVersionError).running).toBe(pkg.version);
+    expect((raised as ProjectVersionError).policyPath).toBe(
+      join(f.root, "crewplane.json"),
+    );
+    expect((raised as ProjectVersionError).message).not.toContain("\n");
+
+    const refused = spawnSync(bin, ["--project", f.root, "status"], {
+      cwd: f.root,
+      env,
+      encoding: "utf8",
+    });
+    expect(refused.status).toBe(1);
+    expect(refused.stderr.split("\n")[0]).toContain(
+      `Project requires Crewplane 0.3.0; running ${pkg.version}`,
+    );
+    expect(refused.stderr).toContain(
+      `  pin:     requiredVersion in ${join(f.root, "crewplane.json")}`,
+    );
+    expect(refused.stderr).toContain("OLDER release");
+    expect(refused.stderr).toContain('docs/USAGE.md "Project version pins"');
+    // Recovery context must never be an executable command for a lane to run.
+    expect(refused.stderr).not.toMatch(/curl|\| sh/);
+    expect(existsSync(join(f.root, ".crewplane-state"))).toBe(false);
+    expect(existsSync(join(f.root, ".git/crewplane-project.json"))).toBe(false);
+
+    const refusedRetry = spawnSync(
+      bin,
+      ["--project", f.root, "retry", "--lane", "builder", "--text", "x"],
+      { cwd: f.root, env, encoding: "utf8" },
+    );
+    expect(refusedRetry.status).toBe(1);
+    expect(refusedRetry.stderr).toContain("Project requires Crewplane");
+
+    // Operator controls must survive a swapped binary; nothing else does.
+    const queued = spawnSync(bin, ["--project", f.root, "stop"], {
+      cwd: f.root,
+      env,
+      encoding: "utf8",
+    });
+    expect(queued.status).toBe(0);
+    expect(JSON.parse(queued.stdout).queued).toBe("stop");
+    expect(queued.stderr).toContain(
+      "queuing stop despite the release mismatch",
+    );
+
+    const cancelled = spawnSync(
+      bin,
+      ["--project", f.root, "cancel", "--all", "true"],
+      { cwd: f.root, env, encoding: "utf8" },
+    );
+    expect(cancelled.status).toBe(0);
+    expect(JSON.parse(cancelled.stdout).queued).toBe("cancel");
+
+    const newer = spawnSync(bin, ["--project", f.root], {
+      cwd: f.root,
+      env,
+      encoding: "utf8",
+    });
+    expect(newer.stdout).toContain("Crewplane");
+    expect(
+      spawnSync(bin, ["--project", f.root, "--version"], {
+        env,
+        encoding: "utf8",
+      }).stdout.trim(),
+    ).toBe(pkg.version);
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("repins the project at the running release and preserves the rest of the policy", () => {
+  const f = fixture();
+  try {
+    const bin = resolve("dist/crewplane");
+    const read = () =>
+      JSON.parse(readFileSync(join(f.root, "crewplane.json"), "utf8"));
+    f.save({
+      ...f.policy,
+      requiredVersion: "0.3.0",
+      projectOwner: { team: "core" },
+    });
+    const before = readFileSync(join(f.root, "crewplane.json"), "utf8");
+    const pin = (...args: string[]) =>
+      spawnSync(bin, ["--project", f.root, "pin", ...args], {
+        cwd: f.root,
+        env,
+        encoding: "utf8",
+      });
+
+    const unconfirmed = pin();
+    expect(unconfirmed.status).toBe(1);
+    expect(unconfirmed.stderr).toContain("rerun with --confirm true");
+    expect(read().requiredVersion).toBe("0.3.0");
+
+    const upgraded = pin("--confirm", "true");
+    expect(upgraded.status).toBe(0);
+    expect(JSON.parse(upgraded.stdout)).toMatchObject({
+      from: "0.3.0",
+      to: pkg.version,
+      changed: true,
+    });
+    expect(read()).toMatchObject({
+      version: 2,
+      requiredVersion: pkg.version,
+      coordinator: "captain",
+      reviewers: ["inspector", "qa"],
+      projectOwner: { team: "core" },
+    });
+    expect(readFileSync(join(f.root, "crewplane.json"), "utf8")).toBe(
+      before.replace('"0.3.0"', `"${pkg.version}"`),
+    );
+    expect(
+      spawnSync(bin, ["--project", f.root, "status"], {
+        cwd: f.root,
+        env,
+        encoding: "utf8",
+      }).status,
+    ).toBe(0);
+    expect(JSON.parse(pin("--confirm", "true").stdout).changed).toBe(false);
+
+    // A live supervisor must never see its own project's policy change.
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(f.root, ".crewplane-state", "supervisor", "state.json"),
+      JSON.stringify({ running: true }),
+    );
+    const running = pin("--confirm", "true");
+    expect(running.status).toBe(1);
+    expect(running.stderr).toContain("Stop the supervisor");
+    expect(read().requiredVersion).toBe("0.3.0");
+
+    f.save({ ...f.policy, requiredVersion: undefined });
+    expect(pin("--confirm", "true").stderr).toContain("is not pinned");
+    f.save({ version: 1 });
+    expect(pin("--confirm", "true").stderr).toContain("is not pinned");
+    f.save({ version: 1, requiredVersion: pkg.version });
+    expect(pin("--confirm", "true").stderr).toContain(
+      "require project policy version 2",
+    );
   } finally {
     rmSync(f.outer, { recursive: true, force: true });
   }
