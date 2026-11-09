@@ -212,16 +212,22 @@ async function main() {
   if (command === "configure") {
     const opts = options(rest, ["--file"]);
     if (!opts["--file"]) throw new Error("configure requires --file PATH");
-    const value = JSON.parse(
-      await readFile(resolve(requested, opts["--file"]), "utf8"),
-    );
+    let value: Record<string, unknown>;
+    try {
+      value = JSON.parse(
+        await readFile(resolve(requested, opts["--file"]), "utf8"),
+      );
+    } catch {
+      throw new Error("Configuration file is not valid JSON");
+    }
+    // SAFETY: validateConfig is the runtime decoder for untrusted JSON input.
     const config = validateConfig({
       ...value,
       root,
       coordinator: policy.coordinator,
       reviewers: policy.reviewers,
       reviewerRoles: policy.reviewerRoles,
-    });
+    } as unknown as Config);
     const release = await acquire(directory);
     try {
       const state = await optional(join(directory, "state.json"));
@@ -309,9 +315,13 @@ async function main() {
     const metadata = async () => {
       if (!opts["--input"])
         throw new Error("Evidence mutation requires --input metadata.json");
-      return JSON.parse(
-        await readFile(resolve(requested, opts["--input"]), "utf8"),
-      );
+      try {
+        return JSON.parse(
+          await readFile(resolve(requested, opts["--input"]), "utf8"),
+        );
+      } catch {
+        throw new Error("Evidence metadata is not valid JSON");
+      }
     };
     if (action === "list")
       return output(
