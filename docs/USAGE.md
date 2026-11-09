@@ -319,9 +319,9 @@ Keep engineering instructions, lane guidance and task cards in the project. A su
 
 Operator controls are queued as private command files and applied only by the supervisor loop. Every command records exactly one outcome (`applied`, `noop`, `refused`, `stale` or `invalid`) in `state.controlLog` with a monotonic `seq`; `--wait N` reports the outcome and exits 0 for applied/noop, 2 for refused/invalid and 3 for stale.
 
-- `pause --lane ID` holds one lane; `pause --all` holds the whole instance without draining or stopping it. `resume` releases only the requested hold and clears operator pauses, never failures or decisions.
-- `cancel --run RUN_ID` or `cancel --all true` terminates live runs with SIGTERM, then SIGKILL after the cleanup grace. Cancellation never resets budgets and always leaves a paused failure when cleanup is unverified.
-- `retry` clears only failure/no-progress pauses; `retry --confirm-cleanup true --text NOTE` acknowledges cleanup (lane-wide, or one task with `--task`); `retry --new-session --task ID --text NOTE` clears exactly one native session.
+- `pause --lane ID` holds one lane; `pause --all true` holds the whole instance without draining or stopping it. `resume` releases only the requested hold and clears operator pauses, never failures or decisions.
+- `cancel --lane ID --run RUN_ID` or `cancel --all true` terminates live runs with SIGTERM, then SIGKILL after the cleanup grace. Cancellation never resets budgets and always leaves a paused failure when cleanup is unverified.
+- `retry` clears only failure/no-progress pauses; `retry --confirm-cleanup true --text NOTE` acknowledges cleanup (lane-wide, or one task with `--task`); `retry --lane ID --task ID --new-session true --text NOTE` clears exactly one native session.
 - `resolve --lane ID [--task ID] --pause UUID (--approve true|--deny true) --text NOTE` resolves one decision pause by id. It never accepts work or grants permissions.
 - `stop` drains and stops; `stop --cancel-active true` also cancels live runs. `rollout` preserves running intent and is refused once a stop is recorded.
 - Wide actions are bound to the observed state (`expectRev`/`expectRun`/`expectSession` auto-filled by the CLI). Stale generation or revision is refused, not applied. State is written as v2; v1 state remains readable.

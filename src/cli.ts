@@ -26,6 +26,7 @@ import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
+import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
 import {
   defaultPolicy,
@@ -48,47 +49,6 @@ import {
   updateTarget,
 } from "./update.ts";
 
-const help = `Crewplane — local orchestration for coding agents
-
-Usage: crewplane [--project PATH] COMMAND
-  init                         Create project policy and private file store
-  pin --confirm true           Point the project's version pin at this release
-  doctor                       Check project and configured harness prerequisites
-  configure --file PATH        Validate and install an explicit supervisor config
-  agents COMMAND [OPTIONS]     Assign/scope/claim/status/send/inbox/accept/release
-  task list                    Show durable tasks and messages
-  agent list                   Show configured agents and observed process state
-  start                        Run the supervisor in the foreground
-  status                       Show persisted supervisor state (never starts it)
-  pause|resume|retry|nudge --lane ID [--text TEXT]
-  retry --lane ID --confirm-cleanup true --text NOTE
-                               Acknowledge inspected unverified descendants
-  retry --lane ID --task ID --new-session true --text NOTE
-                               Start a fresh native session for one task
-  resolve --lane ID [--task ID] --pause UUID (--approve true|--deny true) --text NOTE
-                               Record an operator decision for a decision pause
-  pause|resume --all [--wait N] Hold/release every lane without stopping
-  cancel (--run RUN | --all true) [--wait N]
-                               Terminate one live run or every live run
-  stop [--cancel-active true]  Request intentional stop and drain
-  resolve --lane ID --task ID --pause UUID (--approve|--deny) --text NOTE
-  rollout                      Request an authorized drain; no automatic restart
-  dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
-  evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
-  monitor [--once|--status]     Observe task progress and unanswered messages
-  watchdog start|once|status    Independent notice-only health observer
-  update [--check] [--force]   Replace this release binary with the latest one
-  --help | --version
-
-Git and configured harnesses are external dependencies. No automatic merge,
-provider login, budget increase, legacy-state adoption or service activation.
-
-Release builds check for updates at most once a day and replace themselves
-only after SHA-256 and executable verification; the new version runs on the
-next invocation. Automatic updates never run during long-lived commands or
-while any supervisor is live. Disable with CREWPLANE_NO_AUTO_UPDATE=1 or
-CREWPLANE_UPDATE=off; see docs/USAGE.md for the remaining update settings.
-`;
 const output = (value: unknown) =>
   console.log(
     typeof value === "string" ? value : JSON.stringify(value, null, 2),
