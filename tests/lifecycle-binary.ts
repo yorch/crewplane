@@ -75,6 +75,7 @@ function setup(name: string, mode: string, interval = 1) {
     PATH: tools,
     HOME: join(parent, "home"),
     CREWPLANE_COORD_DIR: "",
+    CREWPLANE_NO_AUTO_UPDATE: "1",
     CREWPLANE_FIXTURE_MODE: mode,
     CREWPLANE_FIXTURE_PID_FILE: join(
       root,

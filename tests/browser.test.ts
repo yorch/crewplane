@@ -12,7 +12,10 @@ it("renders the embedded dashboard with custom agents, narrow layouts and safe r
   );
   const bin = resolve("dist/crewplane");
   const cli = (...args: string[]) =>
-    execFileSync(bin, ["--project", root, ...args], { encoding: "utf8" });
+    execFileSync(bin, ["--project", root, ...args], {
+      encoding: "utf8",
+      env: { ...process.env, CREWPLANE_NO_AUTO_UPDATE: "1" },
+    });
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd: root, stdio: "pipe" });
   let child: ReturnType<typeof spawn> | undefined;

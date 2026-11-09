@@ -1,51 +1,252 @@
 #!/bin/sh
-# Install the Crewplane CLI from a GitHub release.
+# Crewplane installer — downloads a checksum-verified release binary.
+#
 #   curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh |
+#     sh -s -- --version v0.3.0 --dir "$HOME/bin"
+#
+# Flags:
+#   --version TAG   install an exact release, e.g. v0.3.0 (default: latest)
+#   --dir DIR       install directory (default: $CREWPLANE_INSTALL_DIR or ~/.local/bin)
+#   --dry-run       resolve the release and print the plan without downloading
+#   -h, --help      show this help
+#
 # Environment:
-#   CREWPLANE_VERSION      version to install, e.g. v0.2.0 (default: latest)
-#   CREWPLANE_INSTALL_DIR  target directory (default: $HOME/.local/bin)
+#   CREWPLANE_VERSION      same as --version
+#   CREWPLANE_INSTALL_DIR  same as --dir
+#   CREWPLANE_RELEASE_API  latest-release JSON (default: GitHub API)
+#   CREWPLANE_RELEASE_BASE release download base URL (default: GitHub releases)
+#
+# Never run under sudo: install into a user-writable directory instead.
 set -eu
 
 repo="yorch/crewplane"
-dir="${CREWPLANE_INSTALL_DIR:-$HOME/.local/bin}"
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'install: %s\n' "$*" >&2; }
+die() {
+  warn "$*"
+  exit 1
+}
+
+usage() {
+  say "Install the Crewplane CLI from a GitHub release."
+  say ""
+  say "Usage: install.sh [--version TAG] [--dir DIR] [--dry-run] [--help]"
+  say ""
+  say "  --version TAG   exact release to install (default: latest)"
+  say "  --dir DIR       install directory (default: ~/.local/bin)"
+  say "  --dry-run       print the resolved plan without downloading"
+  say "  -h, --help      show this help"
+  say ""
+  say "Environment: CREWPLANE_VERSION, CREWPLANE_INSTALL_DIR,"
+  say "CREWPLANE_RELEASE_API, CREWPLANE_RELEASE_BASE."
+  say "The binary is verified against its published SHA-256 before it replaces"
+  say "an existing installation. Windows is unsupported."
+}
+
+tmp=""
+stage=""
+cleanup() {
+  if [ -n "$stage" ]; then rm -f "$stage" || true; fi
+  if [ -n "$tmp" ]; then rm -rf "$tmp" || true; fi
+}
+trap cleanup EXIT HUP INT TERM
+
+fetch() {
+  url=$1
+  dest=$2
+  command -v curl >/dev/null 2>&1 ||
+    die "curl is required to download release assets"
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"; then
+      return 0
+    fi
+    warn "download failed (attempt $attempt/3): $url"
+    attempt=$((attempt + 1))
+    if [ "$attempt" -le 3 ]; then sleep 1; fi
+  done
+  return 1
+}
+
+have_hash() {
+  command -v sha256sum >/dev/null 2>&1 ||
+    command -v shasum >/dev/null 2>&1 ||
+    command -v openssl >/dev/null 2>&1
+}
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    openssl dgst -sha256 "$1" | awk '{ print $NF }'
+  fi
+}
+
+normalize_version() {
+  candidate=$1
+  case "$candidate" in
+    v*) ;;
+    *) candidate="v$candidate" ;;
+  esac
+  printf '%s\n' "$candidate" |
+    grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z.-]+)?$' ||
+    die "invalid version '$1' (expected MAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH)"
+  printf '%s\n' "$candidate"
+}
+
+resolve_latest() {
+  api="${CREWPLANE_RELEASE_API:-https://api.github.com/repos/$repo/releases/latest}"
+  fetch "$api" "$tmp/latest.json" || die "could not reach $api"
+  tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$tmp/latest.json" | head -n 1)
+  [ -n "$tag" ] || die "could not resolve the latest release from $api"
+  normalize_version "$tag"
+}
+
 version="${CREWPLANE_VERSION:-latest}"
+dir="${CREWPLANE_INSTALL_DIR:-$HOME/.local/bin}"
+dry_run=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --version)
+      [ "$#" -ge 2 ] || die "--version requires a value"
+      version=$2
+      shift 2
+      ;;
+    --version=*) version=${1#--version=} ;;
+    --dir | --prefix)
+      [ "$#" -ge 2 ] || die "$1 requires a value"
+      dir=$2
+      shift 2
+      ;;
+    --dir=*) dir=${1#--dir=} ;;
+    --prefix=*) dir=${1#--prefix=} ;;
+    --dry-run)
+      dry_run=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    -*) die "unknown option $1 (try --help)" ;;
+    *)
+      version=$1
+      shift
+      ;;
+  esac
+done
 
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) echo "install: unsupported OS $(uname -s) (Linux and macOS only)" >&2; exit 1 ;;
+  *) die "unsupported OS $(uname -s) (published: Linux and macOS)" ;;
 esac
-arch="$(uname -m)"
+
+case "$(uname -m)" in
+  x86_64 | amd64 | x64) arch=x86_64 ;;
+  arm64 | arm64e | aarch64 | armv8*) arch=arm64 ;;
+  *) die "unsupported architecture $(uname -m) (published: x86_64 and arm64)" ;;
+esac
+
+case "$dir" in
+  [~]) dir=$HOME ;;
+  [~]/*) dir="$HOME/${dir#?/}" ;;
+  /*) ;;
+  *) dir="$PWD/$dir" ;;
+esac
 
 if [ "$version" = latest ]; then
-  version="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" |
-    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
-  [ -n "$version" ] || { echo "install: could not resolve latest release" >&2; exit 1; }
+  tmp=$(mktemp -d 2>/dev/null) || die "cannot create a temporary directory"
+  version=$(resolve_latest)
 fi
+version=$(normalize_version "$version")
 
 asset="crewplane-$version-$os-$arch"
-base="https://github.com/$repo/releases/download/$version"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+base="${CREWPLANE_RELEASE_BASE:-https://github.com/$repo/releases/download}"
+base=${base%/}
+target="$dir/crewplane"
 
-echo "Installing crewplane $version ($os-$arch) to $dir"
-if ! curl -fsSL "$base/$asset" -o "$tmp/$asset" ||
-   ! curl -fsSL "$base/$asset.sha256" -o "$tmp/$asset.sha256"; then
-  echo "install: no published binary for $os-$arch in $version" >&2
-  exit 1
+if [ "$dry_run" -eq 1 ]; then
+  say "Would install crewplane $version ($os-$arch)"
+  say "  asset:  $asset"
+  say "  source: $base/$version/$asset"
+  say "  target: $target"
+  exit 0
 fi
 
-cd "$tmp"
-if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$asset.sha256" >/dev/null
-elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c "$asset.sha256" >/dev/null
-else echo "install: sha256sum or shasum required for verification" >&2; exit 1
+have_hash ||
+  die "sha256sum, shasum or openssl is required to verify the download"
+mkdir -p "$dir" || die "cannot create install directory $dir"
+[ -d "$dir" ] || die "$dir is not a directory"
+[ -w "$dir" ] || die "$dir is not writable; use --dir or fix permissions (avoid sudo)"
+[ -n "$tmp" ] || tmp=$(mktemp -d 2>/dev/null) || die "cannot create a temporary directory"
+
+previous=""
+if [ -e "$target" ] || [ -L "$target" ]; then
+  [ -f "$target" ] || die "$target exists and is not a regular file"
+  [ -w "$target" ] || die "$target is not writable; install elsewhere with --dir"
+  if [ -L "$target" ]; then
+    warn "$target is a symbolic link and will be replaced by a real file"
+  fi
+  previous=$("$target" --version 2>/dev/null || true)
 fi
 
-mkdir -p "$dir"
-chmod +x "$asset"
-mv "$asset" "$dir/crewplane"
-echo "Installed: $dir/crewplane"
-case ":$PATH:" in
-  *":$dir:"*) ;;
-  *) echo "Add to PATH: export PATH=\"$dir:\$PATH\"" ;;
+stage="$dir/.crewplane.$$.tmp"
+say "Downloading crewplane $version ($os-$arch)"
+fetch "$base/$version/$asset" "$stage" ||
+  die "no published binary for $os-$arch in $version"
+fetch "$base/$version/$asset.sha256" "$tmp/$asset.sha256" ||
+  die "no checksum published for $asset in $version"
+
+expected=$(awk -v name="$asset" '
+  {
+    hash = $1
+    file = $2
+    sub(/^\*/, "", file)
+    if (file == "" || file == name) { print hash; exit }
+  }
+' "$tmp/$asset.sha256")
+case "$expected" in
+  "" | *[!0-9a-fA-F]*) die "unreadable checksum for $asset; refusing to install" ;;
 esac
+[ "${#expected}" -eq 64 ] ||
+  die "unreadable checksum for $asset; refusing to install"
+expected=$(printf '%s\n' "$expected" | tr 'A-F' 'a-f')
+actual=$(hash_file "$stage")
+[ "$actual" = "$expected" ] ||
+  die "checksum mismatch for $asset; refusing to install"
+
+chmod +x "$stage"
+downloaded=$("$stage" --version 2>/dev/null || true)
+[ -n "$downloaded" ] ||
+  die "downloaded $asset does not run on this machine ($os-$arch)"
+[ "$downloaded" = "${version#v}" ] ||
+  die "downloaded $asset reports $downloaded but $version was requested"
+
+mv -f "$stage" "$target"
+stage=""
+installed=$("$target" --version 2>/dev/null || true)
+[ -n "$installed" ] || installed=${version#v}
+
+if [ -n "$previous" ] && [ "$previous" != "$installed" ]; then
+  say "Updated crewplane $previous -> $installed at $target"
+elif [ -n "$previous" ]; then
+  say "Reinstalled crewplane $installed at $target"
+else
+  say "Installed crewplane $installed at $target"
+fi
+
+case ":${PATH:-}:" in
+  *":$dir:"*) ;;
+  *) say "Add $dir to PATH: export PATH=\"$dir:\$PATH\"" ;;
+esac
+resolved=$(command -v crewplane 2>/dev/null || true)
+if [ -n "$resolved" ] && [ "$resolved" != "$target" ]; then
+  warn "note: '$resolved' currently comes first on PATH"
+fi

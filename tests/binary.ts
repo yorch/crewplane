@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import {
   type ChildProcess,
+  execFile,
   execFileSync,
   spawn,
   spawnSync,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -13,10 +15,12 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -44,6 +48,7 @@ const env = {
   HOME: join(temp, "home"),
   CREWPLANE_COORD_DIR: "",
   CREWPLANE_EXECUTABLE: bin,
+  CREWPLANE_NO_AUTO_UPDATE: "1",
 };
 const command = (...args: string[]) => {
   const result = spawnSync(bin, ["--project", root, ...args], {
@@ -488,8 +493,150 @@ try {
   await closed(recovered);
   assert.equal(json("status").desired.desiredRunning, false);
   assert(!existsSync(join(directory, "watcher.lock")));
+
+  // Self-update acceptance: only a compiled binary replaces itself, and only
+  // after the published checksum and executable header are verified.
+  const updateDirectory = join(temp, "update");
+  mkdirSync(updateDirectory, { recursive: true });
+  const updateBin = join(updateDirectory, "crewplane");
+  copyFileSync(bin, updateBin);
+  const releaseEntry = join(temp, "release-version.ts");
+  writeFileSync(releaseEntry, 'console.log("9.9.9");\n');
+  const releasePayload = join(temp, "release-payload");
+  const releaseBuild = await Bun.build({
+    entrypoints: [releaseEntry],
+    compile: { outfile: releasePayload },
+  });
+  assert(releaseBuild.success);
+  const releaseBytes = readFileSync(releasePayload);
+  const releaseOs = process.platform === "darwin" ? "macos" : "linux",
+    releaseArch = process.arch === "x64" ? "x86_64" : "arm64",
+    releaseAsset = `crewplane-v9.9.9-${releaseOs}-${releaseArch}`,
+    releaseHash = createHash("sha256").update(releaseBytes).digest("hex");
+  const releaseServer = createHttpServer((request, response) => {
+    const url = request.url ?? "/";
+    if (url === "/latest") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ tag_name: "v9.9.9" }));
+      return;
+    }
+    if (url === `/download/v9.9.9/${releaseAsset}`) {
+      response.writeHead(200);
+      response.end(releaseBytes);
+      return;
+    }
+    if (url === `/download/v9.9.9/${releaseAsset}.sha256`) {
+      response.writeHead(200);
+      response.end(`${releaseHash}  ${releaseAsset}\n`);
+      return;
+    }
+    response.writeHead(404);
+    response.end("not found");
+  });
+  try {
+    await new Promise<void>((done) =>
+      releaseServer.listen(0, "127.0.0.1", done),
+    );
+    const { port } = releaseServer.address() as AddressInfo;
+    const updateEnv = {
+      ...env,
+      CREWPLANE_RELEASE_API: `http://127.0.0.1:${port}/latest`,
+      CREWPLANE_RELEASE_BASE: `http://127.0.0.1:${port}/download`,
+      CREWPLANE_CACHE_DIR: join(temp, "update-cache"),
+      CREWPLANE_NO_AUTO_UPDATE: "1",
+    };
+    // Async execution keeps this process's release server responsive.
+    const update = (args: string[]) =>
+      new Promise<{ status: number; stdout: string; stderr: string }>((done) =>
+        execFile(
+          updateBin,
+          args,
+          { env: updateEnv, encoding: "utf8", timeout: 120000 },
+          (error, stdout, stderr) => {
+            const code =
+              error && typeof (error as { code?: unknown }).code === "number"
+                ? (error as { code: number }).code
+                : error
+                  ? 1
+                  : 0;
+            done({ status: code, stdout, stderr });
+          },
+        ),
+      );
+    const version = () => update(["--version"]);
+    const checked = await update(["update", "--check"]);
+    assert.equal(checked.status, 0, checked.stderr);
+    const available = JSON.parse(checked.stdout) as {
+      status: string;
+      current: string;
+      latest: string;
+    };
+    assert.equal(available.status, "available");
+    assert.equal(available.current, "0.2.0");
+    assert.equal(available.latest, "9.9.9");
+    assert.equal((await version()).stdout.trim(), "0.2.0");
+
+    const updated = await update(["update"]);
+    assert.equal(updated.status, 0, updated.stderr);
+    assert.equal(
+      (JSON.parse(updated.stdout) as { status: string }).status,
+      "updated",
+    );
+    assert.equal(readFileSync(updateBin).equals(releaseBytes), true);
+    assert.notEqual(statSync(updateBin).mode & 0o111, 0);
+    assert.equal((await version()).stdout.trim(), "9.9.9");
+
+    // A plain project command must schedule the detached updater, which then
+    // replaces the stale binary without the foreground command waiting.
+    const autoBin = join(updateDirectory, "auto", "crewplane");
+    mkdirSync(join(updateDirectory, "auto"), { recursive: true });
+    copyFileSync(bin, autoBin);
+    const autoEnv = {
+      ...env,
+      CREWPLANE_RELEASE_API: updateEnv.CREWPLANE_RELEASE_API,
+      CREWPLANE_RELEASE_BASE: updateEnv.CREWPLANE_RELEASE_BASE,
+      CREWPLANE_CACHE_DIR: join(temp, "auto-cache"),
+    };
+    const ran = await new Promise<{ status: number; stderr: string }>((done) =>
+      execFile(
+        autoBin,
+        ["--project", root, "status"],
+        { env: autoEnv, encoding: "utf8", timeout: 30000 },
+        (error, _stdout, stderr) =>
+          done({
+            status: error
+              ? typeof (error as { code?: unknown }).code === "number"
+                ? (error as { code: number }).code
+                : 1
+              : 0,
+            stderr,
+          }),
+      ),
+    );
+    assert.equal(ran.status, 0, ran.stderr);
+    const replaced = () => {
+      try {
+        return readFileSync(autoBin).equals(releaseBytes);
+      } catch {
+        return false;
+      }
+    };
+    await until(replaced, "detached automatic update replaces the executable");
+    const autoVersion = await new Promise<string>((done) => {
+      execFile(
+        autoBin,
+        ["--version"],
+        { env: autoEnv, encoding: "utf8", timeout: 120000 },
+        (_error, stdout) => done(stdout.trim()),
+      );
+    });
+    assert.equal(autoVersion, "9.9.9");
+  } finally {
+    await new Promise<void>((done) => releaseServer.close(() => done()));
+  }
+
   console.log(
-    "Standalone acceptance passed: no Node/Bun on PATH; two worktrees, messages, pinned review, author correction/session reuse, linear integration, embedded assets/traces, intentional stop and crash recovery.",
+    "Standalone acceptance passed: no Node/Bun on PATH; two worktrees, messages, pinned review, author correction/session reuse, linear integration, embedded assets/traces, intentional stop, crash recovery and checksum-verified self-update.",
   );
 } finally {
   for (const child of children)

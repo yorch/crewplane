@@ -25,7 +25,10 @@ let child: ChildProcess | undefined;
 let answeredQuestion = "";
 let openQuestion = "";
 const cli = (...args: string[]) =>
-  execFileSync(bin, ["--project", root, ...args], { encoding: "utf8" });
+  execFileSync(bin, ["--project", root, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, CREWPLANE_NO_AUTO_UPDATE: "1" },
+  });
 const agents = (...args: string[]) =>
   JSON.parse(cli("agents", ...args)) as { id: string };
 
