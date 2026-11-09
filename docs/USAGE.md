@@ -228,3 +228,26 @@ Peer questions from task owners require `--task ID`. Unanswered questions addres
 ## Dashboard navigation
 
 The read-only dashboard opens on Overview, with attention items and metrics linking to filtered views. Use the sidebar (or the menu button on mobile) for Tasks, Agents, Messages, Runs, Relationships and System & notes. Tasks offer board/list layouts and a detail pane; agent details separate configured models from observed values. Open conversations and run timelines have direct links. The URL retains the view, filters and selected item across reloads and supports browser back/forward. Polls preserve focus and expanded context; a disconnected banner marks retained data as potentially stale. No reply or execution controls are introduced. See docs/dashboard-design.md for layout, keyboard behavior and coverage limits.
+
+## Project-owned pins and full agent prompts
+
+Projects need no launcher adapter. Opt into project policy version 2 in crewplane.json:
+
+```json
+{
+  "version": 2,
+  "requiredVersion": "0.3.0",
+  "coordinator": "captain",
+  "reviewers": ["inspector"],
+  "promptFiles": {
+    "builder": ["docs/agents/common.md", "docs/agents/builder.md"],
+    "inspector": ["docs/agents/reviewer.md"]
+  }
+}
+```
+
+The optional requiredVersion is an exact release version, not a range. Project commands check the primary checkout's policy before preparing store files; mismatches explain the required and running versions. A pinned project does not schedule automatic self-update. Global --help/--version/update remain available for installation recovery; explicit global update is independent of project pins, so use the upstream installer with CREWPLANE_VERSION to select an exact release. Existing version-1 policies keep their defaults; the new fields require version 2 so older binaries reject them rather than silently skipping enforcement. Policy version is independent of store/config/message schema versions; no store migration occurs.
+
+crewplane agents prompt builder always supplies built-in role guidance and appends the ordered configured files. Paths and policy come from the canonical primary even when invoked in a linked worker checkout. Each file must be regular valid UTF-8 without NUL, at most 32 KiB; total rendered context is bounded to 64 KiB. Paths must stay inside the project, including resolved symlinks, and cannot read .git or Crewplane private state. Missing, malformed, escaping or oversized files fail explicitly. Empty/absent lists preserve built-in prompts. The files are instructions/data, never automatic command execution or task authority.
+
+Keep engineering instructions, lane guidance and task cards in the project. A supervised tool-capable agent reads the configured AGENTS instructions, which can direct it to run this same native prompt command; this change does not alter supervisor prompts, harness isolation or no-tools capabilities. Runtime per-lane guidance is a separate configured capability. Legacy cutover warnings and rollback steps belong in project documentation, not in an adapter every project must copy. Normal shell/package/just aliases may call the installed crewplane executable directly. No Node/Bun wrapper is required to run it.
