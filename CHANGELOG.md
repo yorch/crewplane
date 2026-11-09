@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/yorch/crewplane/compare/v0.2.0...v0.3.0) (2026-11-09)
+
+
+### Features
+
+* **cli:** add verified self-update and background update checks ([adc5340](https://github.com/yorch/crewplane/commit/adc53408e70d1a3ad8cd06e006188e308a9c263f))
+* **harness:** add Claude Code and OpenCode adapters ([957319a](https://github.com/yorch/crewplane/commit/957319a3eb21fe0174319c10c4bcf522d87f8657))
+* **project:** enforce native version pins and compose agent prompts ([03fc877](https://github.com/yorch/crewplane/commit/03fc87710bcf5b6cbcfd7913fa8af11fff7f5e52))
+* **release:** harden the installer and cover self-update end to end ([9bfb669](https://github.com/yorch/crewplane/commit/9bfb6699688bd23771845aaf9d1b14fc05001666))
+
+
+### Bug Fixes
+
+* **cli:** harden self-update against adversarial review ([f46359b](https://github.com/yorch/crewplane/commit/f46359b747c255d601cb5e70c58ab6aa0c99e6c6))
+* **cli:** report invalid JSON input clearly ([656e09a](https://github.com/yorch/crewplane/commit/656e09a8e60dd7f1888bea911f8c7f5d971f102c))
+* **release:** repair installer argument loop and signal handling ([27e8446](https://github.com/yorch/crewplane/commit/27e8446d7f48c3b30c6a25975f8c8d9722c2d16c))
+
 ## [0.2.0](https://github.com/yorch/crewplane/compare/v0.1.0...v0.2.0) (2026-11-08)
 
 
