@@ -21,10 +21,13 @@ import {
 } from "../src/project.ts";
 import { projectAgentPrompt } from "../src/prompts.ts";
 
+// No dispatch by default: keep every test hermetic from this machine's
+// retained releases, and let dispatch tests point at their own root.
 const env = {
   ...process.env,
   CREWPLANE_COORD_DIR: "",
   CREWPLANE_NO_AUTO_UPDATE: "1",
+  CREWPLANE_RELEASES_DIR: join(tmpdir(), "crewplane-test-releases-absent"),
 };
 function fixture() {
   const outer = realpathSync(
@@ -339,6 +342,209 @@ it("names the primary pin when a linked worktree disagrees with it", () => {
     expect(refused.stderr).toContain("Project requires Crewplane 0.3.0");
     expect(refused.stderr).toContain(`requiredVersion in ${f.root}`);
     expect(refused.stderr).not.toContain(worker);
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("dispatches a pinned project to the retained copy of its release", () => {
+  const f = fixture();
+  try {
+    const bin = resolve("dist/crewplane");
+    const releases = join(f.outer, "releases");
+    const retained = join(releases, "0.3.0", "crewplane");
+    mkdirSync(join(releases, "0.3.0"), { recursive: true });
+    writeFileSync(
+      retained,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo 0.3.0; exit 0; fi',
+        'echo "DISPATCHED guard=$CREWPLANE_DISPATCHED argv=$*"',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const dispatchEnv = { ...env, CREWPLANE_RELEASES_DIR: releases };
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+
+    const served = spawnSync(bin, ["--project", f.root, "status"], {
+      cwd: f.root,
+      env: dispatchEnv,
+      encoding: "utf8",
+    });
+    expect(served.status).toBe(0);
+    expect(served.stdout).toContain("DISPATCHED guard=0.3.0");
+    // The original argv reaches the pinned release untouched.
+    expect(served.stdout).toContain("--project");
+    expect(served.stdout).toContain("status");
+    expect(served.stderr).not.toContain("Project requires");
+
+    // `pin` must repoint at the running release, never hand off to the pin.
+    const pinned = spawnSync(
+      bin,
+      ["--project", f.root, "pin", "--confirm", "true"],
+      { cwd: f.root, env: dispatchEnv, encoding: "utf8" },
+    );
+    expect(pinned.status).toBe(0);
+    expect(pinned.stdout).not.toContain("DISPATCHED");
+    expect(JSON.parse(pinned.stdout).to).toBe(pkg.version);
+
+    // One hop only: a dispatched process must not dispatch again.
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    const hopped = spawnSync(bin, ["--project", f.root, "status"], {
+      cwd: f.root,
+      env: { ...dispatchEnv, CREWPLANE_DISPATCHED: "0.3.0" },
+      encoding: "utf8",
+    });
+    expect(hopped.status).toBe(1);
+    expect(hopped.stderr).toContain("Project requires Crewplane 0.3.0");
+    expect(hopped.stdout).not.toContain("DISPATCHED");
+
+    // A lane inherits its supervisor's marker, which names a different release;
+    // that must not disable dispatch for a project pinned elsewhere.
+    const lane = spawnSync(bin, ["--project", f.root, "status"], {
+      cwd: f.root,
+      env: { ...dispatchEnv, CREWPLANE_DISPATCHED: "0.1.0" },
+      encoding: "utf8",
+    });
+    expect(lane.status).toBe(0);
+    expect(lane.stdout).toContain("DISPATCHED");
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("refuses when the retained copy is not the pinned release", () => {
+  const f = fixture();
+  try {
+    const releases = join(f.outer, "releases");
+    const retained = join(releases, "0.3.0", "crewplane");
+    mkdirSync(join(releases, "0.3.0"), { recursive: true });
+    writeFileSync(
+      retained,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo 9.9.9; exit 0; fi',
+        'echo "DISPATCHED"',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    const refused = spawnSync(
+      resolve("dist/crewplane"),
+      ["--project", f.root, "status"],
+      {
+        cwd: f.root,
+        env: { ...env, CREWPLANE_RELEASES_DIR: releases },
+        encoding: "utf8",
+      },
+    );
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).not.toContain("DISPATCHED");
+    expect(refused.stderr).toContain("Project requires Crewplane 0.3.0");
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("does not dispatch into a store a newer release already owns", () => {
+  const f = fixture();
+  try {
+    const releases = join(f.outer, "releases");
+    mkdirSync(join(releases, "0.3.0"), { recursive: true });
+    writeFileSync(
+      join(releases, "0.3.0", "crewplane"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo 0.3.0; exit 0; fi',
+        'echo "DISPATCHED"',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(f.root, ".crewplane-state", "supervisor", "state.json"),
+      JSON.stringify({
+        running: true,
+        pid: process.pid,
+        supervisorVersion: "9.9.9",
+      }),
+    );
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    const refused = spawnSync(
+      resolve("dist/crewplane"),
+      ["--project", f.root, "status"],
+      {
+        cwd: f.root,
+        env: { ...env, CREWPLANE_RELEASES_DIR: releases },
+        encoding: "utf8",
+      },
+    );
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).not.toContain("DISPATCHED");
+    expect(refused.stderr).toContain("Project requires Crewplane 0.3.0");
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
+it("fails closed on unusable supervisor state and ignores a dead owner", () => {
+  const f = fixture();
+  try {
+    const bin = resolve("dist/crewplane");
+    const releases = join(f.outer, "releases");
+    mkdirSync(join(releases, "0.3.0"), { recursive: true });
+    writeFileSync(
+      join(releases, "0.3.0", "crewplane"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo 0.3.0; exit 0; fi',
+        'echo "DISPATCHED"',
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const stateFile = join(
+      f.root,
+      ".crewplane-state",
+      "supervisor",
+      "state.json",
+    );
+    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
+      recursive: true,
+    });
+    f.save({ ...f.policy, requiredVersion: "0.3.0" });
+    const run = () =>
+      spawnSync(bin, ["--project", f.root, "status"], {
+        cwd: f.root,
+        env: { ...env, CREWPLANE_RELEASES_DIR: releases },
+        encoding: "utf8",
+      });
+
+    // A dead owner leaves running:true behind; that must not block dispatch.
+    writeFileSync(
+      stateFile,
+      JSON.stringify({
+        running: true,
+        pid: 999_999,
+        supervisorVersion: "9.9.9",
+      }),
+    );
+    expect(run().stdout).toContain("DISPATCHED");
+
+    // An unparseable release is not proof that dispatch is safe.
+    writeFileSync(
+      stateFile,
+      JSON.stringify({
+        running: true,
+        pid: process.pid,
+        supervisorVersion: "not-a-version",
+      }),
+    );
+    const refused = run();
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).not.toContain("DISPATCHED");
+    expect(refused.stderr).toContain("project state is unusable");
   } finally {
     rmSync(f.outer, { recursive: true, force: true });
   }

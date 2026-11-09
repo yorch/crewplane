@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import {
   access,
   chmod,
@@ -15,8 +15,131 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { syncDirectory } from "./io.ts";
+
+/**
+ * Root holding one retained binary per release this machine's shared binary has
+ * replaced. The directory layout is the only registry: `<root>/<version>/crewplane`.
+ */
+export function releasesRoot(
+  environment: UpdateEnvironment = process.env,
+  home: string = homedir(),
+): string {
+  const explicit = environment.CREWPLANE_RELEASES_DIR;
+  if (explicit !== undefined && explicit !== "") {
+    // A relative root would resolve against whatever directory we were started
+    // in, including a repository checkout.
+    if (!isAbsolute(explicit))
+      throw new Error("CREWPLANE_RELEASES_DIR must be an absolute path");
+    return explicit;
+  }
+  const data = environment.XDG_DATA_HOME;
+  if (data !== undefined && data !== "" && !isAbsolute(data))
+    throw new Error("XDG_DATA_HOME must be an absolute path");
+  return join(data || join(home, ".local", "share"), "crewplane");
+}
+
+/** Where a retained release would live; it may or may not exist yet. */
+export function retainedReleasePath(
+  version: string,
+  environment: UpdateEnvironment = process.env,
+): string {
+  return join(releasesRoot(environment), version, "crewplane");
+}
+
+/** A retained copy is immutable: it must never update itself. */
+export function isRetained(
+  execPath: string,
+  environment: UpdateEnvironment = process.env,
+): boolean {
+  const root = canonicalPath(releasesRoot(environment));
+  const candidate = canonicalPath(execPath);
+  return candidate === root || candidate.startsWith(`${root}${sep}`);
+}
+
+/** Resolve symlinks for existing paths so comparisons survive a linked data dir. */
+function canonicalPath(value: string): string {
+  try {
+    return realpathSync(value);
+  } catch {
+    return resolve(value);
+  }
+}
+
+/** Every component that can redirect execution must be a safe directory. */
+async function safeDirectory(directory: string): Promise<boolean> {
+  try {
+    const info = await lstat(directory);
+    if (info.isSymbolicLink() || !info.isDirectory()) return false;
+    const uid = process.getuid?.();
+    if (uid !== undefined && info.uid !== uid) return false;
+    return (info.mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a retained release that is safe to exec for `version`, or null. The
+ * release directory, the root and the copy itself must be this user's, not
+ * symlinks and not group/world writable, and the copy must report exactly the
+ * requested version. A writable parent would let something swap the file
+ * between that check and the exec.
+ */
+export async function dispatchTarget(
+  version: string,
+  environment: UpdateEnvironment = process.env,
+): Promise<string | null> {
+  try {
+    const root = releasesRoot(environment);
+    if (!(await safeDirectory(root))) return null;
+    const directory = dirname(retainedReleasePath(version, environment));
+    if (!(await safeDirectory(directory))) return null;
+    const path = retainedReleasePath(version, environment);
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isFile()) return null;
+    const uid = process.getuid?.();
+    if (uid !== undefined && info.uid !== uid) return null;
+    if ((info.mode & 0o022) !== 0) return null;
+    if ((await runVersion(path)) !== version) return null;
+    return path;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Keep the bytes we are about to replace, so a project pinned to the running
+ * release can still be served after this binary moves. The copy is verified
+ * before it is trusted: an existing slot that fails verification is repaired,
+ * and a copy that cannot be verified aborts the swap rather than quietly
+ * destroying the last good release.
+ */
+async function retainRelease(
+  target: string,
+  version: string,
+  environment: UpdateEnvironment,
+): Promise<void> {
+  if ((await dispatchTarget(version, environment)) !== null) return;
+  const destination = retainedReleasePath(version, environment);
+  let bytes: Uint8Array;
+  try {
+    bytes = await readFile(target);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Read failed";
+    throw new Error(`Could not read the running release (${reason})`);
+  }
+  try {
+    await mkdir(dirname(destination), { recursive: true, mode: 0o755 });
+    await installBinary(destination, bytes, { expectedVersion: version });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Retain failed";
+    throw new Error(
+      `Could not keep ${version} reachable (${reason}); set CREWPLANE_RELEASES_DIR to a writable directory`,
+    );
+  }
+}
 
 /**
  * Self-update support for release binaries. The release contract is one asset
@@ -391,12 +514,15 @@ export function isReleaseBuild(): boolean {
   return process.env.CREWPLANE_RELEASE_BUILD === "1";
 }
 
-/** Only a compiled, release-marked binary replaces itself. */
+/** Only a compiled, release-marked binary replaces itself, never a retained copy. */
 export function updateTarget(
   releaseMarked: boolean,
   execPath: string,
+  environment: UpdateEnvironment = process.env,
 ): string | null {
-  return releaseMarked && execPath !== "" ? execPath : null;
+  if (!releaseMarked || execPath === "") return null;
+  if (isRetained(execPath, environment)) return null;
+  return execPath;
 }
 
 export function isProcessAlive(pid: number | undefined): boolean {
@@ -432,7 +558,11 @@ export function shouldScheduleUpdate(input: ScheduleDecision): boolean {
   if ((longRunningCommands as readonly string[]).includes(input.command))
     return false;
   if (autoUpdateDisabled(input.environment)) return false;
-  const target = updateTarget(input.releaseMarked, input.execPath);
+  const target = updateTarget(
+    input.releaseMarked,
+    input.execPath,
+    input.environment,
+  );
   if (target === null) return false;
   return updateDue(
     input.cache,
@@ -813,6 +943,7 @@ function childEnvironment(environment: UpdateEnvironment): NodeJS.ProcessEnv {
     "LC_ALL",
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
     "SystemRoot",
   ]);
   const result: NodeJS.ProcessEnv = {};
@@ -850,6 +981,7 @@ export async function runUpdate(
   const target = updateTarget(
     request.releaseMarked ?? isReleaseBuild(),
     request.execPath ?? process.execPath,
+    environment,
   );
   if (targetPlatform === null || target === null)
     return outcome({
@@ -884,6 +1016,7 @@ export async function runUpdate(
       config,
       fetchImpl,
     );
+    await retainRelease(target, request.current, environment);
     if (!(await safeToReplace()))
       throw new Error(
         "A supervisor started during the update; the executable was not replaced",

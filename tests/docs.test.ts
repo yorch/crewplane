@@ -23,7 +23,8 @@ it("documents release pins with the release this package is", () => {
   const installs = [...pinDocs.matchAll(/--version v(\S+)/g)].map(
     (match) => match[1],
   );
-  const directories = [...pinDocs.matchAll(/crewplane\/([^"/\s]+)"/g)].map(
+  // The per-release install directory, however its root is spelled.
+  const directories = [...pinDocs.matchAll(/--dir "[^"]*\/([^"/]+)"/g)].map(
     (match) => match[1],
   );
   // Guard the guard: a silently withdrawn example must not pass vacuously.

@@ -52,6 +52,8 @@ const env = {
   CREWPLANE_COORD_DIR: "",
   CREWPLANE_EXECUTABLE: bin,
   CREWPLANE_NO_AUTO_UPDATE: "1",
+  // Keep dispatch hermetic: never resolve this machine's retained releases.
+  CREWPLANE_RELEASES_DIR: join(temp, "releases-hermetic"),
 };
 const command = (...args: string[]) => {
   const result = spawnSync(bin, ["--project", root, ...args], {
@@ -546,6 +548,7 @@ try {
       CREWPLANE_RELEASE_API: `http://127.0.0.1:${port}/latest`,
       CREWPLANE_RELEASE_BASE: `http://127.0.0.1:${port}/download`,
       CREWPLANE_CACHE_DIR: join(temp, "update-cache"),
+      CREWPLANE_RELEASES_DIR: join(temp, "releases"),
       CREWPLANE_NO_AUTO_UPDATE: "1",
       // The plain build is release-marked at runtime for this acceptance.
       CREWPLANE_RELEASE_BUILD: "1",
@@ -590,6 +593,122 @@ try {
     assert.equal(readFileSync(updateBin).equals(releaseBytes), true);
     assert.notEqual(statSync(updateBin).mode & 0o111, 0);
     assert.equal((await version()).stdout.trim(), "9.9.9");
+
+    // The release we just replaced must stay reachable and still work: it is a
+    // real binary, not a stub, and it must never replace itself.
+    const retained = join(temp, "releases", pkg.version, "crewplane");
+    assert.equal(
+      existsSync(retained),
+      true,
+      "replaced release was not retained",
+    );
+    const retainedVersion = await new Promise<string>((done, fail) =>
+      execFile(
+        retained,
+        ["--version"],
+        {
+          env: { ...updateEnv, CREWPLANE_NO_AUTO_UPDATE: "" },
+          encoding: "utf8",
+        },
+        (error, stdout) => (error ? fail(error) : done(stdout)),
+      ),
+    );
+    assert.equal(retainedVersion.trim(), pkg.version);
+    const retainedCheck = await new Promise<string>((done, fail) =>
+      execFile(
+        retained,
+        ["update", "--check"],
+        {
+          env: { ...updateEnv, CREWPLANE_NO_AUTO_UPDATE: "" },
+          encoding: "utf8",
+        },
+        (error, stdout) => (error ? fail(error) : done(stdout)),
+      ),
+    );
+    assert.equal(
+      (JSON.parse(retainedCheck) as { status: string }).status,
+      "unsupported",
+      "a retained copy must never be an update target",
+    );
+
+    // Dispatch is driven by the real binary, not by the downloaded stub: the
+    // stub ignores argv and prints its version, so it can prove nothing about
+    // pin handling. Here the pristine release runs with a project pinned to an
+    // older release that is installed in the retained layout.
+    const dispatchReleases = join(temp, "dispatch-releases");
+    const oldRelease = join(dispatchReleases, "0.3.0");
+    mkdirSync(oldRelease, { recursive: true });
+    writeFileSync(
+      join(oldRelease, "crewplane"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then echo 0.3.0; exit 0; fi',
+        "echo DISPATCHED_OLD_RELEASE",
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const pinnedBefore = readFileSync(join(root, "crewplane.json"), "utf8");
+    try {
+      writeFileSync(
+        join(root, "crewplane.json"),
+        JSON.stringify({
+          ...(JSON.parse(pinnedBefore) as Record<string, unknown>),
+          version: 2,
+          requiredVersion: "0.3.0",
+        }),
+      );
+      const dispatchEnv = { ...env, CREWPLANE_RELEASES_DIR: dispatchReleases };
+      const runPinned = (releaseEnv: Record<string, string>) =>
+        new Promise<{ status: number; stdout: string; stderr: string }>(
+          (done) =>
+            execFile(
+              bin,
+              ["--project", root, "status"],
+              { env: releaseEnv, encoding: "utf8", timeout: 30000 },
+              (error, stdout, stderr) =>
+                done({
+                  status:
+                    error &&
+                    typeof (error as { code?: unknown }).code === "number"
+                      ? (error as { code: number }).code
+                      : error
+                        ? 1
+                        : 0,
+                  stdout,
+                  stderr,
+                }),
+            ),
+        );
+
+      const dispatched = await runPinned(dispatchEnv);
+      assert.equal(dispatched.status, 0, dispatched.stderr);
+      assert.equal(dispatched.stdout.includes("DISPATCHED_OLD_RELEASE"), true);
+      assert.equal(
+        dispatched.stderr.includes("Project requires Crewplane"),
+        false,
+        "dispatch should serve the pinned release, not refuse",
+      );
+
+      // Without a verified copy of the pinned release the same command refuses.
+      const missing = await runPinned({
+        ...env,
+        CREWPLANE_RELEASES_DIR: join(temp, "no-releases"),
+      });
+      assert.equal(missing.status, 1);
+      assert.equal(missing.stdout.includes("DISPATCHED_OLD_RELEASE"), false);
+      assert.equal(
+        missing.stderr.includes("Project requires Crewplane 0.3.0"),
+        true,
+      );
+      assert.equal(
+        missing.stderr.includes("dispatch:"),
+        true,
+        "the refusal must say why dispatch was skipped",
+      );
+    } finally {
+      writeFileSync(join(root, "crewplane.json"), pinnedBefore);
+    }
 
     // A plain project command must schedule the detached updater, which then
     // replaces the stale binary without the foreground command waiting.
