@@ -1,5 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import {
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { gitEnvironment } from "./environment.ts";
@@ -51,6 +58,27 @@ export interface ProjectPolicy extends Roles {
   instructionsPath: string;
   roadmapFormat?: "none" | "relay";
 }
+const exactVersion =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
+/** A project pinned to a release this executable is not, with where to look. */
+export class ProjectVersionError extends Error {
+  readonly required: string;
+  readonly running: string;
+  readonly policyPath: string;
+  constructor(pin: {
+    required: string;
+    running: string;
+    policyPath: string;
+  }) {
+    super(
+      `Project requires Crewplane ${pin.required}; running ${pin.running}. Install the required release before running project commands.`,
+    );
+    this.name = "ProjectVersionError";
+    this.required = pin.required;
+    this.running = pin.running;
+    this.policyPath = pin.policyPath;
+  }
+}
 export const defaultPolicy: ProjectPolicy = {
   version: 1,
   roadmapFormat: "none",
@@ -62,7 +90,10 @@ export const defaultPolicy: ProjectPolicy = {
   statusPath: "STATUS.md",
   instructionsPath: "AGENTS.md",
 };
-export function projectPolicy(root: string): ProjectPolicy {
+export function projectPolicy(
+  root: string,
+  options: { checkVersion?: boolean } = {},
+): ProjectPolicy {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(`${root}/crewplane.json`, "utf8"));
@@ -80,8 +111,28 @@ export function projectPolicy(root: string): ProjectPolicy {
         ([id]) => Array.isArray(p.reviewers) && p.reviewers.includes(id),
       ),
     );
+  if (p.version === 1 && ("requiredVersion" in raw || "promptFiles" in raw))
+    throw new Error(
+      "requiredVersion and promptFiles require project policy version 2",
+    );
+  // The pin is decoded before roles and schema version so a project owned by a
+  // newer release names the pin instead of an unrelated policy error.
+  if (p.requiredVersion !== undefined) {
+    if (
+      typeof p.requiredVersion !== "string" ||
+      !exactVersion.test(p.requiredVersion)
+    )
+      throw new Error("requiredVersion must be an exact release version");
+    if (p.requiredVersion !== pkg.version && options.checkVersion !== false)
+      throw new ProjectVersionError({
+        required: p.requiredVersion,
+        running: pkg.version,
+        policyPath: join(root, "crewplane.json"),
+      });
+  }
+  if (![1, 2].includes(p.version))
+    throw new Error("Unsupported project policy version");
   if (
-    ![1, 2].includes(p.version) ||
     !["none", "relay"].includes(p.roadmapFormat ?? "none") ||
     !validId(p.coordinator) ||
     !Array.isArray(p.reviewers) ||
@@ -99,23 +150,6 @@ export function projectPolicy(root: string): ProjectPolicy {
     )
   )
     throw new Error("Invalid reviewer roles");
-  if (p.version === 1 && ("requiredVersion" in raw || "promptFiles" in raw))
-    throw new Error(
-      "requiredVersion and promptFiles require project policy version 2",
-    );
-  if (p.requiredVersion !== undefined) {
-    if (
-      typeof p.requiredVersion !== "string" ||
-      !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(
-        p.requiredVersion,
-      )
-    )
-      throw new Error("requiredVersion must be an exact release version");
-    if (p.requiredVersion !== pkg.version)
-      throw new Error(
-        `Project requires Crewplane ${p.requiredVersion}; running ${pkg.version}. Install the required release before running project commands.`,
-      );
-  }
   for (const path of [
     p.tasksPath,
     p.planPath,
@@ -143,6 +177,63 @@ export function projectPolicy(root: string): ProjectPolicy {
     }
   }
   return p;
+}
+
+/**
+ * Repoint the primary checkout's pin at `version`, preserving every other key
+ * and the file's formatting. Pins are policy, so callers keep the guards
+ * (policy version, no live supervisor) and confirmation in the CLI.
+ */
+export function writeProjectPin(
+  root: string,
+  version: string,
+): { file: string; from: string; changed: boolean } {
+  const file = join(root, "crewplane.json");
+  let original: string;
+  let parsed: unknown;
+  try {
+    original = readFileSync(file, "utf8");
+    parsed = JSON.parse(original);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      throw new Error("Project has no crewplane.json to pin");
+    throw new Error("Invalid crewplane.json");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error("Invalid crewplane.json");
+  const policy = parsed as Record<string, unknown>;
+  if (policy.version !== 2)
+    throw new Error("requiredVersion requires project policy version 2");
+  const from = policy.requiredVersion;
+  if (typeof from !== "string" || !exactVersion.test(from))
+    throw new Error(
+      "Project is not pinned; add requiredVersion under project policy version 2",
+    );
+  if (!exactVersion.test(version))
+    throw new Error("Pin target must be an exact release version");
+  if (from === version) return { file, from, changed: false };
+  const stat = lstatSync(file);
+  if (!stat.isFile())
+    throw new Error("crewplane.json must be a regular file to be repinned");
+  const temporary = join(root, `.crewplane.json.${process.pid}.tmp`);
+  // Rewrite only the pinned value so the commit diff is one line; fall back to a
+  // full re-serialize when the file does not hold exactly one pin field.
+  const field = /("requiredVersion"\s*:\s*)"(?:[^"\\]|\\.)*"/g;
+  const content =
+    [...original.matchAll(field)].length === 1
+      ? original.replace(
+          field,
+          (_match, head: string) => `${head}${JSON.stringify(version)}`,
+        )
+      : `${JSON.stringify({ ...policy, requiredVersion: version }, null, 2)}\n`;
+  try {
+    writeFileSync(temporary, content, { mode: stat.mode & 0o777 });
+    renameSync(temporary, file);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  return { file, from, changed: true };
 }
 
 export function validateProjectPath(

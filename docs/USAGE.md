@@ -262,7 +262,7 @@ Projects need no launcher adapter. Opt into project policy version 2 in crewplan
 ```json
 {
   "version": 2,
-  "requiredVersion": "0.3.0",
+  "requiredVersion": "0.4.0",
   "coordinator": "captain",
   "reviewers": ["inspector"],
   "promptFiles": {
@@ -272,7 +272,44 @@ Projects need no launcher adapter. Opt into project policy version 2 in crewplan
 }
 ```
 
-The optional requiredVersion is an exact release version, not a range. Project commands check the primary checkout's policy before preparing store files; mismatches explain the required and running versions. A pinned project does not schedule automatic self-update. Global --help/--version/update remain available for installation recovery; explicit global update is independent of project pins, so use the upstream installer with CREWPLANE_VERSION to select an exact release. Existing version-1 policies keep their defaults; the new fields require version 2 so older binaries reject them rather than silently skipping enforcement. Policy version is independent of store/config/message schema versions; no store migration occurs.
+The optional requiredVersion is an exact release version, not a range; the example above must equal the release the project was validated against, so raise it whenever the project adopts a newer release. Project commands check the primary checkout's policy before preparing store files; mismatches explain the required and running versions. A pinned project does not schedule automatic self-update. Global --help/--version/update remain available for installation recovery; explicit global update is independent of project pins, so use the upstream installer with CREWPLANE_VERSION to select an exact release. Existing version-1 policies keep their defaults; the new fields require version 2 so older binaries reject them rather than silently skipping enforcement. Policy version is independent of store/config/message schema versions; no store migration occurs.
+
+## Project version pins
+
+A pin mismatch prints one stable error line followed by indented recovery context: the absolute crewplane.json that declares the pin, the running executable, the direction (older pin versus newer requirement), and a pointer to this section. The error message itself stays a single line because the supervisor persists it as a lane pause reason; the extra context is rendered by the CLI only. No executable install command is printed, because lanes read CLI stderr and a cloned repository controls its own pin.
+
+Recovery steps:
+
+1. Confirm the pin is intended. It is read from the primary checkout's working tree, so editing a linked worktree's crewplane.json changes nothing, and every worktree of the project shares the primary's pin.
+2. Install the pinned release into its own directory and invoke it by absolute path, so the machine keeps one binary per pinned release:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh \
+     | sh -s -- --version v0.4.0 --dir "$HOME/.local/share/crewplane/0.4.0"
+   ```
+
+3. Keep that binary from moving. A pinned install is not sticky: release builds resume automatic updates, so set `CREWPLANE_NO_AUTO_UPDATE=1` (or `CREWPLANE_UPDATE=off`) for the pinned binary's environment, otherwise a command in any unpinned project can replace the shared executable and break the pin again.
+4. Stop live supervisors before replacing any executable. `update` refuses while a supervisor is registered, but the installer has no such guard; a swapped binary leaves running lanes calling a release they were not started with.
+
+`crewplane update` only moves forward to the latest release and never downgrades, so it cannot satisfy a pin: a newer binary in an older-pinned project stays blocked, and in the newer-pin direction `update` may overshoot the required version entirely. Under a mismatch, the operator verbs `stop`, `pause`, `resume`, `cancel`, `resolve` and `pin` still run so live work can always be halted, a decision pause can be answered and a stale pin can be repointed; every other project command stays blocked. Queued verbs are interpreted by the running supervisor's release, so prefer the pinned release's binary for a decision the running release may not understand. Switching a project between releases is not field-neutral: an older release ignores lane settings it does not know, such as cost caps, MCP/tool allowlists or opencode automation, so re-run `crewplane doctor` and `crewplane configure` after the switch and treat the pin as the validated capability set.
+
+## Upgrading a pinned project
+
+`crewplane pin --confirm true` repoints the primary checkout's `requiredVersion` at the release that is running, rewriting only that value so the commit diff stays one line. It is deliberately narrow: it cannot install a release, it cannot pin to a version other than the running one, and it relaxes nothing for any other command. It refuses when the project is not pinned (policy version 1, or version 2 without `requiredVersion`), when a supervisor is running, and unless `--confirm true` is given; when the pin already matches it reports `changed: false` and writes nothing. Because it edits committed policy, treat it as an operator action rather than something an agent runs mid-task: it binds every worktree, machine and CI runner to that release.
+
+Upgrade a pinned project in this order:
+
+```sh
+crewplane stop                       # a live supervisor keeps the old binary
+# install the target release into its own directory, then invoke it by absolute path
+crewplane pin --confirm true         # rewrites requiredVersion to the running release
+crewplane doctor                     # validates the project under the new release
+crewplane configure --file PATH      # re-materializes lane settings the old one ignored
+crewplane start
+git commit crewplane.json             # other machines and worktrees move with the pin
+```
+
+Order matters. Repinning before installing the target release locks every command out, including the ones needed to fix it. Repinning while a supervisor runs makes each lane's next turn fail prompt preparation and pause as a failure, rather than restarting cleanly. Skipping `configure` leaves lane capabilities the previous release ignored, such as cost caps and tool allowlists, unapplied. `pin` reports `from`, `to`, `file` and a `next` checklist, and running it from a linked worktree still rewrites the primary checkout's file.
 
 crewplane agents prompt builder always supplies built-in role guidance and appends the ordered configured files. Paths and policy come from the canonical primary even when invoked in a linked worker checkout. Each file must be regular valid UTF-8 without NUL, at most 32 KiB; total rendered context is bounded to 64 KiB. Paths must stay inside the project, including resolved symlinks, and cannot read .git or Crewplane private state. Missing, malformed, escaping or oversized files fail explicitly. Empty/absent lists preserve built-in prompts. The files are instructions/data, never automatic command execution or task authority.
 

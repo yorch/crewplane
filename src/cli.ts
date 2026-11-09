@@ -27,8 +27,16 @@ import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { publishJson } from "./io.ts";
-import { defaultPolicy, projectPolicy } from "./project.ts";
 import {
+  defaultPolicy,
+  discoverProject,
+  type ProjectPolicy,
+  ProjectVersionError,
+  projectPolicy,
+  writeProjectPin,
+} from "./project.ts";
+import {
+  compareVersions,
   isReleaseBuild,
   readUpdateCache,
   runUpdate,
@@ -43,6 +51,7 @@ const help = `Crewplane — local orchestration for coding agents
 
 Usage: crewplane [--project PATH] COMMAND
   init                         Create project policy and private file store
+  pin --confirm true           Point the project's version pin at this release
   doctor                       Check project and configured harness prerequisites
   configure --file PATH        Validate and install an explicit supervisor config
   agents COMMAND [OPTIONS]     Assign/scope/claim/status/send/inbox/accept/release
@@ -180,6 +189,52 @@ async function autoUpdate(command: string) {
   if (await supervisorRunning(environment)) return;
   await scheduleAutoUpdate({ target, environment, now });
 }
+type ProjectContext = {
+  store: string;
+  gitCommonDir: string;
+  projectRoot: string;
+};
+/**
+ * Commands that must still run when the binary does not match the project pin:
+ * every operator safety and authority verb (halting, cancelling, resolving a
+ * decision, repointing a stale pin). Node every other project command stays
+ * blocked. Queued verbs are interpreted by the running supervisor's release.
+ */
+const pinMismatchBypass = new Set([
+  "pause",
+  "resume",
+  "stop",
+  "cancel",
+  "resolve",
+  "pin",
+]);
+const printable = (value: string) => value.replace(/\p{Cc}/gu, "?");
+const standaloneBinary = () =>
+  (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
+    ?.isStandaloneExecutable === true;
+/**
+ * Extra recovery lines for a pin mismatch. They are rendered by the CLI only:
+ * the error message itself stays one line because the supervisor persists it.
+ */
+function versionPinHint(error: ProjectVersionError): string {
+  const order = compareVersions(error.running, error.required);
+  const direction =
+    order > 0
+      ? "this project pins an OLDER release; `crewplane update` only installs the latest release"
+      : `this project requires a NEWER release; \`crewplane update\` installs the latest, which may not be ${error.required}`;
+  const lines = [
+    `  pin:     requiredVersion in ${printable(error.policyPath)} (primary checkout; applies to every worktree)`,
+  ];
+  if (standaloneBinary())
+    lines.push(`  binary:  ${printable(process.execPath)}`);
+  lines.push(
+    `  ${direction}`,
+    `  cure:    install ${error.required} into its own directory and invoke it by absolute path`,
+    "  sticky:  release builds resume automatic update; set CREWPLANE_NO_AUTO_UPDATE=1",
+    '  details: docs/USAGE.md "Project version pins"',
+  );
+  return lines.join("\n");
+}
 async function main() {
   const args = process.argv.slice(2);
   const projectIndex = args.indexOf("--project");
@@ -222,16 +277,72 @@ async function main() {
       return;
     }
   }
-  const ctx = (await agents(["init"], requested)) as {
-    store: string;
-    gitCommonDir: string;
-    projectRoot: string;
-  };
+  let ctx: ProjectContext;
+  let policy: ProjectPolicy;
+  try {
+    ctx = (await agents(["init"], requested)) as ProjectContext;
+    policy = projectPolicy(ctx.projectRoot);
+  } catch (error) {
+    // A replaced binary must never lock the operator out of halting live work,
+    // and the pin command exists to resolve this exact state.
+    if (
+      !(error instanceof ProjectVersionError) ||
+      !pinMismatchBypass.has(command)
+    )
+      throw error;
+    const identity = discoverProject(requested);
+    ctx = {
+      store: identity.store,
+      gitCommonDir: identity.common,
+      projectRoot: identity.primary,
+    };
+    policy = projectPolicy(identity.primary, { checkVersion: false });
+    if (command !== "pin")
+      console.error(
+        `crewplane: queuing ${command} despite the release mismatch; every other project command stays blocked`,
+      );
+  }
   const common = ctx.gitCommonDir,
     root = ctx.projectRoot;
   const directory = join(ctx.store, "supervisor");
-  const policy = projectPolicy(root);
   if (!policy.requiredVersion) await autoUpdate(command).catch(() => {});
+  if (command === "pin") {
+    const opts = options(rest, ["--confirm"]);
+    if (opts["--confirm"] !== undefined && opts["--confirm"] !== "true")
+      throw new Error("Pin confirmation must be true");
+    if (!policy.requiredVersion)
+      throw new Error(
+        "Project is not pinned; requiredVersion requires project policy version 2",
+      );
+    const state = (await optional(join(directory, "state.json"))) as {
+      running?: boolean;
+    } | null;
+    if (state?.running)
+      throw new Error("Stop the supervisor before changing the project pin");
+    if (policy.requiredVersion === pkg.version)
+      return output({
+        version: 1,
+        file: join(root, "crewplane.json"),
+        from: pkg.version,
+        to: pkg.version,
+        changed: false,
+      });
+    if (opts["--confirm"] !== "true")
+      throw new Error(
+        `Repinning this project from ${policy.requiredVersion} to ${pkg.version} rewrites committed policy; rerun with --confirm true`,
+      );
+    const change = writeProjectPin(root, pkg.version);
+    return output({
+      version: 1,
+      ...change,
+      to: pkg.version,
+      next: [
+        "commit crewplane.json",
+        "crewplane doctor",
+        "crewplane configure --file PATH",
+      ],
+    });
+  }
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
     try {
@@ -702,5 +813,7 @@ await main().catch((error: unknown) => {
   console.error(
     `crewplane: ${error instanceof Error ? error.message : "Command failed"}`,
   );
+  if (error instanceof ProjectVersionError)
+    console.error(versionPinHint(error));
   process.exitCode = 1;
 });
