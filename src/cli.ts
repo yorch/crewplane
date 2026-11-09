@@ -19,6 +19,18 @@ import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { publishJson } from "./io.ts";
 import { defaultPolicy, projectPolicy } from "./project.ts";
+import {
+  autoUpdateDisabled,
+  isProcessAlive,
+  isStandaloneExecutable,
+  readUpdateCache,
+  runUpdate,
+  scheduleAutoUpdate,
+  updateCachePath,
+  updateDue,
+  updateIntervalMs,
+  updateTarget,
+} from "./update.ts";
 
 const help = `Crewplane — local orchestration for coding agents
 
@@ -40,10 +52,17 @@ Usage: crewplane [--project PATH] COMMAND
   evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
   monitor [--once|--status]     Observe task progress and unanswered messages
   watchdog start|once|status    Independent notice-only health observer
+  update [--check]             Replace this release binary with the latest one
   --help | --version
 
 Git and configured harnesses are external dependencies. No automatic merge,
 provider login, budget increase, legacy-state adoption or service activation.
+
+Installed release binaries check for updates at most once a day and swap
+itself after SHA-256 verification; a new version runs on the next invocation.
+Automatic updates never run during long-lived commands or while this project's
+supervisor is live. Disable with CREWPLANE_NO_AUTO_UPDATE=1 or
+CREWPLANE_UPDATE=off; see docs/USAGE.md for the remaining update settings.
 `;
 const output = (value: unknown) =>
   console.log(
@@ -88,6 +107,39 @@ function options(args: string[], allowed: string[]) {
   }
   return result;
 }
+function flags(args: string[], allowed: string[]) {
+  const result = new Set<string>();
+  for (const arg of args) {
+    if (!allowed.includes(arg) || result.has(arg))
+      throw new Error("Invalid command options");
+    result.add(arg);
+  }
+  return result;
+}
+const longRunning = new Set(["start", "dashboard", "watchdog", "monitor"]);
+/**
+ * Best-effort background check. It never delays or fails a foreground command
+ * and never swaps the binary while long-lived work or a supervisor is live.
+ */
+async function autoUpdate(command: string, directory: string) {
+  if (longRunning.has(command) || autoUpdateDisabled(process.env)) return;
+  const target = updateTarget(isStandaloneExecutable(), process.execPath);
+  if (target === null) return;
+  if (
+    !updateDue(
+      await readUpdateCache(updateCachePath(process.env)),
+      new Date(),
+      updateIntervalMs(process.env),
+    )
+  )
+    return;
+  const state = (await optional(join(directory, "state.json"))) as {
+    running?: boolean;
+    pid?: number;
+  } | null;
+  if (state?.running === true && isProcessAlive(state.pid)) return;
+  await scheduleAutoUpdate({ target });
+}
 async function main() {
   const args = process.argv.slice(2);
   const projectIndex = args.indexOf("--project");
@@ -102,6 +154,18 @@ async function main() {
   const [command = "--help", ...rest] = args;
   if (command === "--help" || command === "-h") return output(help);
   if (command === "--version") return output(pkg.version);
+  if (command === "update") {
+    const set = flags(rest, ["--check", "--auto"]);
+    if (set.has("--check") && set.has("--auto"))
+      throw new Error("--check and --auto are mutually exclusive");
+    if (set.has("--auto")) {
+      await runUpdate({ current: pkg.version, auto: true }).catch(() => {});
+      return;
+    }
+    return output(
+      await runUpdate({ current: pkg.version, checkOnly: set.has("--check") }),
+    );
+  }
   const ctx = (await agents(["init"], requested)) as {
     store: string;
     gitCommonDir: string;
@@ -111,6 +175,7 @@ async function main() {
     root = ctx.projectRoot;
   const directory = join(ctx.store, "supervisor");
   const policy = projectPolicy(root);
+  await autoUpdate(command, directory).catch(() => {});
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
     try {
