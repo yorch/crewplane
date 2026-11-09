@@ -55,6 +55,8 @@ Usage: crewplane [--project PATH] COMMAND
                                Acknowledge inspected unverified descendants
   retry --lane ID --task ID --new-session true --text NOTE
                                Start a fresh native session for one task
+  resolve --lane ID --task ID --pause UUID (--approve|--deny) --text NOTE
+                               Record an operator decision for a decision pause
   stop                         Request intentional stop and drain
   rollout                      Request an authorized drain; no automatic restart
   dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
@@ -455,7 +457,15 @@ async function main() {
     return output({ desired, state, view });
   }
   if (
-    ["pause", "resume", "retry", "nudge", "stop", "rollout"].includes(command)
+    [
+      "pause",
+      "resume",
+      "retry",
+      "nudge",
+      "stop",
+      "rollout",
+      "resolve",
+    ].includes(command)
   ) {
     if (process.env.CREWPLANE_HEADLESS_LANE)
       throw new Error("Control commands are unavailable to headless agents");
@@ -469,6 +479,9 @@ async function main() {
       "--expect-run",
       "--expect-session",
       "--wait",
+      "--approve",
+      "--deny",
+      "--pause",
     ]);
     if (
       opts["--confirm-cleanup"] !== undefined &&
@@ -493,7 +506,7 @@ async function main() {
     } | null;
     const lane = opts["--lane"];
     const task = opts["--task"];
-    const widening = ["retry", "resolve"].includes(command);
+    const widening = ["retry", "resolve", "resume"].includes(command);
     const expectedRev =
       opts["--expect-rev"] !== undefined
         ? Number(opts["--expect-rev"])
@@ -516,6 +529,9 @@ async function main() {
       ...(task ? { task } : {}),
       ...(opts["--new-session"] === "true" ? { newSession: true } : {}),
       ...(opts["--text"] ? { text: opts["--text"] } : {}),
+      ...(opts["--approve"] ? { resolution: "approve" as const } : {}),
+      ...(opts["--deny"] ? { resolution: "deny" as const } : {}),
+      ...(opts["--pause"] ? { pauseId: opts["--pause"] } : {}),
       ...(expectedRev !== undefined ? { expectRev: expectedRev } : {}),
       ...(opts["--expect-run"]
         ? { expectRun: opts["--expect-run"] }
@@ -535,6 +551,11 @@ async function main() {
     });
     if (value.action === "invalid")
       throw new Error("Invalid control; check the action, target and options");
+    if (opts["--wait"] !== undefined) {
+      const seconds = Number(opts["--wait"]);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60)
+        throw new Error("Wait must be an integer from 1 to 60 seconds");
+    }
     if (value.lane && !(value.lane in (await readConfig(directory)).lanes))
       throw new Error("Unknown configured agent");
     await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });

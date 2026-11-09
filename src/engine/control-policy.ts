@@ -76,6 +76,28 @@ export function control(value: unknown): Control {
     (typeof c.issuer !== "string" || !/^[A-Za-z0-9._:-]{1,64}$/.test(c.issuer))
   )
     return invalid;
+  const allowed: Record<string, string[]> = {
+    pause: ["lane", "all"],
+    resume: ["lane", "all"],
+    stop: [],
+    rollout: [],
+    cancel: ["lane", "run", "all"],
+    retry: ["lane", "task", "confirmCleanup", "newSession", "text"],
+    resolve: ["lane", "task", "pauseId", "resolution", "text"],
+    nudge: ["lane", "task", "text"],
+  };
+  for (const key of [
+    "lane",
+    "task",
+    "run",
+    "all",
+    "confirmCleanup",
+    "newSession",
+    "resolution",
+    "pauseId",
+    "text",
+  ])
+    if (c[key] !== undefined && !allowed[action]?.includes(key)) return invalid;
   const lane = typeof c.lane === "string" ? (c.lane as Lane) : undefined;
   const task = typeof c.task === "string" ? c.task : undefined;
   const run = typeof c.run === "string" ? c.run : undefined;

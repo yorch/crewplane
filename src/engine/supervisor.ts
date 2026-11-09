@@ -500,6 +500,10 @@ export async function serve(
   };
   const settling = new Map<string, Promise<void>>();
   let saving = Promise.resolve();
+  const bumpLane = (name: string) => {
+    state.laneRev ??= {};
+    state.laneRev[name as Lane] = (state.laneRev[name as Lane] ?? 0) + 1;
+  };
   const save = () => {
     state.checkedAt = new Date().toISOString();
     const copy = structuredClone(state);
@@ -664,9 +668,8 @@ export async function serve(
           c.generation === previousGeneration &&
           !!c.at &&
           c.at >= startedAt;
-        const stale = c.all
-          ? false
-          : c.action === "pause"
+        const stale =
+          c.action === "pause"
             ? false
             : !(currentGeneration || previousGenCommand);
         if (stale) {
@@ -698,12 +701,15 @@ export async function serve(
         } else if (c.action === "resume") {
           if (c.all) {
             state.instanceHeld = false;
-            for (const [name, record] of Object.entries(state.records))
-              if (record.pauseKind === "operator") {
+            for (const record of Object.values(state.records))
+              if (
+                record.pauseKind === "operator" ||
+                record.reason === "Operator hold"
+              ) {
                 record.status = "idle";
                 record.noProgress = 0;
                 delete record.pauseKind;
-                bump(name);
+                bump(record.lane);
               }
             outcome = "applied";
             code = "RELEASED";
@@ -711,7 +717,10 @@ export async function serve(
             const wasHeld = state.held.includes(lane);
             state.held = state.held.filter((l) => l !== lane);
             for (const record of laneRecords)
-              if (record.pauseKind === "operator") {
+              if (
+                record.pauseKind === "operator" ||
+                record.reason === "Operator hold"
+              ) {
                 record.status = "idle";
                 record.noProgress = 0;
                 delete record.pauseKind;
@@ -809,10 +818,17 @@ export async function serve(
             else if (
               targetRecord.status === "running" ||
               targetRecord.pid ||
-              targetRecord.processGroupId ||
-              targetRecord.finishedAt
+              targetRecord.processGroupId
             )
               code = "LIVE_OWNERSHIP";
+            else if (
+              targetRecord.pauseKind === "decision" ||
+              targetRecord.pauseKind === "operator"
+            )
+              code =
+                targetRecord.pauseKind === "operator"
+                  ? "HELD"
+                  : "DECISION_NEEDS_RESOLVE";
             else if (
               laneRecords.some(
                 (r) =>
@@ -824,6 +840,8 @@ export async function serve(
             )
               code = "CLEANUP_UNVERIFIED";
             else if (!targetRecord.sessionId) code = "NOTHING_TO_RECOVER";
+            else if (c.expectRun && targetRecord.runId !== c.expectRun)
+              code = "STALE_RUN";
             else if (
               c.expectSession !== undefined &&
               c.expectSession !== targetRecord.sessionId
@@ -865,6 +883,11 @@ export async function serve(
             if (c.task && matches.length > 1) code = "AMBIGUOUS_TARGET";
             else if (c.task && !targetRecord) code = "UNKNOWN_TARGET";
             else if (
+              c.expectRun &&
+              (!targetRecord || targetRecord.runId !== c.expectRun)
+            )
+              code = "STALE_RUN";
+            else if (
               matches.some(
                 (r) => r.status === "running" || r.pid || r.processGroupId,
               )
@@ -893,7 +916,8 @@ export async function serve(
             const recoverable = laneRecords.filter(
               (record) =>
                 record.status === "paused" &&
-                ["failure", "no-progress"].includes(record.pauseKind ?? "") &&
+                (!record.pauseKind ||
+                  ["failure", "no-progress"].includes(record.pauseKind)) &&
                 (!c.task || record.task === c.task),
             );
             if (!recoverable.length) {
@@ -1068,6 +1092,7 @@ export async function serve(
                 : Math.min(oldest, progressAt);
             }, null),
         };
+        if (state.instanceHeld) break;
         for (const work of evaluation.work) {
           if (children.size >= config.maxParallel) break;
           if (
@@ -1204,6 +1229,9 @@ export async function serve(
           }
           record.cwd = cwd;
           record.status = "running";
+          bumpLane(work.lane);
+          delete record.cancelRequested;
+          delete record.pauseId;
           record.reason = work.reason;
           record.startedAt = new Date().toISOString();
           record.runs = record.runs.filter((t) => Date.now() - t < 3600000);
@@ -1505,7 +1533,8 @@ export async function serve(
                       : !valid
                         ? "invalid"
                         : null,
-              operatorHeld: state.held.includes(work.lane),
+              operatorHeld:
+                state.instanceHeld === true || state.held.includes(work.lane),
               pendingEventIds: [],
               seenEventIds: [],
               explicitWait,
@@ -1527,6 +1556,7 @@ export async function serve(
               record.waitingForEvent = false;
               record.progress = after;
               record.pauseKind = "decision";
+              record.pauseId ??= randomUUID();
               record.status = "paused";
               record.reason = `Advisory output recorded; operator review required: ${final.summary.slice(0, 500)}`;
               await trace.finish("finished", final.state);
@@ -1591,8 +1621,11 @@ export async function serve(
                     ? "no-progress"
                     : "failure";
             else delete record.pauseKind;
+            if (record.pauseKind === "decision" && !record.pauseId)
+              record.pauseId = randomUUID();
             record.summary = valid ? final.summary : "";
             record.status = pause ? "paused" : "idle";
+            bumpLane(work.lane);
             record.reason =
               pause ?? (valid ? final.summary.slice(0, 500) : "Turn complete");
             await trace.finish(
@@ -1672,7 +1705,8 @@ export async function serve(
       if (state.draining && !children.size) break;
       if (signal.aborted && children.size)
         await new Promise((resolve) => setTimeout(resolve, 100));
-      else await idleWait(config.intervalSeconds * 1000, signal);
+      else
+        await idleWait(Math.min(1000, config.intervalSeconds * 1000), signal);
     }
   } catch (error) {
     state.draining = true;
