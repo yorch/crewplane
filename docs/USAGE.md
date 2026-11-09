@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | s
 | —               | `CREWPLANE_RELEASE_API`  | Latest-release JSON, default the GitHub API                     |
 | —               | `CREWPLANE_RELEASE_BASE` | Release download base URL                                       |
 
+Progress goes to stderr: one step line per phase (`resolving`, `downloading`, `downloaded 60.0 MB in 10s`, `verifying the checksum`, `checking the downloaded binary`, `installing to`), plus curl's progress bar when stderr is a terminal. Stdout keeps only the final result and PATH advice.
+
 Custom release sources must use `https`, except loopback test servers (`127.0.0.1`, `localhost`, `::1`). The installer stages the download inside the target directory, verifies the published checksum, runs the staged file with `--version`, requires that version to match the tag, and only then renames it into place. It never invokes `sudo`, never skips verification, and leaves an existing installation untouched when any check fails. A symlinked target is replaced by a real file after a warning. Linux assets are built against glibc; musl/Alpine is not verified. Windows is unsupported.
 
 A pinned install is not sticky: see below for how to stay on a version.

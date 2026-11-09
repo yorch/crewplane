@@ -24,10 +24,23 @@ repo="yorch/crewplane"
 
 say() { printf '%s\n' "$*"; }
 warn() { printf 'install: %s\n' "$*" >&2; }
+step() { printf 'install: %s\n' "$*" >&2; }
 die() {
   warn "$*"
   exit 1
 }
+
+format_bytes() {
+  awk -v bytes="$1" 'BEGIN {
+    if (bytes >= 1048576) printf "%.1f MB", bytes / 1048576
+    else if (bytes >= 1024) printf "%.1f KB", bytes / 1024
+    else printf "%d B", bytes
+  }'
+}
+
+# Progress belongs on stderr so stdout stays a stable result line.
+tty_progress=0
+if [ -t 2 ]; then tty_progress=1; fi
 
 usage() {
   say "Install the Crewplane CLI from a GitHub release."
@@ -63,28 +76,50 @@ trap 'on_signal 143' TERM
 curl_fetch() {
   url=$1
   dest=$2
+  mode=$3
   case "$url" in
-    https://*)
-      curl -fsSL --proto '=https' --proto-redir '=https' \
-        --connect-timeout 10 --max-time 600 "$url" -o "$dest"
-      ;;
-    *)
-      curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"
-      ;;
+    https://*) https_only=1 ;;
+    *) https_only=0 ;;
   esac
+  if [ "$mode" = progress ] && [ "$tty_progress" -eq 1 ]; then
+    if [ "$https_only" -eq 1 ]; then
+      curl -fL --progress-bar --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+    else
+      curl -fL --progress-bar --connect-timeout 10 --max-time 600 \
+        "$url" -o "$dest"
+    fi
+  elif [ "$https_only" -eq 1 ]; then
+    curl -fsSL --proto '=https' --proto-redir '=https' \
+      --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+  else
+    curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+  fi
 }
 
-fetch() {
+fetch() { # url dest [progress|quiet]
   url=$1
   dest=$2
+  mode=${3:-quiet}
   command -v curl >/dev/null 2>&1 ||
     die "curl is required to download release assets"
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    if curl_fetch "$url" "$dest"; then
+    started=$(date +%s)
+    if curl_fetch "$url" "$dest" "$mode"; then
+      if [ "$mode" = progress ]; then
+        if [ "$tty_progress" -eq 1 ]; then printf '\n' >&2; fi
+        finished=$(date +%s)
+        bytes=$(wc -c <"$dest" | tr -d ' ')
+        step "downloaded $(format_bytes "$bytes") in $((finished - started))s"
+      fi
       return 0
     fi
-    warn "download failed (attempt $attempt/3): $url"
+    if [ "$attempt" -lt 3 ]; then
+      warn "download failed (attempt $attempt/3), retrying: $url"
+    else
+      warn "download failed (attempt 3/3): $url"
+    fi
     attempt=$((attempt + 1))
     if [ "$attempt" -le 3 ]; then sleep 1; fi
   done
@@ -126,6 +161,7 @@ normalize_version() {
 
 resolve_latest() {
   api="${CREWPLANE_RELEASE_API:-https://api.github.com/repos/$repo/releases/latest}"
+  step "resolving the latest release"
   fetch "$api" "$tmp/latest.json" || die "could not reach $api"
   tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     "$tmp/latest.json" | head -n 1)
@@ -246,12 +282,13 @@ fi
 
 stage=$(mktemp "$dir/.crewplane.XXXXXX" 2>/dev/null) ||
   die "cannot create a staging file in $dir"
-say "Downloading crewplane $version ($os-$arch)"
-fetch "$base/$version/$asset" "$stage" ||
+step "downloading crewplane $version ($os-$arch)"
+fetch "$base/$version/$asset" "$stage" progress ||
   die "no published binary for $os-$arch in $version"
 fetch "$base/$version/$asset.sha256" "$tmp/$asset.sha256" ||
   die "no checksum published for $asset in $version"
 
+step "verifying the checksum"
 expected=$(awk -v name="$asset" '
   {
     hash = $1
@@ -272,12 +309,14 @@ actual=$(hash_file "$stage")
   die "checksum mismatch for $asset; refusing to install"
 
 chmod +x "$stage"
+step "checking the downloaded binary"
 downloaded=$("$stage" --version </dev/null 2>/dev/null || true)
 [ -n "$downloaded" ] ||
   die "downloaded $asset does not run on this machine ($os-$arch)"
 [ "$downloaded" = "${version#v}" ] ||
   die "downloaded $asset reports $downloaded but $version was requested"
 
+step "installing to $target"
 mv -f "$stage" "$target"
 stage=""
 installed=$("$target" --version </dev/null 2>/dev/null || true)

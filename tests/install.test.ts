@@ -129,6 +129,15 @@ describe("install.sh", () => {
     assert.equal(readFileSync(target, "utf8"), script(patch));
     assert.notEqual(statSync(target).mode & 0o111, 0);
     assert.match(first.stdout, /Installed crewplane 9\.9\.9/);
+    assert.match(first.stderr, /install: downloading crewplane v9\.9\.9/);
+    assert.match(
+      first.stderr,
+      /install: downloaded \d+(\.\d+)? (B|KB|MB) in \d+s/,
+    );
+    assert.match(first.stderr, /install: verifying the checksum/);
+    assert.match(first.stderr, /install: checking the downloaded binary/);
+    assert.match(first.stderr, /install: installing to /);
+    assert.doesNotMatch(first.stdout, /install: downloading/);
 
     const again = await install(directory);
     assert.equal(again.status, 0, again.stderr);
@@ -190,6 +199,8 @@ describe("install.sh", () => {
     const result = await install(join(temporary(), "bin"));
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /no published binary for/);
+    assert.match(result.stderr, /attempt 1\/3\), retrying/);
+    assert.match(result.stderr, /attempt 3\/3\)/);
   });
 
   it("fails clearly when the release lookup fails", async () => {
