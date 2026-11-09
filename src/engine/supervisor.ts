@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import pkg from "../../package.json" with { type: "json" };
 import { adapters } from "../adapters.ts";
 import type {
   Config,
@@ -572,6 +573,8 @@ export async function serve(
     state.generation = randomUUID();
     state.running = true;
     state.pid = process.pid;
+    // Recorded so a mismatched CLI can name the release that reads the queue.
+    state.supervisorVersion = pkg.version;
     state.draining = false;
     await save(); // Publish the active generation before slow startup projections.
     const commandsDir = join(directory, "commands");
