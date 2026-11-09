@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import pkg from "../package.json" with { type: "json" };
 import { gitEnvironment } from "./environment.ts";
 
 /** Canonicalize existing ancestors without creating a store during discovery. */
@@ -41,7 +42,9 @@ export const coordinatorOf = (config?: Roles | null) =>
 export const reviewersOf = (config?: Roles | null) =>
   config?.reviewers ?? ["reviewer", "visual"];
 export interface ProjectPolicy extends Roles {
-  version: 1;
+  version: 1 | 2;
+  requiredVersion?: string;
+  promptFiles?: Record<string, string[]>;
   tasksPath: string;
   planPath: string;
   statusPath: string;
@@ -78,7 +81,7 @@ export function projectPolicy(root: string): ProjectPolicy {
       ),
     );
   if (
-    p.version !== 1 ||
+    ![1, 2].includes(p.version) ||
     !["none", "relay"].includes(p.roadmapFormat ?? "none") ||
     !validId(p.coordinator) ||
     !Array.isArray(p.reviewers) ||
@@ -96,23 +99,72 @@ export function projectPolicy(root: string): ProjectPolicy {
     )
   )
     throw new Error("Invalid reviewer roles");
+  if (p.version === 1 && ("requiredVersion" in raw || "promptFiles" in raw))
+    throw new Error(
+      "requiredVersion and promptFiles require project policy version 2",
+    );
+  if (p.requiredVersion !== undefined) {
+    if (
+      typeof p.requiredVersion !== "string" ||
+      !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/.test(
+        p.requiredVersion,
+      )
+    )
+      throw new Error("requiredVersion must be an exact release version");
+    if (p.requiredVersion !== pkg.version)
+      throw new Error(
+        `Project requires Crewplane ${p.requiredVersion}; running ${pkg.version}. Install the required release before running project commands.`,
+      );
+  }
   for (const path of [
     p.tasksPath,
     p.planPath,
     p.statusPath,
     p.instructionsPath,
-  ]) {
+  ])
+    validateProjectPath(path);
+  if (p.promptFiles !== undefined) {
     if (
-      typeof path !== "string" ||
-      !path ||
-      isAbsolute(path) ||
-      path.includes("\\") ||
-      path.split("/").some((x) => [".", "..", ".git"].includes(x)) ||
-      /[\r\n\0]/.test(path)
+      !p.promptFiles ||
+      typeof p.promptFiles !== "object" ||
+      Array.isArray(p.promptFiles) ||
+      Object.keys(p.promptFiles).length > 64
     )
-      throw new Error("Project document paths must be safe relative paths");
+      throw new Error("Invalid project promptFiles");
+    for (const [agent, files] of Object.entries(p.promptFiles)) {
+      if (
+        !validId(agent) ||
+        !Array.isArray(files) ||
+        files.length > 16 ||
+        new Set(files).size !== files.length
+      )
+        throw new Error("Invalid agent prompt file list");
+      for (const path of files) validateProjectPath(path, true);
+    }
   }
   return p;
+}
+
+export function validateProjectPath(
+  path: unknown,
+  promptFile = false,
+): asserts path is string {
+  if (
+    typeof path !== "string" ||
+    !path ||
+    isAbsolute(path) ||
+    path.includes("\\") ||
+    path
+      .split("/")
+      .some((x) =>
+        (promptFile
+          ? ["", ".", "..", ".git", ".crewplane-state", ".crewplane-local"]
+          : [".", "..", ".git"]
+        ).includes(x),
+      ) ||
+    /[\p{Cc}]/u.test(path)
+  )
+    throw new Error("Project document paths must be safe relative paths");
 }
 
 export function discoverProject(cwd: string) {

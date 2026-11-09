@@ -654,6 +654,60 @@ try {
     await new Promise<void>((done) => releaseServer.close(() => done()));
   }
 
+  // Project policy v2 works without Node/Bun and prevents a pinned binary from
+  // scheduling its global automatic updater. Restore the policy afterwards.
+  const previousPolicy = readFileSync(join(root, "crewplane.json"), "utf8");
+  const pinnedCache = join(temp, "pinned-update-cache");
+  const pinnedEnvironment = {
+    ...env,
+    CREWPLANE_RELEASE_BUILD: "1",
+    CREWPLANE_NO_AUTO_UPDATE: "",
+    CREWPLANE_CACHE_DIR: pinnedCache,
+  };
+  try {
+    writeFileSync(
+      join(root, "project-guide.md"),
+      "SYNTHETIC_PROJECT_PROMPT_SENTINEL",
+    );
+    writeFileSync(
+      join(root, "crewplane.json"),
+      JSON.stringify({
+        ...JSON.parse(previousPolicy),
+        version: 2,
+        requiredVersion: pkg.version,
+        promptFiles: { captain: ["project-guide.md"] },
+      }),
+    );
+    const rendered = spawnSync(
+      bin,
+      ["--project", root, "agents", "prompt", "captain"],
+      { env: pinnedEnvironment, encoding: "utf8", timeout: 15000 },
+    );
+    assert.equal(rendered.status, 0, rendered.stderr);
+    assert(rendered.stdout.includes("SYNTHETIC_PROJECT_PROMPT_SENTINEL"));
+    assert(
+      !existsSync(pinnedCache),
+      "pinned project commands must not schedule a background updater",
+    );
+    writeFileSync(
+      join(root, "crewplane.json"),
+      JSON.stringify({
+        ...JSON.parse(previousPolicy),
+        version: 2,
+        requiredVersion: "999.0.0",
+      }),
+    );
+    const refused = spawnSync(bin, ["--project", root, "status"], {
+      env: pinnedEnvironment,
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    assert.notEqual(refused.status, 0);
+    assert(refused.stderr.includes("Project requires Crewplane 999.0.0"));
+  } finally {
+    writeFileSync(join(root, "crewplane.json"), previousPolicy);
+  }
+
   console.log(
     "Standalone acceptance passed: no Node/Bun on PATH; two worktrees, messages, pinned review, author correction/session reuse, linear integration, embedded assets/traces, intentional stop, crash recovery and checksum-verified self-update.",
   );

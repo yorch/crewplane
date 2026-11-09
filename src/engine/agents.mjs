@@ -9,12 +9,11 @@ import {
   coordinatorOf,
   discoverProject,
   projectPolicy,
-  reviewerRoleOf,
   reviewersOf,
   validId,
   validTaskId,
 } from "../project.ts";
-import { agentPrompt } from "../prompts.ts";
+import { projectAgentPrompt } from "../prompts.ts";
 
 const kinds = ["question", "answer", "update", "handoff", "request"];
 function ensure(condition, message) {
@@ -367,15 +366,8 @@ export async function main(args = process.argv.slice(2), cwd = process.cwd()) {
   if (!command || command === "help") return help;
   if (command === "prompt") {
     const id = lane(rest[0]);
-    const p = (await context(cwd)).policy;
-    return agentPrompt(
-      id,
-      reviewerRoleOf(p, id) === "visual"
-        ? "visual"
-        : reviewersOf(p).includes(id)
-          ? "review"
-          : "implementation",
-    );
+    const ctx = await context(cwd);
+    return projectAgentPrompt(ctx.primary, id, ctx.policy);
   }
   const valid = [
     "init",

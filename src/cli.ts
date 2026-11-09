@@ -214,7 +214,7 @@ async function main() {
     root = ctx.projectRoot;
   const directory = join(ctx.store, "supervisor");
   const policy = projectPolicy(root);
-  await autoUpdate(command).catch(() => {});
+  if (!policy.requiredVersion) await autoUpdate(command).catch(() => {});
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
     try {
