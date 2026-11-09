@@ -62,6 +62,8 @@ jobs:
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
         run: |
+          # Only this build self-updates: the marker is inlined at compile time.
+          bun run build:release
           arch="$(uname -m)"
           asset="crewplane-${TAG}-${{ matrix.name }}-${arch}"
           mkdir -p release

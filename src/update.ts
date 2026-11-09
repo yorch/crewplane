@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
@@ -7,20 +7,21 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   readFile,
   rename,
   stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { syncDirectory } from "./io.ts";
 
 /**
- * Self-update support for released binaries. The release contract is one
- * asset per platform plus a `<asset>.sha256` line; nothing here touches
- * project state, the supervisor or queued controls.
+ * Self-update support for release binaries. The release contract is one asset
+ * per platform plus a `<asset>.sha256` line. Nothing here touches project
+ * state, the supervisor, holds, budgets or queued controls.
  */
 export const releaseRepository = "yorch/crewplane";
 export const defaultReleaseApi = `https://api.github.com/repos/${releaseRepository}/releases/latest`;
@@ -34,11 +35,13 @@ export type UpdateConfig = {
   api: string;
   base: string;
   timeoutMs: number;
+  downloadTimeoutMs: number;
   maxAssetBytes: number;
 };
 
 export type UpdateCache = {
   version: 1;
+  target?: string;
   lastAttemptAt?: string;
   latest?: string;
   updatedAt?: string;
@@ -72,9 +75,13 @@ export type UpdateRequest = {
   platform?: string;
   arch?: string;
   execPath?: string;
-  standalone?: boolean;
+  releaseMarked?: boolean;
   now?: Date;
   fetch?: FetchLike;
+  /** Re-checked immediately before the executable is replaced. */
+  safeToReplace?: () => Promise<boolean>;
+  /** Used to prove the staged binary runs and reports the released version. */
+  runVersion?: (path: string) => Promise<string>;
 };
 
 export type AutoUpdateRequest = {
@@ -82,6 +89,11 @@ export type AutoUpdateRequest = {
   environment?: UpdateEnvironment;
   now?: Date;
   spawnProcess?: (file: string, args: string[]) => void;
+};
+
+export type InstallOptions = {
+  expectedVersion?: string;
+  runVersion?: (path: string) => Promise<string>;
 };
 
 const tagPattern =
@@ -92,6 +104,10 @@ const machOMagic = [
   [0xca, 0xfe, 0xba, 0xbe],
   [0xbe, 0xba, 0xfe, 0xca],
 ];
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+const maxMetadataBytes = 1024 * 1024;
+const lockExpiryMs = 3_600_000;
+const staleTemporaryMs = 3_600_000;
 
 export function platformTarget(
   platform: string = process.platform,
@@ -106,10 +122,6 @@ export function platformTarget(
         ? "arm64"
         : null;
   return os !== null && arch !== null ? { os, arch } : null;
-}
-
-export function releaseTag(version: string): string {
-  return version.startsWith("v") ? version : `v${version}`;
 }
 
 export function parseTag(value: unknown): string {
@@ -181,9 +193,10 @@ export function expectedDigest(value: string, asset: string): string {
   for (const line of value.split(/\r?\n/)) {
     const match = /^([0-9a-fA-F]{64})(?:\s+\*?(\S+))?\s*$/.exec(line.trim());
     if (!match) continue;
-    const [, checksum, name] = match;
+    const checksum = match[1] ?? "",
+      name = match[2];
     if (name !== undefined && name !== asset) continue;
-    return checksum ? checksum.toLowerCase() : "";
+    return checksum.toLowerCase();
   }
   throw new Error(`Missing SHA-256 checksum for ${asset}`);
 }
@@ -219,16 +232,35 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** Custom sources must be encrypted, except for explicit loopback test servers. */
+function releaseUrl(value: string | undefined, fallback: string): string {
+  const text = value === undefined || value === "" ? fallback : value;
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new Error("Release URL is invalid");
+  }
+  if (parsed.protocol === "https:") return text;
+  if (parsed.protocol === "http:" && loopbackHosts.has(parsed.hostname))
+    return text;
+  throw new Error("Release URL must use https");
+}
+
 export function updateConfig(
   environment: UpdateEnvironment = process.env,
 ): UpdateConfig {
   return {
-    api: environment.CREWPLANE_RELEASE_API || defaultReleaseApi,
-    base: (environment.CREWPLANE_RELEASE_BASE || defaultReleaseBase).replace(
-      /\/+$/,
-      "",
-    ),
+    api: releaseUrl(environment.CREWPLANE_RELEASE_API, defaultReleaseApi),
+    base: releaseUrl(
+      environment.CREWPLANE_RELEASE_BASE,
+      defaultReleaseBase,
+    ).replace(/\/+$/, ""),
     timeoutMs: positiveInteger(environment.CREWPLANE_UPDATE_TIMEOUT_MS, 20_000),
+    downloadTimeoutMs: positiveInteger(
+      environment.CREWPLANE_UPDATE_DOWNLOAD_TIMEOUT_MS,
+      300_000,
+    ),
     maxAssetBytes: positiveInteger(
       environment.CREWPLANE_UPDATE_MAX_BYTES,
       256 * 1024 * 1024,
@@ -257,7 +289,7 @@ export function autoUpdateDisabled(
   return ["off", "never", "manual"].includes(mode);
 }
 
-export function updateCachePath(
+export function cacheDirectory(
   environment: UpdateEnvironment = process.env,
   home: string = homedir(),
   platform: string = process.platform,
@@ -269,7 +301,15 @@ export function updateCachePath(
       : platform === "darwin"
         ? join(home, "Library", "Caches")
         : join(environment.XDG_CACHE_HOME || join(home, ".cache"));
-  return join(base, "crewplane", "update.json");
+  return join(base, "crewplane");
+}
+
+export function updateCachePath(
+  environment: UpdateEnvironment = process.env,
+  home: string = homedir(),
+  platform: string = process.platform,
+): string {
+  return join(cacheDirectory(environment, home, platform), "update.json");
 }
 
 function validCache(value: unknown): UpdateCache {
@@ -277,6 +317,7 @@ function validCache(value: unknown): UpdateCache {
   const record = value as Record<string, unknown>;
   const cache: UpdateCache = { version: 1 };
   for (const key of [
+    "target",
     "lastAttemptAt",
     "latest",
     "updatedAt",
@@ -318,25 +359,44 @@ export async function writeUpdateCache(
   }
 }
 
+/**
+ * A due check needs no record, an elapsed interval, or a record from a
+ * different install path. Future timestamps are treated as due so a clock
+ * jump or edited cache cannot suppress updates forever.
+ */
 export function updateDue(
   cache: UpdateCache,
   now: Date,
   intervalMs: number,
+  target?: string,
 ): boolean {
+  if (
+    target !== undefined &&
+    cache.target !== undefined &&
+    cache.target !== target
+  )
+    return true;
   const attempted = Date.parse(cache.lastAttemptAt ?? "");
-  return !Number.isFinite(attempted) || now.getTime() - attempted >= intervalMs;
+  if (!Number.isFinite(attempted)) return true;
+  if (attempted > now.getTime()) return true;
+  return now.getTime() - attempted >= intervalMs;
 }
 
-export function isStandaloneExecutable(): boolean {
-  return typeof Bun !== "undefined" && Bun.isStandaloneExecutable === true;
+/**
+ * Release builds compile with
+ * `--define 'process.env.CREWPLANE_RELEASE_BUILD="1"'`, so this returns true
+ * without reading the environment. Local builds keep the runtime lookup.
+ */
+export function isReleaseBuild(): boolean {
+  return process.env.CREWPLANE_RELEASE_BUILD === "1";
 }
 
-/** Only a compiled release binary replaces itself; source runs are left alone. */
+/** Only a compiled, release-marked binary replaces itself. */
 export function updateTarget(
-  standalone: boolean,
+  releaseMarked: boolean,
   execPath: string,
 ): string | null {
-  return standalone && execPath !== "" ? execPath : null;
+  return releaseMarked && execPath !== "" ? execPath : null;
 }
 
 export function isProcessAlive(pid: number | undefined): boolean {
@@ -347,6 +407,169 @@ export function isProcessAlive(pid: number | undefined): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
+}
+
+export const longRunningCommands = [
+  "start",
+  "dashboard",
+  "watchdog",
+  "monitor",
+] as const;
+
+export type ScheduleDecision = {
+  command: string;
+  environment: UpdateEnvironment;
+  releaseMarked: boolean;
+  execPath: string;
+  cache: UpdateCache;
+  now?: Date;
+  supervisorLive: boolean;
+};
+
+/** Read-only decision used before a detached update is scheduled. */
+export function shouldScheduleUpdate(input: ScheduleDecision): boolean {
+  if (input.supervisorLive) return false;
+  if ((longRunningCommands as readonly string[]).includes(input.command))
+    return false;
+  if (autoUpdateDisabled(input.environment)) return false;
+  const target = updateTarget(input.releaseMarked, input.execPath);
+  if (target === null) return false;
+  return updateDue(
+    input.cache,
+    input.now ?? new Date(),
+    updateIntervalMs(input.environment),
+    target,
+  );
+}
+
+function lockOwnerFor(path: string) {
+  return readFile(path, "utf8")
+    .then((value) => {
+      let record: unknown;
+      try {
+        record = JSON.parse(value);
+      } catch {
+        return null;
+      }
+      if (typeof record !== "object" || record === null) return null;
+      const { pid, token, at } = record as {
+        pid?: unknown;
+        token?: unknown;
+        at?: unknown;
+      };
+      if (typeof pid !== "number" || !Number.isSafeInteger(pid)) return null;
+      return {
+        pid,
+        token: typeof token === "string" ? token : "",
+        at: typeof at === "string" ? at : "",
+      };
+    })
+    .catch(() => null);
+}
+
+/** A lock written moments ago may still be mid-publication; treat it as busy. */
+async function recentlyWritten(path: string, now: Date): Promise<boolean> {
+  try {
+    const info = await stat(path);
+    return now.getTime() - info.mtimeMs < 5_000;
+  } catch {
+    return false;
+  }
+}
+
+/** A lock with no readable timestamp is never salvaged by age alone. */
+function lockExpired(at: string, now: Date): boolean {
+  const written = Date.parse(at);
+  if (!Number.isFinite(written)) return false;
+  return now.getTime() - written >= lockExpiryMs;
+}
+
+async function acquireUpdateLock(
+  cacheFile: string,
+  now: Date,
+): Promise<(() => Promise<void>) | null> {
+  const directory = dirname(cacheFile);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, "update.lock");
+  const token = randomUUID();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try {
+        await handle.writeFile(
+          `${JSON.stringify({ pid: process.pid, token, at: now.toISOString() })}\n`,
+        );
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        const owner = await lockOwnerFor(path);
+        if (owner === null || owner.token !== token) return;
+        await unlink(path).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const owner = await lockOwnerFor(path);
+      if (
+        owner !== null &&
+        isProcessAlive(owner.pid) &&
+        !lockExpired(owner.at, now)
+      )
+        return null;
+      if (owner === null && (await recentlyWritten(path, now))) return null;
+      await unlink(path).catch(() => {});
+    }
+  }
+  return null;
+}
+
+/**
+ * Announce a running supervisor so the per-user updater never replaces the
+ * executable under it. Registrations are best effort and PID-based.
+ */
+export async function registerSupervisor(
+  environment: UpdateEnvironment = process.env,
+): Promise<() => Promise<void>> {
+  const directory = join(cacheDirectory(environment), "supervisors");
+  const path = join(directory, `${process.pid}.json`);
+  try {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(
+      path,
+      `${JSON.stringify({ version: 1, pid: process.pid, at: new Date().toISOString() })}\n`,
+      { mode: 0o600, flush: true },
+    );
+  } catch {
+    return async () => {};
+  }
+  return async () => {
+    await unlink(path).catch(() => {});
+  };
+}
+
+/** Any live registration, from any project, blocks automatic replacement. */
+export async function supervisorRunning(
+  environment: UpdateEnvironment = process.env,
+): Promise<boolean> {
+  const directory = join(cacheDirectory(environment), "supervisors");
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return false;
+  }
+  let running = false;
+  for (const entry of entries) {
+    if (!/^\d+\.json$/.test(entry)) continue;
+    const path = join(directory, entry);
+    const owner = await lockOwnerFor(path);
+    const pid = owner?.pid ?? Number(entry.slice(0, -".json".length));
+    if (isProcessAlive(pid)) running = true;
+    else await unlink(path).catch(() => {});
+  }
+  return running;
 }
 
 function apiHeaders(
@@ -360,7 +583,9 @@ function apiHeaders(
   const token = environment.GITHUB_TOKEN || environment.GH_TOKEN;
   if (token === undefined || token === "") return headers;
   try {
-    if (new URL(api).host !== "api.github.com") return headers;
+    const url = new URL(api);
+    if (url.protocol !== "https:" || url.host !== "api.github.com")
+      return headers;
   } catch {
     return headers;
   }
@@ -368,21 +593,56 @@ function apiHeaders(
   return headers;
 }
 
+async function readBody(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes)
+    throw new Error("Release response exceeds the size limit");
+  const body = response.body;
+  if (body === null) return new Uint8Array(await response.arrayBuffer());
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === undefined) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error("Release response exceeds the size limit");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 async function fetchText(
   url: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
   headers: Record<string, string>,
+  options: { redirect?: RequestRedirect; maxBytes?: number } = {},
 ): Promise<string> {
-  const response = await fetchImpl(url, {
+  const response = (await fetchImpl(url, {
     headers,
-    redirect: "follow",
+    // The release API answers directly; asset metadata redirects to storage.
+    redirect: options.redirect ?? "manual",
     signal: AbortSignal.timeout(timeoutMs),
-  });
-  const value = response as Response;
-  if (!value.ok)
-    throw new Error(`Release request failed: ${url} (HTTP ${value.status})`);
-  return value.text();
+  })) as Response;
+  if (!response.ok)
+    throw new Error(`Release request failed: ${url} (HTTP ${response.status})`);
+  return new TextDecoder().decode(
+    await readBody(response, options.maxBytes ?? maxMetadataBytes),
+  );
 }
 
 async function fetchBytes(
@@ -397,13 +657,7 @@ async function fetchBytes(
   })) as Response;
   if (!response.ok)
     throw new Error(`Release request failed: ${url} (HTTP ${response.status})`);
-  const declared = Number(response.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > maxBytes)
-    throw new Error(`Release asset exceeds the size limit: ${url}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  if (bytes.byteLength > maxBytes)
-    throw new Error(`Release asset exceeds the size limit: ${url}`);
-  return bytes;
+  return readBody(response, maxBytes);
 }
 
 export async function resolveLatest(
@@ -444,12 +698,13 @@ export async function downloadRelease(
     fetchImpl,
     config.timeoutMs,
     headers,
+    { redirect: "follow" },
   );
   const expected = expectedDigest(checksums, asset);
   const bytes = await fetchBytes(
     `${base}/${asset}`,
     fetchImpl,
-    config.timeoutMs,
+    config.downloadTimeoutMs,
     config.maxAssetBytes,
   );
   assertDigest(bytes, expected, asset);
@@ -458,10 +713,46 @@ export async function downloadRelease(
   return { asset, bytes };
 }
 
+function runVersion(path: string): Promise<string> {
+  return new Promise((done, fail) => {
+    execFile(
+      path,
+      ["--version"],
+      { timeout: 15_000, encoding: "utf8", env: {}, windowsHide: true },
+      (error, stdout) => {
+        if (error)
+          fail(new Error(`Downloaded binary failed to run: ${error.message}`));
+        else done(stdout.trim());
+      },
+    );
+  });
+}
+
+async function removeStaleTemporaries(directory: string, name: string) {
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - staleTemporaryMs;
+  for (const entry of entries) {
+    if (!entry.startsWith(`.${name}.`) || !entry.endsWith(".tmp")) continue;
+    const path = join(directory, entry);
+    try {
+      const info = await lstat(path);
+      if (info.isFile() && info.mtimeMs <= cutoff) await unlink(path);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 /** Replace the executable atomically inside its own directory. */
 export async function installBinary(
   target: string,
   bytes: Uint8Array,
+  options: InstallOptions = {},
 ): Promise<void> {
   const directory = dirname(target);
   await access(directory, constants.W_OK).catch(() => {
@@ -475,11 +766,24 @@ export async function installBinary(
     throw new Error(`Refusing to replace a symbolic link: ${target}`);
   if (existing !== null && !existing.isFile())
     throw new Error(`Refusing to replace a non-file: ${target}`);
+  const uid = process.getuid?.();
+  if (existing !== null && uid !== undefined && existing.uid !== uid)
+    throw new Error(
+      `Refusing to replace a file owned by another user: ${target}`,
+    );
+  const mode = existing === null ? 0o755 : existing.mode & 0o777;
+  await removeStaleTemporaries(directory, basename(target));
   const temporary = join(directory, `.${basename(target)}.${randomUUID()}.tmp`);
   try {
-    await writeFile(temporary, bytes, { flag: "wx", mode: 0o700, flush: true });
-    await chmod(temporary, 0o755);
-    await syncDirectory(directory);
+    await writeFile(temporary, bytes, { flag: "wx", mode: 0o600, flush: true });
+    await chmod(temporary, mode);
+    if (options.expectedVersion !== undefined) {
+      const reported = await (options.runVersion ?? runVersion)(temporary);
+      if (reported !== options.expectedVersion)
+        throw new Error(
+          `Downloaded binary reports ${reported === "" ? "nothing" : reported} but ${options.expectedVersion} was requested`,
+        );
+    }
     await rename(temporary, target);
     await syncDirectory(directory);
   } finally {
@@ -489,68 +793,34 @@ export async function installBinary(
   }
 }
 
-async function lockOwner(path: string): Promise<number | null> {
-  try {
-    const value: unknown = JSON.parse(await readFile(path, "utf8"));
-    const pid =
-      typeof value === "object" && value !== null
-        ? (value as { pid?: unknown }).pid
-        : undefined;
-    return typeof pid === "number" ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-/** A lock written moments ago may still be mid-publication; treat it as busy. */
-async function recentlyWritten(path: string, now: Date): Promise<boolean> {
-  try {
-    const info = await stat(path);
-    return now.getTime() - info.mtimeMs < 5_000;
-  } catch {
-    return false;
-  }
-}
-
-async function acquireUpdateLock(
-  cacheFile: string,
-  now: Date,
-): Promise<(() => Promise<void>) | null> {
-  const directory = dirname(cacheFile);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const path = join(directory, "update.lock");
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await open(path, "wx", 0o600);
-      try {
-        await handle.writeFile(
-          `${JSON.stringify({ pid: process.pid, at: now.toISOString() })}\n`,
-        );
-      } finally {
-        await handle.close();
-      }
-      return async () => {
-        await unlink(path).catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") throw error;
-        });
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const owner = await lockOwner(path);
-      if (owner !== null && isProcessAlive(owner)) return null;
-      if (owner === null && (await recentlyWritten(path, now))) return null;
-      await unlink(path).catch(() => {});
-    }
-  }
-  return null;
-}
-
 function mergeCache(
   previous: UpdateCache,
   patch: Partial<Omit<UpdateCache, "version">>,
 ): UpdateCache {
   const { error: _error, ...rest } = previous;
   return { ...rest, ...patch, version: 1 };
+}
+
+/** Keep only the variables a detached updater needs; never inherit tokens. */
+function childEnvironment(environment: UpdateEnvironment): NodeJS.ProcessEnv {
+  const kept = new Set([
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+    "XDG_CACHE_HOME",
+    "XDG_CONFIG_HOME",
+    "SystemRoot",
+  ]);
+  const result: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) continue;
+    if (kept.has(key) || key.startsWith("CREWPLANE_")) result[key] = value;
+  }
+  return result;
 }
 
 /**
@@ -563,7 +833,6 @@ export async function runUpdate(
   const environment = request.environment ?? process.env,
     now = request.now ?? new Date(),
     checkedAt = now.toISOString(),
-    config = updateConfig(environment),
     fetchImpl = request.fetch ?? fetch;
   const outcome = (
     values: Partial<Omit<UpdateOutcome, "version" | "current" | "checkedAt">>,
@@ -579,7 +848,7 @@ export async function runUpdate(
     request.arch ?? process.arch,
   );
   const target = updateTarget(
-    request.standalone ?? isStandaloneExecutable(),
+    request.releaseMarked ?? isReleaseBuild(),
     request.execPath ?? process.execPath,
   );
   if (targetPlatform === null || target === null)
@@ -588,7 +857,15 @@ export async function runUpdate(
       reason: "Not an installed Linux or macOS release binary",
     });
 
+  const safeToReplace =
+    request.safeToReplace ??
+    (async () => !(await supervisorRunning(environment)));
   const perform = async (): Promise<UpdateOutcome> => {
+    if (request.checkOnly !== true && !(await safeToReplace()))
+      throw new Error(
+        "A supervisor is running; stop it before replacing the executable",
+      );
+    const config = updateConfig(environment);
     const tag = await resolveLatest(config, environment, fetchImpl);
     const latest = tag.slice(1);
     if (compareVersions(latest, request.current) <= 0)
@@ -607,8 +884,17 @@ export async function runUpdate(
       config,
       fetchImpl,
     );
+    if (!(await safeToReplace()))
+      throw new Error(
+        "A supervisor started during the update; the executable was not replaced",
+      );
     try {
-      await installBinary(target, download.bytes);
+      await installBinary(target, download.bytes, {
+        expectedVersion: latest,
+        ...(request.runVersion === undefined
+          ? {}
+          : { runVersion: request.runVersion }),
+      });
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Install failed";
       throw new Error(`${reason} (target: ${target})`);
@@ -622,52 +908,52 @@ export async function runUpdate(
     });
   };
 
-  if (request.auto !== true) return perform();
+  if (request.checkOnly === true) return perform();
 
   const cacheFile = updateCachePath(environment);
-  const previous = await readUpdateCache(cacheFile);
-  if (autoUpdateDisabled(environment)) {
-    const result = outcome({ status: "unsupported", reason: "Disabled" });
+  let previous = await readUpdateCache(cacheFile);
+  if (request.auto === true && autoUpdateDisabled(environment)) {
     await writeUpdateCache(
       cacheFile,
       mergeCache(previous, {
+        target,
         lastAttemptAt: checkedAt,
         error: "Disabled by environment",
       }),
     );
-    return result;
+    return outcome({ status: "unsupported", reason: "Disabled" });
   }
   const release = await acquireUpdateLock(cacheFile, now);
   if (release === null) {
-    const result = outcome({
-      status: "failed",
-      reason: "Another update is already running",
-    });
+    const reason = "Another update is already running";
+    if (request.auto !== true) throw new Error(reason);
     await writeUpdateCache(
       cacheFile,
-      mergeCache(previous, {
-        lastAttemptAt: checkedAt,
-        error: "Another update is already running",
-      }),
+      mergeCache(previous, { target, lastAttemptAt: checkedAt, error: reason }),
     );
-    return result;
+    return outcome({ status: "failed", reason });
   }
   try {
+    // Another command may have written the cache while this lock was pending.
+    previous = await readUpdateCache(cacheFile);
     const result = await perform();
-    await writeUpdateCache(
-      cacheFile,
-      mergeCache(previous, {
-        lastAttemptAt: checkedAt,
-        ...(result.latest === undefined ? {} : { latest: result.latest }),
-        ...(result.status === "updated" ? { updatedAt: checkedAt } : {}),
-      }),
-    );
+    if (request.auto === true)
+      await writeUpdateCache(
+        cacheFile,
+        mergeCache(previous, {
+          target,
+          lastAttemptAt: checkedAt,
+          ...(result.latest === undefined ? {} : { latest: result.latest }),
+          ...(result.status === "updated" ? { updatedAt: checkedAt } : {}),
+        }),
+      );
     return result;
   } catch (error) {
+    if (request.auto !== true) throw error;
     const reason = error instanceof Error ? error.message : "Update failed";
     await writeUpdateCache(
       cacheFile,
-      mergeCache(previous, { lastAttemptAt: checkedAt, error: reason }),
+      mergeCache(previous, { target, lastAttemptAt: checkedAt, error: reason }),
     );
     return outcome({ status: "failed", reason });
   } finally {
@@ -675,8 +961,19 @@ export async function runUpdate(
   }
 }
 
-function defaultDetachedSpawn(file: string, args: string[]): void {
-  spawn(file, args, { detached: true, stdio: "ignore" }).unref();
+function defaultDetachedSpawn(
+  file: string,
+  args: string[],
+  environment: UpdateEnvironment,
+): void {
+  const child = spawn(file, args, {
+    detached: true,
+    stdio: "ignore",
+    cwd: tmpdir(),
+    env: childEnvironment(environment),
+  });
+  child.on("error", () => {});
+  child.unref();
 }
 
 /**
@@ -690,14 +987,17 @@ export async function scheduleAutoUpdate(
   const cacheFile = updateCachePath(environment);
   const now = request.now ?? new Date();
   const previous = await readUpdateCache(cacheFile);
-  if (!updateDue(previous, now, updateIntervalMs(environment))) return false;
+  if (!updateDue(previous, now, updateIntervalMs(environment), request.target))
+    return false;
   await writeUpdateCache(
     cacheFile,
-    mergeCache(previous, { lastAttemptAt: now.toISOString() }),
+    mergeCache(previous, {
+      target: request.target,
+      lastAttemptAt: now.toISOString(),
+    }),
   );
-  (request.spawnProcess ?? defaultDetachedSpawn)(request.target, [
-    "update",
-    "--auto",
-  ]);
+  if (request.spawnProcess !== undefined)
+    request.spawnProcess(request.target, ["update", "--auto"]);
+  else defaultDetachedSpawn(request.target, ["update", "--auto"], environment);
   return true;
 }

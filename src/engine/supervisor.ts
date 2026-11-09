@@ -14,6 +14,7 @@ import {
   validId,
   validTaskId,
 } from "../project.ts";
+import { registerSupervisor } from "../update.ts";
 import { evaluateSchedulingReload } from "./config-reload.ts";
 import { control, validState } from "./control-policy.ts";
 import {
@@ -294,6 +295,8 @@ export async function serve(
   let config = validateConfig(initialConfig);
   await durableMkdir(directory);
   const release = await acquire(directory);
+  // Announce supervision so the per-user updater never replaces this binary.
+  const unregister = await registerSupervisor();
   const statePath = join(directory, "state.json");
   let state: State;
   try {
@@ -311,6 +314,7 @@ export async function serve(
     if (!validState(state))
       throw new Error("Invalid supervisor state; inspect before starting");
   } catch (error) {
+    await unregister();
     await release();
     throw error;
   }
@@ -1183,6 +1187,7 @@ export async function serve(
       throw new Error(
         "Final state persistence failed; ownership lease retained for inspection",
       );
+    await unregister();
     await release();
   }
 }

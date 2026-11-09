@@ -20,15 +20,13 @@ import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { publishJson } from "./io.ts";
 import { defaultPolicy, projectPolicy } from "./project.ts";
 import {
-  autoUpdateDisabled,
-  isProcessAlive,
-  isStandaloneExecutable,
+  isReleaseBuild,
   readUpdateCache,
   runUpdate,
   scheduleAutoUpdate,
+  shouldScheduleUpdate,
+  supervisorRunning,
   updateCachePath,
-  updateDue,
-  updateIntervalMs,
   updateTarget,
 } from "./update.ts";
 
@@ -52,16 +50,16 @@ Usage: crewplane [--project PATH] COMMAND
   evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
   monitor [--once|--status]     Observe task progress and unanswered messages
   watchdog start|once|status    Independent notice-only health observer
-  update [--check]             Replace this release binary with the latest one
+  update [--check] [--force]   Replace this release binary with the latest one
   --help | --version
 
 Git and configured harnesses are external dependencies. No automatic merge,
 provider login, budget increase, legacy-state adoption or service activation.
 
-Installed release binaries check for updates at most once a day and swap
-itself after SHA-256 verification; a new version runs on the next invocation.
-Automatic updates never run during long-lived commands or while this project's
-supervisor is live. Disable with CREWPLANE_NO_AUTO_UPDATE=1 or
+Release builds check for updates at most once a day and replace themselves
+only after SHA-256 and executable verification; the new version runs on the
+next invocation. Automatic updates never run during long-lived commands or
+while any supervisor is live. Disable with CREWPLANE_NO_AUTO_UPDATE=1 or
 CREWPLANE_UPDATE=off; see docs/USAGE.md for the remaining update settings.
 `;
 const output = (value: unknown) =>
@@ -116,29 +114,54 @@ function flags(args: string[], allowed: string[]) {
   }
   return result;
 }
-const longRunning = new Set(["start", "dashboard", "watchdog", "monitor"]);
+const knownCommands = new Set([
+  "init",
+  "doctor",
+  "configure",
+  "agents",
+  "task",
+  "agent",
+  "start",
+  "status",
+  "pause",
+  "resume",
+  "retry",
+  "nudge",
+  "stop",
+  "rollout",
+  "dashboard",
+  "evidence",
+  "monitor",
+  "watchdog",
+]);
 /**
  * Best-effort background check. It never delays or fails a foreground command
- * and never swaps the binary while long-lived work or a supervisor is live.
+ * and never replaces the executable while long-lived work or any live
+ * supervisor is present.
  */
-async function autoUpdate(command: string, directory: string) {
-  if (longRunning.has(command) || autoUpdateDisabled(process.env)) return;
-  const target = updateTarget(isStandaloneExecutable(), process.execPath);
+async function autoUpdate(command: string) {
+  if (!knownCommands.has(command)) return;
+  const environment = process.env,
+    releaseMarked = isReleaseBuild(),
+    execPath = process.execPath;
+  const target = updateTarget(releaseMarked, execPath);
   if (target === null) return;
+  const now = new Date();
+  const cache = await readUpdateCache(updateCachePath(environment));
   if (
-    !updateDue(
-      await readUpdateCache(updateCachePath(process.env)),
-      new Date(),
-      updateIntervalMs(process.env),
-    )
+    !shouldScheduleUpdate({
+      command,
+      environment,
+      releaseMarked,
+      execPath,
+      cache,
+      now,
+      supervisorLive: false,
+    })
   )
     return;
-  const state = (await optional(join(directory, "state.json"))) as {
-    running?: boolean;
-    pid?: number;
-  } | null;
-  if (state?.running === true && isProcessAlive(state.pid)) return;
-  await scheduleAutoUpdate({ target });
+  if (await supervisorRunning(environment)) return;
+  await scheduleAutoUpdate({ target, environment, now });
 }
 async function main() {
   const args = process.argv.slice(2);
@@ -155,16 +178,32 @@ async function main() {
   if (command === "--help" || command === "-h") return output(help);
   if (command === "--version") return output(pkg.version);
   if (command === "update") {
-    const set = flags(rest, ["--check", "--auto"]);
+    const set = flags(rest, ["--check", "--auto", "--force"]);
     if (set.has("--check") && set.has("--auto"))
       throw new Error("--check and --auto are mutually exclusive");
     if (set.has("--auto")) {
       await runUpdate({ current: pkg.version, auto: true }).catch(() => {});
       return;
     }
-    return output(
-      await runUpdate({ current: pkg.version, checkOnly: set.has("--check") }),
-    );
+    try {
+      return output(
+        await runUpdate({
+          current: pkg.version,
+          checkOnly: set.has("--check"),
+          ...(set.has("--force") ? { safeToReplace: async () => true } : {}),
+        }),
+      );
+    } catch (error) {
+      output({
+        version: 1,
+        status: "failed",
+        current: pkg.version,
+        checkedAt: new Date().toISOString(),
+        reason: error instanceof Error ? error.message : "Update failed",
+      });
+      process.exitCode = 1;
+      return;
+    }
   }
   const ctx = (await agents(["init"], requested)) as {
     store: string;
@@ -175,7 +214,7 @@ async function main() {
     root = ctx.projectRoot;
   const directory = join(ctx.store, "supervisor");
   const policy = projectPolicy(root);
-  await autoUpdate(command, directory).catch(() => {});
+  await autoUpdate(command).catch(() => {});
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
     try {

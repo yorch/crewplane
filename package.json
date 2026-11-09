@@ -8,7 +8,8 @@
   "packageManager": "bun@1.4.1",
   "scripts": {
     "dev": "bun src/cli.ts",
-    "build": "bun scripts/embed.ts && bun build --compile src/cli.ts --outfile dist/crewplane",
+    "build": "bun scripts/embed.ts && bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/cli.ts --outfile dist/crewplane",
+    "build:release": "bun scripts/embed.ts && bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define 'process.env.CREWPLANE_RELEASE_BUILD=\"1\"' src/cli.ts --outfile dist/crewplane",
     "check": "biome check --error-on-warnings .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
