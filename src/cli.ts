@@ -667,16 +667,24 @@ async function main() {
     return watchdogMain(rest);
   }
   if (command === "dashboard") {
-    const opts = options(rest, ["--port"]);
+    const opts = options(rest, ["--port", "--controls"]);
     const port = Number(opts["--port"] ?? 4310);
     if (!Number.isInteger(port) || port < 1024 || port > 65535)
       throw new Error("Invalid port");
-    const server = createDashboard(root);
+    const controls =
+      opts["--controls"] === "true" ? { token: randomUUID() } : undefined;
+    const server = createDashboard(root, { ...(controls ? { controls } : {}) });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, "127.0.0.1", resolve);
     });
-    output(`Crewplane dashboard: http://127.0.0.1:${port}`);
+    output(
+      `Crewplane dashboard: http://127.0.0.1:${port}${
+        controls
+          ? `\nControls enabled: send x-crewplane-token: ${controls.token} from an exact Origin`
+          : ""
+      }`,
+    );
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.once(signal, () => server.close());
     return;
