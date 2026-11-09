@@ -314,3 +314,16 @@ Order matters. Repinning before installing the target release locks every comman
 crewplane agents prompt builder always supplies built-in role guidance and appends the ordered configured files. Paths and policy come from the canonical primary even when invoked in a linked worker checkout. Each file must be regular valid UTF-8 without NUL, at most 32 KiB; total rendered context is bounded to 64 KiB. Paths must stay inside the project, including resolved symlinks, and cannot read .git or Crewplane private state. Missing, malformed, escaping or oversized files fail explicitly. Empty/absent lists preserve built-in prompts. The files are instructions/data, never automatic command execution or task authority.
 
 Keep engineering instructions, lane guidance and task cards in the project. A supervised tool-capable agent reads the configured AGENTS instructions, which can direct it to run this same native prompt command; this change does not alter supervisor prompts, harness isolation or no-tools capabilities. Runtime per-lane guidance is a separate configured capability. Legacy cutover warnings and rollback steps belong in project documentation, not in an adapter every project must copy. Normal shell/package/just aliases may call the installed crewplane executable directly. No Node/Bun wrapper is required to run it.
+
+### Control plane semantics
+
+Operator controls are queued as private command files and applied only by the supervisor loop. Every command records exactly one outcome (`applied`, `noop`, `refused`, `stale` or `invalid`) in `state.controlLog` with a monotonic `seq`; `--wait N` reports the outcome and exits 0 for applied/noop, 2 for refused/invalid and 3 for stale.
+
+- `pause --lane ID` holds one lane; `pause --all` holds the whole instance without draining or stopping it. `resume` releases only the requested hold and clears operator pauses, never failures or decisions.
+- `cancel --run RUN_ID` or `cancel --all true` terminates live runs with SIGTERM, then SIGKILL after the cleanup grace. Cancellation never resets budgets and always leaves a paused failure when cleanup is unverified.
+- `retry` clears only failure/no-progress pauses; `retry --confirm-cleanup true --text NOTE` acknowledges cleanup (lane-wide, or one task with `--task`); `retry --new-session --task ID --text NOTE` clears exactly one native session.
+- `resolve --lane ID [--task ID] --pause UUID (--approve true|--deny true) --text NOTE` resolves one decision pause by id. It never accepts work or grants permissions.
+- `stop` drains and stops; `stop --cancel-active true` also cancels live runs. `rollout` preserves running intent and is refused once a stop is recorded.
+- Wide actions are bound to the observed state (`expectRev`/`expectRun`/`expectSession` auto-filled by the CLI). Stale generation or revision is refused, not applied. State is written as v2; v1 state remains readable.
+- `status` keeps raw `desired`/`state` and adds `view`: supervisor intent versus observed phase (including stale heartbeats), per-lane holds/revisions/runs/pauses, pending controls and recent control outcomes.
+- The dashboard is read-only unless started with `dashboard --controls`; that opt-in exposes only hold and cancel through `POST /api/control` with an exact `Origin`, per-launch `x-crewplane-token`, JSON body and a 4 KiB bound.

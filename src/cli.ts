@@ -561,7 +561,11 @@ async function main() {
       view = {
         supervisor: {
           intent: desired?.desiredRunning === false ? "stopped" : "running",
-          observed: state.running ? "running" : "dead",
+          observed: state.running
+            ? Number.isFinite(heartbeat) && Date.now() - heartbeat > 60000
+              ? "stale"
+              : "running"
+            : "dead",
           heartbeatAgeMs: Number.isFinite(heartbeat)
             ? Date.now() - heartbeat
             : null,
