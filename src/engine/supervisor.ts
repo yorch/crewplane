@@ -737,8 +737,45 @@ export async function serve(
             at,
           });
           state.draining = true;
+          if (c.cancelActive === true)
+            for (const record of Object.values(state.records)) {
+              if (
+                record.status !== "running" ||
+                record.finishedAt ||
+                !children.has(record.key)
+              )
+                continue;
+              record.cancelRequested = true;
+              bump(record.lane);
+              const pid = record.processGroupId ?? record.pid;
+              if (pid)
+                try {
+                  process.kill(
+                    process.platform === "win32" ? pid : -pid,
+                    "SIGTERM",
+                  );
+                } catch {
+                  /* verified by the run cleanup */
+                }
+              cancelTimers.set(
+                record.key,
+                setTimeout(() => {
+                  if (!children.has(record.key)) return;
+                  const targetPid = record.processGroupId ?? record.pid;
+                  if (targetPid)
+                    try {
+                      process.kill(
+                        process.platform === "win32" ? targetPid : -targetPid,
+                        "SIGKILL",
+                      );
+                    } catch {
+                      /* finish retains identity when unverified */
+                    }
+                }, options.cleanupGraceMs ?? 1000),
+              );
+            }
           outcome = "applied";
-          code = "DRAINING";
+          code = c.cancelActive === true ? "STOP_CANCEL" : "DRAINING";
         } else if (c.action === "rollout") {
           const desired = await read<{ desiredRunning?: boolean }>(
             join(directory, "desired.json"),

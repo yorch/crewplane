@@ -57,7 +57,11 @@ Usage: crewplane [--project PATH] COMMAND
                                Start a fresh native session for one task
   resolve --lane ID --task ID --pause UUID (--approve|--deny) --text NOTE
                                Record an operator decision for a decision pause
-  stop                         Request intentional stop and drain
+  pause|resume --all [--wait N] Hold/release every lane without stopping
+  cancel (--run RUN | --all true) [--wait N]
+                               Terminate one live run or every live run
+  stop [--cancel-active true]  Request intentional stop and drain
+  resolve --lane ID --task ID --pause UUID (--approve|--deny) --text NOTE
   rollout                      Request an authorized drain; no automatic restart
   dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
   evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
@@ -465,6 +469,7 @@ async function main() {
       "stop",
       "rollout",
       "resolve",
+      "cancel",
     ].includes(command)
   ) {
     if (process.env.CREWPLANE_HEADLESS_LANE)
@@ -482,6 +487,9 @@ async function main() {
       "--approve",
       "--deny",
       "--pause",
+      "--all",
+      "--run",
+      "--cancel-active",
     ]);
     if (
       opts["--confirm-cleanup"] !== undefined &&
@@ -532,6 +540,9 @@ async function main() {
       ...(opts["--approve"] ? { resolution: "approve" as const } : {}),
       ...(opts["--deny"] ? { resolution: "deny" as const } : {}),
       ...(opts["--pause"] ? { pauseId: opts["--pause"] } : {}),
+      ...(opts["--all"] === "true" ? { all: true } : {}),
+      ...(opts["--run"] ? { run: opts["--run"] } : {}),
+      ...(opts["--cancel-active"] === "true" ? { cancelActive: true } : {}),
       ...(expectedRev !== undefined ? { expectRev: expectedRev } : {}),
       ...(opts["--expect-run"]
         ? { expectRun: opts["--expect-run"] }

@@ -23,6 +23,7 @@ export interface Control {
   newSession?: boolean;
   resolution?: "approve" | "deny";
   pauseId?: string;
+  cancelActive?: boolean;
   text?: string;
   at?: string;
   expectRev?: number;
@@ -79,7 +80,7 @@ export function control(value: unknown): Control {
   const allowed: Record<string, string[]> = {
     pause: ["lane", "all"],
     resume: ["lane", "all"],
-    stop: [],
+    stop: ["cancelActive"],
     rollout: [],
     cancel: ["lane", "run", "all"],
     retry: ["lane", "task", "confirmCleanup", "newSession", "text"],
@@ -95,6 +96,7 @@ export function control(value: unknown): Control {
     "newSession",
     "resolution",
     "pauseId",
+    "cancelActive",
     "text",
   ])
     if (c[key] !== undefined && !allowed[action]?.includes(key)) return invalid;
@@ -108,6 +110,7 @@ export function control(value: unknown): Control {
     return invalid;
   if (c.newSession !== undefined && c.newSession !== true) return invalid;
   if (c.all !== undefined && c.all !== true) return invalid;
+  if (c.cancelActive !== undefined && c.cancelActive !== true) return invalid;
   switch (action) {
     case "pause":
     case "resume":

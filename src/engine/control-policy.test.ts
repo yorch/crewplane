@@ -177,3 +177,28 @@ it("validates v2 control logs, holds and revisions", () => {
   value.laneRev = { builder: -1 };
   expect(validState(value)).toBe(false);
 });
+
+it("accepts instance holds, run cancellation and hard stop only with a target", () => {
+  expect(control({ v: 2, action: "pause", all: true }).action).toBe("pause");
+  expect(control({ v: 2, action: "resume", all: true }).action).toBe("resume");
+  expect(control({ v: 2, action: "cancel", all: true }).action).toBe("cancel");
+  expect(
+    control({
+      v: 2,
+      action: "cancel",
+      lane: "builder",
+      run: "1794100000001-00000000-0000-4000-8000-000000000001",
+    }).action,
+  ).toBe("cancel");
+  expect(control({ v: 2, action: "stop", cancelActive: true }).action).toBe(
+    "stop",
+  );
+  for (const bad of [
+    { v: 2, action: "stop", cancelActive: false },
+    { v: 2, action: "cancel" },
+    { v: 2, action: "cancel", run: "not-a-run" },
+    { v: 2, action: "pause", all: true, lane: "builder" },
+    { v: 2, action: "resolve", lane: "reviewer", task: "T1" },
+  ])
+    expect(control(bad).action).toBe("invalid");
+});
