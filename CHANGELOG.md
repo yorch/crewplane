@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/yorch/crewplane/compare/v0.4.0...v0.5.0) (2026-11-09)
+
+
+### Features
+
+* **control:** bind commands to observed state ([ab3d8e7](https://github.com/yorch/crewplane/commit/ab3d8e73d521746d56617e896518c7902f97ebd7))
+* **control:** bind commands to observed state ([d65da0b](https://github.com/yorch/crewplane/commit/d65da0ba1389e8fa36b0aabef19972050911bb5a))
+* **control:** expose instance hold, cancel and hard stop ([998bda7](https://github.com/yorch/crewplane/commit/998bda78712a567ee9a7eba6676f00d4911d373d))
+* **dashboard:** opt-in hold and cancel controls (S7) ([#5](https://github.com/yorch/crewplane/issues/5)) ([d13f23b](https://github.com/yorch/crewplane/commit/d13f23bba69befd56a34d64ee77f3f090090585d))
+* **policy:** explain release pin mismatches and add pin command ([#6](https://github.com/yorch/crewplane/issues/6)) ([4b78ad4](https://github.com/yorch/crewplane/commit/4b78ad40f8940aea0c8cf02b5d5a359f72454180))
+* **release:** report progress while installing ([3387e3f](https://github.com/yorch/crewplane/commit/3387e3f9889bbd7e27b59e57c7f5a04d2b78faeb))
+
+
+### Bug Fixes
+
+* **control:** close S3-S6 adversarial findings ([bdc47f8](https://github.com/yorch/crewplane/commit/bdc47f8b8f1c47e202b78503e95192dafc1697e9))
+* **control:** enforce instance holds and revision binding ([5769132](https://github.com/yorch/crewplane/commit/5769132f50555f381c9cb475c57d6b66caa8badd))
+
 ## [0.4.0](https://github.com/yorch/crewplane/compare/v0.3.0...v0.4.0) (2026-11-09)
 
 
