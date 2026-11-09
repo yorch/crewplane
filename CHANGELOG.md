@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/yorch/crewplane/compare/v0.5.0...v0.5.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **control:** warn when a live supervisor may ignore a queued verb ([5b60184](https://github.com/yorch/crewplane/commit/5b60184d2759736d0d78e195987bd5fec1f3ab4e))
+* **docs:** keep pin examples on the released version ([092874f](https://github.com/yorch/crewplane/commit/092874fe4b4d1969224aa1c88f61e312befccd2d))
+
 ## [0.5.0](https://github.com/yorch/crewplane/compare/v0.4.0...v0.5.0) (2026-11-09)
 
 
