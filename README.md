@@ -35,7 +35,7 @@ crewplane watchdog start
 
 `crewplane stop` requests intentional drain; `status` reports persistence and process observations. Inspection does not launch agents. No automatic integration, controller replacement, budget increase or legacy-state adoption occurs.
 
-Codex, restrictive no-tools pi, Claude Code and OpenCode adapters are covered with synthetic native events and lifecycle fixtures. Claude/OpenCode compatibility is limited to the locally probed CLI protocols; real provider acceptance, Windows, signing and automatic updates remain separate. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
+Codex, restrictive no-tools pi, Claude Code and OpenCode adapters are covered with synthetic native events and lifecycle fixtures. Claude/OpenCode compatibility is limited to the locally probed CLI protocols; real provider acceptance, Windows and signing remain separate. Detailed cache/provider usage integration and SQLite migration remain follow-ups.
 
 See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extraction provenance](docs/PROVENANCE.md), and [plan](docs/PLAN.md). See [operating guide](docs/USAGE.md) for configuration and workflow examples, and [validation status](docs/STATUS.md) for evidence and limits.
 
@@ -45,4 +45,6 @@ See [architecture](docs/ARCHITECTURE.md), [contracts](docs/CONTRACTS.md), [extra
 curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
 ```
 
-This downloads the latest [release](https://github.com/yorch/crewplane/releases) binary for Linux or macOS, verifies its SHA-256 checksum and installs it to `~/.local/bin` (override with `CREWPLANE_INSTALL_DIR`; pin with `CREWPLANE_VERSION=v0.2.0`). Binaries are published by the Release workflow when the Release Please PR is merged (see [releasing](docs/RELEASING.md)). Signing and automatic updates are deferred.
+This downloads the latest [release](https://github.com/yorch/crewplane/releases) binary for Linux or macOS, verifies its published SHA-256 checksum, then renames it into place at `~/.local/bin`. Use `--dry-run` to preview, `--dir DIR` (or `CREWPLANE_INSTALL_DIR`) to install elsewhere, and `--version v0.2.0` (or `CREWPLANE_VERSION`) to pin. The installer never uses sudo and leaves an existing binary untouched when verification fails. Binaries are published by the Release workflow when the Release Please PR is merged (see [releasing](docs/RELEASING.md)).
+
+Installed release binaries keep themselves current. A project command checks for a newer release at most once a day, and a detached updater replaces the executable only after the published checksum and executable header match; the new version applies to the next invocation. Long-running commands (`start`, `dashboard`, `watchdog`, `monitor`) and live supervisors are never updated in place. Apply or inspect immediately with `crewplane update` and `crewplane update --check`; disable automatic updates with `CREWPLANE_NO_AUTO_UPDATE=1` or `CREWPLANE_UPDATE=off`. See the [operating guide](docs/USAGE.md) for every update setting. Releases are not signed or notarized yet, and Windows remains unsupported.

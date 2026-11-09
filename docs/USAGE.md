@@ -2,6 +2,46 @@
 
 Build with Bun 1.4.1 (`bun run build`), then place `dist/crewplane` on PATH or invoke it by absolute path. Bun and Node are not needed to run that executable. Git and the configured harness executables remain external. Initial platforms are macOS and Linux; Windows is not accepted.
 
+## Install and update the CLI
+
+The installer resolves a GitHub release, downloads the asset for the host platform, and verifies its published SHA-256 before replacing anything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh | sh -s -- --version v0.2.0 --dir "$HOME/bin"
+```
+
+| Option          | Environment              | Meaning                                                         |
+| --------------- | ------------------------ | --------------------------------------------------------------- |
+| `--version TAG` | `CREWPLANE_VERSION`      | Exact release, e.g. `v0.2.0`; default is the latest tag         |
+| `--dir DIR`     | `CREWPLANE_INSTALL_DIR`  | Install directory; default `~/.local/bin`                       |
+| `--dry-run`     | —                        | Print the resolved asset, source and target without downloading |
+| —               | `CREWPLANE_RELEASE_API`  | Latest-release JSON, default the GitHub API                     |
+| —               | `CREWPLANE_RELEASE_BASE` | Release download base URL                                       |
+
+The installer downloads into the target directory, verifies the checksum and the reported `--version` of the staged file, then renames it into place. It never runs under sudo, never skips verification, and leaves an existing installation untouched when any check fails. Linux assets are built against glibc; musl/Alpine is not verified. Windows is unsupported.
+
+An installed release binary updates itself. At most once every 24 hours a project command starts a detached check; when a newer release is published and verified it replaces the running executable, and the new version takes effect on the next invocation. The swap is skipped for `start`, `dashboard`, `watchdog` and `monitor`, and while this project's supervisor reports running, so long-lived coordination is never affected. The check never delays or fails the foreground command, and no project state, hold, budget or queued control is touched.
+
+```sh
+crewplane update           # apply now; prints a JSON outcome
+crewplane update --check   # report without downloading or replacing
+```
+
+The outcome is one of `current`, `available`, `updated`, `unsupported` (source run, foreign platform, or disabled) or `failed`. Updates verify the published SHA-256 and the platform executable header, then rename a verified copy atomically inside the install directory; running processes keep the binary they started with. Downgrades are not automatic: install a pin with `install.sh --version TAG`.
+
+| Environment                       | Meaning                                                                                              |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `CREWPLANE_NO_AUTO_UPDATE=1`      | Disable automatic checks and swaps                                                                   |
+| `CREWPLANE_UPDATE=off`            | Same opt-out, by mode                                                                                |
+| `CREWPLANE_UPDATE_INTERVAL_HOURS` | Minimum hours between automatic checks (default 24)                                                  |
+| `CREWPLANE_CACHE_DIR`             | Directory for `crewplane/update.json` and its lock (default `$XDG_CACHE_HOME` or `~/Library/Caches`) |
+| `CREWPLANE_UPDATE_TIMEOUT_MS`     | Per-request timeout for release requests (default 20000)                                             |
+| `CREWPLANE_UPDATE_MAX_BYTES`      | Download size limit (default 256 MiB)                                                                |
+| `GITHUB_TOKEN` / `GH_TOKEN`       | Optional; sent only to `api.github.com` for release lookups                                          |
+
+The update cache records `lastAttemptAt`, `latest`, `updatedAt` and the last `error`. Releases are not signed or notarized yet, so checksum verification assumes the GitHub release account and file storage are not compromised.
+
 ## Initialize a project
 
 Run `crewplane --project /path/to/repo init` in a non-bare Git project. This creates a `crewplane.json` policy if absent, a task directory and private shared file store. It adds private runtime directories to Git's local exclude file. Existing instructions and configuration are preserved. Commit policy and task cards; never commit runtime state.
