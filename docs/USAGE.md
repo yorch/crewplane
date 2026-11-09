@@ -262,7 +262,7 @@ Projects need no launcher adapter. Opt into project policy version 2 in crewplan
 ```json
 {
   "version": 2,
-  "requiredVersion": "0.4.0",
+  "requiredVersion": "0.5.0",
   "coordinator": "captain",
   "reviewers": ["inspector"],
   "promptFiles": {
@@ -285,7 +285,7 @@ Recovery steps:
 
    ```sh
    curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh \
-     | sh -s -- --version v0.4.0 --dir "$HOME/.local/share/crewplane/0.4.0"
+     | sh -s -- --version v0.5.0 --dir "$HOME/.local/share/crewplane/0.5.0"
    ```
 
 3. Keep that binary from moving. A pinned install is not sticky: release builds resume automatic updates, so set `CREWPLANE_NO_AUTO_UPDATE=1` (or `CREWPLANE_UPDATE=off`) for the pinned binary's environment, otherwise a command in any unpinned project can replace the shared executable and break the pin again.
