@@ -932,7 +932,8 @@ it("applies or refuses an audited new-session reset atomically", async () => {
     const state = await load();
     expect(state.controlOutcome?.builder).toMatchObject({
       outcome: "applied",
-      action: "retry-new-session",
+      action: "retry",
+      reason: "NEW_SESSION",
     });
     expect(state.records["builder:CP-101"]?.sessionId).toBeUndefined();
     expect(
@@ -951,7 +952,7 @@ it("applies or refuses an audited new-session reset atomically", async () => {
       async () => (await load()).controlOutcome?.builder?.outcome === "refused",
     );
     const refused = await load();
-    expect(refused.controlOutcome?.builder?.reason).toContain("held");
+    expect(refused.controlOutcome?.builder?.reason).toBe("HELD");
     expect(refused.records["builder:CP-101"]?.sessionId).toBe(session);
     expect(refused.notices.builder).toBeUndefined();
     second.abort();

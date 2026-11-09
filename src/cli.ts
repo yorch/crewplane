@@ -364,12 +364,18 @@ async function main() {
   if (
     ["pause", "resume", "retry", "nudge", "stop", "rollout"].includes(command)
   ) {
+    if (process.env.CREWPLANE_HEADLESS_LANE)
+      throw new Error("Control commands are unavailable to headless agents");
     const opts = options(rest, [
       "--lane",
       "--text",
       "--confirm-cleanup",
       "--task",
       "--new-session",
+      "--expect-rev",
+      "--expect-run",
+      "--expect-session",
+      "--wait",
     ]);
     if (
       opts["--confirm-cleanup"] !== undefined &&
@@ -378,30 +384,99 @@ async function main() {
       throw new Error("Cleanup confirmation must be true");
     if (opts["--new-session"] !== undefined && opts["--new-session"] !== "true")
       throw new Error("New session selection must be true");
+    const state = (await optional(join(directory, "state.json"))) as {
+      generation?: string;
+      laneRev?: Record<string, number>;
+      records?: Record<
+        string,
+        {
+          lane: string;
+          task: string | null;
+          sessionId?: string;
+          runId?: string;
+        }
+      >;
+      controlLog?: Array<{ id: string; outcome: string; code: string }>;
+    } | null;
+    const lane = opts["--lane"];
+    const task = opts["--task"];
+    const widening = ["retry", "resolve"].includes(command);
+    const expectedRev =
+      opts["--expect-rev"] !== undefined
+        ? Number(opts["--expect-rev"])
+        : widening && lane && state
+          ? (state.laneRev?.[lane] ?? 0)
+          : undefined;
+    const targetRecords =
+      state && lane && task
+        ? Object.values(state.records ?? {}).filter(
+            (record) => record.lane === lane && record.task === task,
+          )
+        : [];
+    const targetRecord =
+      targetRecords.length === 1 ? targetRecords[0] : undefined;
     const value = control({
       action: command,
       ...(opts["--confirm-cleanup"] === "true" ? { confirmCleanup: true } : {}),
-      generation: (
-        (await optional(join(directory, "state.json"))) as {
-          generation?: string;
-        } | null
-      )?.generation,
-      ...(opts["--lane"] ? { lane: opts["--lane"] } : {}),
-      ...(opts["--task"] ? { task: opts["--task"] } : {}),
+      generation: state?.generation,
+      ...(lane ? { lane } : {}),
+      ...(task ? { task } : {}),
       ...(opts["--new-session"] === "true" ? { newSession: true } : {}),
       ...(opts["--text"] ? { text: opts["--text"] } : {}),
+      ...(expectedRev !== undefined ? { expectRev: expectedRev } : {}),
+      ...(opts["--expect-run"]
+        ? { expectRun: opts["--expect-run"] }
+        : command === "retry" &&
+            opts["--confirm-cleanup"] === "true" &&
+            targetRecord?.runId
+          ? { expectRun: targetRecord.runId }
+          : {}),
+      ...(opts["--expect-session"]
+        ? { expectSession: opts["--expect-session"] }
+        : command === "retry" &&
+            opts["--new-session"] === "true" &&
+            targetRecord?.sessionId
+          ? { expectSession: targetRecord.sessionId }
+          : {}),
       at: new Date().toISOString(),
     });
     if (value.action === "invalid")
-      throw new Error("Invalid control; specify --lane ID for agent controls");
+      throw new Error("Invalid control; check the action, target and options");
     if (value.lane && !(value.lane in (await readConfig(directory)).lanes))
       throw new Error("Unknown configured agent");
     await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });
-    await publishJson(
-      join(directory, "commands", `${randomUUID()}.json`),
-      value,
-    );
-    return output({ queued: command, activation: false });
+    const id = randomUUID();
+    await publishJson(join(directory, "commands", `${id}.json`), value);
+    if (opts["--wait"] !== undefined) {
+      const seconds = Number(opts["--wait"]);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60)
+        throw new Error("Wait must be an integer from 1 to 60 seconds");
+      const deadline = Date.now() + seconds * 1000;
+      while (Date.now() < deadline) {
+        const current = (await optional(join(directory, "state.json"))) as {
+          controlLog?: Array<{ id: string; outcome: string; code: string }>;
+        } | null;
+        const entry = current?.controlLog?.find((item) => item.id === id);
+        if (entry) {
+          process.exitCode =
+            entry.outcome === "applied" || entry.outcome === "noop"
+              ? 0
+              : entry.outcome === "refused" || entry.outcome === "invalid"
+                ? 2
+                : 3;
+          return output({
+            id,
+            outcome: entry.outcome,
+            code: entry.code,
+            activation: false,
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      process.exitCode = 124;
+      return output({ id, outcome: "queued", activation: false });
+    }
+    return output({ queued: command, id, activation: false });
   }
   if (command === "evidence") {
     const [action, ...args] = rest;

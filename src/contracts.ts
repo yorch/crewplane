@@ -58,11 +58,24 @@ export interface RecordState {
   waitingForEvent?: boolean;
   finalState?: "working" | "waiting" | "ready" | "needs_operator";
   pauseKind?: "failure" | "operator" | "decision" | "no-progress";
+  pauseId?: string;
+  cancelRequested?: boolean;
   inputTokens: number;
   outputTokens: number;
 }
+export interface ControlLogEntry {
+  id: string;
+  seq: number;
+  action: string;
+  scope: "instance" | "lane" | "task" | "run";
+  target: string | null;
+  outcome: "applied" | "noop" | "refused" | "stale" | "invalid";
+  code: string;
+  at: string;
+  issuer: string | null;
+}
 export interface State {
-  version: 1;
+  version: 1 | 2;
   running: boolean;
   generation?: string;
   checkedAt: string;
@@ -73,6 +86,10 @@ export interface State {
   records: Record<string, RecordState>;
   retiredRuns?: Partial<Record<Lane, number[]>>;
   notices: Partial<Record<Lane, string[]>>;
+  instanceHeld?: boolean;
+  laneRev?: Partial<Record<Lane, number>>;
+  controlSeq?: number;
+  controlLog?: ControlLogEntry[];
   controlOutcome?: Partial<
     Record<
       Lane,

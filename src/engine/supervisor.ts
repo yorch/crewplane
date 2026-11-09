@@ -4,7 +4,14 @@ import { existsSync } from "node:fs";
 import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { adapters } from "../adapters.ts";
-import type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
+import type {
+  Config,
+  ControlLogEntry,
+  Lane,
+  RecordState,
+  State,
+  Work,
+} from "../contracts.ts";
 import { gitEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
@@ -478,12 +485,19 @@ export async function serve(
     });
     if (!validState(state))
       throw new Error("Invalid supervisor state; inspect before starting");
+    state.version = 2;
   } catch (error) {
     await unregister();
     await release();
     throw error;
   }
   const children = new Map<string, ChildProcess>();
+  const cancelTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const clearCancelTimer = (key: string) => {
+    const timer = cancelTimers.get(key);
+    if (timer) clearTimeout(timer);
+    cancelTimers.delete(key);
+  };
   const settling = new Map<string, Promise<void>>();
   let saving = Promise.resolve();
   const save = () => {
@@ -603,169 +617,363 @@ export async function serve(
           a.file.localeCompare(b.file),
       );
       for (const { file, value: c } of pendingCommands) {
-        if (
-          c.generation
-            ? c.generation !== state.generation &&
-              !(
-                c.generation === previousGeneration &&
-                c.at &&
-                c.at >= startedAt
-              )
-            : !c.at || c.at < startedAt
+        const id = file.replace(/\.json$/, "");
+        const at = c.at ?? new Date().toISOString();
+        const issuer = c.issuer ?? null;
+        const lane = c.lane;
+        const laneRecords = lane
+          ? Object.values(state.records).filter((r) => r.lane === lane)
+          : [];
+        const laneKnown =
+          !!lane &&
+          (Object.hasOwn(config.lanes, lane) ||
+            laneRecords.length > 0 ||
+            state.held.includes(lane));
+        const revision = (name: string) => state.laneRev?.[name as Lane] ?? 0;
+        const bump = (name: string) => {
+          state.laneRev ??= {};
+          state.laneRev[name as Lane] = revision(name) + 1;
+        };
+        const queueNote = (text: string, task?: string) => {
+          if (!lane) return;
+          state.noticeQueuedAt ??= {};
+          state.noticeQueuedAt[lane] ??= at;
+          state.notices[lane] = [
+            ...(state.notices[lane] ?? []),
+            (task ? `[task:${task}] ${text}` : text).slice(0, 32768),
+          ].slice(-100);
+        };
+        const scope: ControlLogEntry["scope"] = c.all
+          ? "instance"
+          : c.run
+            ? "run"
+            : c.task
+              ? "task"
+              : "lane";
+        const target = c.all ? "all" : (c.run ?? c.task ?? lane ?? null);
+        let outcome: ControlLogEntry["outcome"] = "invalid";
+        let code = "INVALID";
+        const currentGeneration = c.generation
+          ? c.generation === state.generation
+          : c.at
+            ? c.at >= startedAt
+            : c.v === 1 &&
+              ["pause", "nudge", "stop", "rollout"].includes(c.action);
+        const previousGenCommand =
+          !!c.generation &&
+          c.generation === previousGeneration &&
+          !!c.at &&
+          c.at >= startedAt;
+        const stale = c.all
+          ? false
+          : c.action === "pause"
+            ? false
+            : !(currentGeneration || previousGenCommand);
+        if (stale) {
+          outcome = "stale";
+          code = "STALE_GENERATION";
+        } else if (
+          c.expectRev !== undefined &&
+          lane &&
+          c.expectRev !== revision(lane)
         ) {
-          await unlink(join(commandsDir, file)).catch(() => {});
-          continue;
-        }
-        if (["stop", "rollout"].includes(c.action)) {
+          outcome = "stale";
+          code = "STALE_REVISION";
+        } else if (c.action === "pause") {
+          if (c.all) {
+            state.instanceHeld = true;
+            outcome = "applied";
+            code = "HELD";
+          } else if (lane && laneKnown) {
+            if (state.held.includes(lane)) {
+              outcome = "noop";
+              code = "ALREADY_HELD";
+            } else {
+              state.held.push(lane);
+              bump(lane);
+              outcome = "applied";
+              code = "HELD";
+            }
+          } else code = "UNKNOWN_TARGET";
+        } else if (c.action === "resume") {
+          if (c.all) {
+            state.instanceHeld = false;
+            for (const [name, record] of Object.entries(state.records))
+              if (record.pauseKind === "operator") {
+                record.status = "idle";
+                record.noProgress = 0;
+                delete record.pauseKind;
+                bump(name);
+              }
+            outcome = "applied";
+            code = "RELEASED";
+          } else if (lane && laneKnown) {
+            const wasHeld = state.held.includes(lane);
+            state.held = state.held.filter((l) => l !== lane);
+            for (const record of laneRecords)
+              if (record.pauseKind === "operator") {
+                record.status = "idle";
+                record.noProgress = 0;
+                delete record.pauseKind;
+              }
+            bump(lane);
+            outcome = wasHeld || laneRecords.length ? "applied" : "noop";
+            code = "RELEASED";
+          } else code = "UNKNOWN_TARGET";
+        } else if (c.action === "stop") {
           await atomic(join(directory, "desired.json"), {
             version: 1,
-            desiredRunning: c.action === "rollout",
-            reason:
-              c.action === "rollout"
-                ? "authorized-rollout"
-                : "intentional-stop",
-            at: new Date().toISOString(),
+            desiredRunning: false,
+            reason: "intentional-stop",
+            at,
           });
           state.draining = true;
-        }
-        if (c.action === "retry" && c.newSession === true && c.task) {
-          const at =
-            c.at && Number.isFinite(Date.parse(c.at))
-              ? c.at
-              : new Date().toISOString();
-          const lane = c.lane as Lane;
-          const laneRecords = Object.values(state.records).filter(
-            (r) => r.lane === lane,
+          outcome = "applied";
+          code = "DRAINING";
+        } else if (c.action === "rollout") {
+          const desired = await read<{ desiredRunning?: boolean }>(
+            join(directory, "desired.json"),
+            {},
           );
-          const matches = laneRecords.filter((r) => r.task === c.task);
-          const target = matches.length === 1 ? matches[0] : undefined;
-          const configured = config.lanes[lane];
-          const refuse = (reason: string) => {
-            state.controlOutcome ??= {};
-            state.controlOutcome[lane] = {
-              action: "retry-new-session",
-              outcome: "refused",
-              reason,
+          if (desired.desiredRunning === false) {
+            outcome = "refused";
+            code = "STOP_WINS";
+          } else {
+            await atomic(join(directory, "desired.json"), {
+              version: 1,
+              desiredRunning: true,
+              reason: "authorized-rollout",
               at,
-            };
-          };
-          if (!configured) refuse("Lane is not configured");
-          else if (matches.length > 1)
-            refuse("Multiple records match this task; refuse ambiguous reset");
-          else if (state.held.includes(lane))
-            refuse("Lane is held; resume before resetting the native session");
-          else if (!target) refuse("No matching task record for this lane");
-          else if (
-            target.status === "running" ||
-            target.pid ||
-            target.processGroupId
-          )
-            refuse("Record owns a live process; stop it before resetting");
-          else if (target.cleanupUnverified)
-            refuse(
-              "Unverified descendants remain; inspect before resetting the native session",
-            );
-          else if (
-            laneRecords.some(
-              (r) =>
-                r.pid ||
-                r.processGroupId ||
-                r.status === "running" ||
-                r.cleanupUnverified,
+            });
+            state.draining = true;
+            outcome = "applied";
+            code = "ROLLOUT";
+          }
+        } else if (c.action === "cancel") {
+          const matches = Object.values(state.records).filter(
+            (record) =>
+              record.status === "running" &&
+              !record.finishedAt &&
+              children.has(record.key) &&
+              (c.all || (c.lane === record.lane && c.run === record.runId)),
+          );
+          if (!matches.length) {
+            outcome = "refused";
+            code = "RUN_NOT_ACTIVE";
+          } else {
+            for (const record of matches) {
+              record.cancelRequested = true;
+              bump(record.lane);
+              const pid = record.processGroupId ?? record.pid;
+              if (pid)
+                try {
+                  process.kill(
+                    process.platform === "win32" ? pid : -pid,
+                    "SIGTERM",
+                  );
+                } catch {
+                  /* verified by the run cleanup */
+                }
+              cancelTimers.set(
+                record.key,
+                setTimeout(() => {
+                  if (!children.has(record.key)) return;
+                  const targetPid = record.processGroupId ?? record.pid;
+                  if (targetPid)
+                    try {
+                      process.kill(
+                        process.platform === "win32" ? targetPid : -targetPid,
+                        "SIGKILL",
+                      );
+                    } catch {
+                      /* finish retains identity when unverified */
+                    }
+                }, options.cleanupGraceMs ?? 1000),
+              );
+            }
+            outcome = "applied";
+            code = "CANCEL_REQUESTED";
+          }
+        } else if (c.action === "retry") {
+          if (!lane || !laneKnown) code = "UNKNOWN_TARGET";
+          else if (state.instanceHeld || state.held.includes(lane))
+            code = "HELD";
+          else if (c.expectRev !== undefined && c.expectRev !== revision(lane))
+            code = "STALE_REVISION";
+          else if (c.newSession === true && c.task) {
+            const matches = laneRecords.filter((r) => r.task === c.task);
+            const targetRecord = matches.length === 1 ? matches[0] : undefined;
+            const configured = config.lanes[lane];
+            if (matches.length > 1) code = "AMBIGUOUS_TARGET";
+            else if (!targetRecord) code = "UNKNOWN_TARGET";
+            else if (
+              targetRecord.status === "running" ||
+              targetRecord.pid ||
+              targetRecord.processGroupId ||
+              targetRecord.finishedAt
             )
-          )
-            refuse("Another record for this lane owns a live process");
-          else if (!target.sessionId)
-            refuse("No native session recorded for this task");
-          else if (
-            (target.harness ?? "codex") !== harnessName(configured) ||
-            target.sessionEpoch !== configured.sessionEpoch
-          )
-            refuse(
-              "Native session harness/epoch does not match the configured lane",
-            );
-          else {
-            const previousSessionId = target.sessionId;
-            delete target.sessionId;
-            target.lastSessionReset = {
-              at,
-              previousSessionId,
-              note: (c.text ?? "").slice(0, 32768),
-            };
-            target.status = "idle";
-            target.noProgress = 0;
-            delete target.pauseKind;
-            target.reason = "Operator requested a fresh native session";
-            state.controlOutcome ??= {};
-            state.controlOutcome[lane] = {
-              action: "retry-new-session",
-              outcome: "applied",
-              reason: "Fresh native session will be created on the next turn",
-              at,
-            };
-            state.noticeQueuedAt ??= {};
-            state.noticeQueuedAt[lane] ??= at;
-            state.notices[lane] = [
-              ...(state.notices[lane] ?? []),
-              (c.text ?? "").slice(0, 32768),
-            ].slice(-100);
-          }
-          state.commands.push(file);
-          state.commands = state.commands.slice(-2000);
-          await save();
-          await unlink(join(commandsDir, file)).catch(() => {});
-          continue;
-        }
-        if (
-          c.lane &&
-          (Object.hasOwn(config.lanes, c.lane) ||
-            Object.values(state.records).some((r) => r.lane === c.lane))
-        ) {
-          if (c.action === "pause" && !state.held.includes(c.lane))
-            state.held.push(c.lane);
-          if (c.action === "resume")
-            state.held = state.held.filter((l) => l !== c.lane);
-          if (
-            ["retry", "resume"].includes(c.action) &&
-            !state.held.includes(c.lane)
-          ) {
-            for (const r of Object.values(state.records).filter(
-              (r) => r.lane === c.lane && r.status === "paused",
-            )) {
-              if (
-                c.action === "retry" ||
-                r.pauseKind === "operator" ||
-                r.reason === "Operator hold"
-              ) {
-                r.status = "idle";
-                r.noProgress = 0;
-                delete r.pauseKind;
-              }
-            }
-          }
-          if (c.action === "retry" && c.confirmCleanup) {
-            const laneRecords = Object.values(state.records).filter(
-              (r) => r.lane === c.lane,
-            );
-            if (
-              !laneRecords.some(
-                (r) => r.pid || r.processGroupId || r.status === "running",
+              code = "LIVE_OWNERSHIP";
+            else if (
+              laneRecords.some(
+                (r) =>
+                  r.pid ||
+                  r.processGroupId ||
+                  r.status === "running" ||
+                  r.cleanupUnverified,
               )
-            ) {
-              for (const record of laneRecords) delete record.cleanupUnverified;
+            )
+              code = "CLEANUP_UNVERIFIED";
+            else if (!targetRecord.sessionId) code = "NOTHING_TO_RECOVER";
+            else if (
+              c.expectSession !== undefined &&
+              c.expectSession !== targetRecord.sessionId
+            )
+              code = "STALE_REVISION";
+            else if (
+              !configured ||
+              (targetRecord.harness ?? "codex") !== harnessName(configured) ||
+              targetRecord.sessionEpoch !== configured.sessionEpoch
+            )
+              code = "STALE_REVISION";
+            else {
+              targetRecord.lastSessionReset = {
+                at,
+                previousSessionId: targetRecord.sessionId,
+                note: (c.text ?? "").slice(0, 32768),
+              };
+              delete targetRecord.sessionId;
+              targetRecord.status = "idle";
+              targetRecord.noProgress = 0;
+              delete targetRecord.pauseKind;
+              delete targetRecord.pauseId;
+              targetRecord.reason = "Operator requested a fresh native session";
+              bump(lane);
+              queueNote(c.text ?? "Fresh native session", c.task);
+              outcome = "applied";
+              code = "NEW_SESSION";
+            }
+          } else if (c.confirmCleanup === true) {
+            const matches = c.task
+              ? laneRecords.filter((r) => r.task === c.task)
+              : laneRecords;
+            const targetRecord =
+              !c.task && matches.length
+                ? undefined
+                : matches.length === 1
+                  ? matches[0]
+                  : undefined;
+            if (c.task && matches.length > 1) code = "AMBIGUOUS_TARGET";
+            else if (c.task && !targetRecord) code = "UNKNOWN_TARGET";
+            else if (
+              matches.some(
+                (r) => r.status === "running" || r.pid || r.processGroupId,
+              )
+            )
+              code = "LIVE_OWNERSHIP";
+            else if (!matches.length) code = "NOTHING_TO_RECOVER";
+            else {
+              for (const record of matches) {
+                delete record.cleanupUnverified;
+                if (
+                  record.status === "paused" &&
+                  ["failure", "no-progress"].includes(record.pauseKind ?? "")
+                ) {
+                  record.status = "idle";
+                  record.noProgress = 0;
+                  delete record.pauseKind;
+                  delete record.pauseId;
+                }
+              }
+              bump(lane);
+              queueNote(c.text ?? "Cleanup acknowledged", c.task);
+              outcome = "applied";
+              code = "CLEANUP_ACKNOWLEDGED";
+            }
+          } else {
+            const recoverable = laneRecords.filter(
+              (record) =>
+                record.status === "paused" &&
+                ["failure", "no-progress"].includes(record.pauseKind ?? "") &&
+                (!c.task || record.task === c.task),
+            );
+            if (!recoverable.length) {
+              outcome = "noop";
+              code = "NOTHING_TO_RECOVER";
+            } else {
+              for (const record of recoverable) {
+                record.status = "idle";
+                record.noProgress = 0;
+                delete record.pauseKind;
+                delete record.pauseId;
+              }
+              bump(lane);
+              queueNote(c.text ?? "Operator requested retry", c.task);
+              outcome = "applied";
+              code = "RETRY";
             }
           }
-          if (["nudge", "resume", "retry"].includes(c.action)) {
-            state.noticeQueuedAt ??= {};
-            state.noticeQueuedAt[c.lane] ??=
-              c.at && Number.isFinite(Date.parse(c.at))
-                ? c.at
-                : new Date().toISOString();
-            state.notices[c.lane] = [
-              ...(state.notices[c.lane] ?? []),
-              (c.text ?? `Operator requested ${c.action}`).slice(0, 32768),
-            ].slice(-100);
+        } else if (c.action === "resolve") {
+          const matches = laneRecords.filter((r) => r.task === c.task);
+          const targetRecord = matches.length === 1 ? matches[0] : undefined;
+          if (!lane || !laneKnown) code = "UNKNOWN_TARGET";
+          else if (matches.length > 1) code = "AMBIGUOUS_TARGET";
+          else if (!targetRecord) code = "UNKNOWN_TARGET";
+          else if (
+            targetRecord.status !== "paused" ||
+            targetRecord.pauseKind !== "decision" ||
+            !targetRecord.pauseId ||
+            targetRecord.pauseId !== c.pauseId
+          )
+            code = "DECISION_NEEDS_RESOLVE";
+          else if (c.expectRev !== undefined && c.expectRev !== revision(lane))
+            code = "STALE_REVISION";
+          else {
+            targetRecord.status = "idle";
+            targetRecord.noProgress = 0;
+            delete targetRecord.pauseKind;
+            delete targetRecord.pauseId;
+            bump(lane);
+            queueNote(
+              `${c.resolution === "approve" ? "Approved" : "Denied"}: ${c.text ?? ""}`,
+              c.task,
+            );
+            outcome = "applied";
+            code = c.resolution === "approve" ? "APPROVED" : "DENIED";
           }
+        } else if (c.action === "nudge") {
+          if (!lane || !laneKnown) code = "UNKNOWN_TARGET";
+          else {
+            queueNote(c.text ?? "Operator nudge", c.task);
+            outcome = "applied";
+            code = "NOTICE_QUEUED";
+          }
+        }
+        state.controlSeq = (state.controlSeq ?? 0) + 1;
+        state.controlLog = [
+          ...(state.controlLog ?? []),
+          {
+            id,
+            seq: state.controlSeq,
+            action: c.action,
+            scope,
+            target,
+            outcome,
+            code,
+            at,
+            issuer,
+          },
+        ].slice(-200);
+        if (lane) {
+          state.controlOutcome ??= {};
+          state.controlOutcome[lane] = {
+            action: c.action,
+            outcome:
+              outcome === "applied" || outcome === "noop"
+                ? "applied"
+                : "refused",
+            reason: code,
+            at,
+          };
         }
         state.commands.push(file);
         state.commands = state.commands.slice(-2000);
@@ -801,7 +1009,11 @@ export async function serve(
           await save();
           if (signal.aborted && children.size)
             await new Promise((resolve) => setTimeout(resolve, 100));
-          else await idleWait(config.intervalSeconds * 1000, signal);
+          else
+            await idleWait(
+              Math.min(1000, config.intervalSeconds * 1000),
+              signal,
+            );
           continue;
         }
         compactHistory(
@@ -1418,6 +1630,7 @@ export async function serve(
               .finally(() => {
                 children.delete(work.key);
                 settling.delete(work.key);
+                clearCancelTimer(work.key);
               });
             settling.set(work.key, completion);
             void completion.catch(() => {});

@@ -76,6 +76,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
     text = "Synthetic operator note",
   ) => {
     await mkdir(join(directory, "commands"), { recursive: true });
+    const instance = ["stop", "rollout"].includes(action);
     await writeFile(
       join(
         directory,
@@ -83,8 +84,8 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       ),
       JSON.stringify({
         action,
-        lane,
-        text,
+        ...(instance ? {} : { lane }),
+        ...(instance || ["pause", "resume"].includes(action) ? {} : { text }),
         at: new Date().toISOString(),
       }),
     );
