@@ -39,8 +39,11 @@ import {
 } from "./project.ts";
 import {
   compareVersions,
+  dispatchTarget,
+  isProcessAlive,
   isReleaseBuild,
   readUpdateCache,
+  releasesRoot,
   runUpdate,
   scheduleAutoUpdate,
   shouldScheduleUpdate,
@@ -131,7 +134,7 @@ async function autoUpdate(command: string) {
   const environment = process.env,
     releaseMarked = isReleaseBuild(),
     execPath = process.execPath;
-  const target = updateTarget(releaseMarked, execPath);
+  const target = updateTarget(releaseMarked, execPath, environment);
   if (target === null) return;
   const now = new Date();
   const cache = await readUpdateCache(updateCachePath(environment));
@@ -169,6 +172,8 @@ const pinMismatchBypass = new Set([
   "resolve",
   "pin",
 ]);
+/** Why the last pin mismatch could not hand off, for the refusal to explain. */
+let dispatchSkip: string | undefined;
 const standaloneBinary = () =>
   (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
     ?.isStandaloneExecutable === true;
@@ -176,24 +181,89 @@ const standaloneBinary = () =>
  * Extra recovery lines for a pin mismatch. They are rendered by the CLI only:
  * the error message itself stays one line because the supervisor persists it.
  */
-function versionPinHint(error: ProjectVersionError): string {
+function versionPinHint(error: ProjectVersionError, skipped?: string): string {
   const order = compareVersions(error.running, error.required);
   const direction =
     order > 0
       ? "this project pins an OLDER release; `crewplane update` only installs the latest release"
       : `this project requires a NEWER release; \`crewplane update\` installs the latest, which may not be ${error.required}`;
+  const retained = `${printablePath(releasesRoot())}/${error.required}`;
   const lines = [
     `  pin:     requiredVersion in ${printablePath(error.policyPath)} (primary checkout; applies to every worktree)`,
   ];
   if (standaloneBinary())
     lines.push(`  binary:  ${printablePath(process.execPath)}`);
+  lines.push(`  ${direction}`, `  retained: ${retained}`);
+  if (skipped !== undefined) lines.push(`  dispatch: ${skipped}`);
   lines.push(
-    `  ${direction}`,
-    `  cure:    install ${error.required} into its own directory and invoke it by absolute path`,
-    "  sticky:  release builds resume automatic update; set CREWPLANE_NO_AUTO_UPDATE=1",
+    `  cure:    install ${error.required} into that directory (install.sh --version v${error.required} --dir ${retained})`,
     '  details: docs/USAGE.md "Project version pins"',
   );
   return lines.join("\n");
+}
+/**
+ * Hand a pinned project to the retained copy of its release. Returns a reason
+ * when it declined, so the refusal can explain itself instead of contradicting
+ * the hints above it. A successful exec never returns.
+ */
+async function dispatchToPin(
+  error: ProjectVersionError,
+  command: string,
+  requested: string,
+): Promise<string | undefined> {
+  // `pin` must repoint at this release, and one hop per release is enough.
+  if (command === "pin") return undefined;
+  if (process.env.CREWPLANE_DISPATCHED === error.required)
+    return `already running on ${error.required}`;
+  try {
+    const identity = discoverProject(requested);
+    let state: { running?: boolean; pid?: number; supervisorVersion?: string };
+    try {
+      state = JSON.parse(
+        await readFile(
+          join(identity.store, "supervisor", "state.json"),
+          "utf8",
+        ),
+      ) as typeof state;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      state = {};
+    }
+    // A live newer release owns this store; an older one must not touch it.
+    if (
+      state.running === true &&
+      isProcessAlive(state.pid) &&
+      typeof state.supervisorVersion === "string" &&
+      compareVersions(state.supervisorVersion, error.required) > 0
+    )
+      return `supervisor ${state.supervisorVersion} owns this store`;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unreadable state";
+    return `project state is unusable (${reason})`;
+  }
+  const path = await dispatchTarget(error.required);
+  if (path === null)
+    return `no verified ${error.required} under ${printablePath(releasesRoot())}`;
+  // SAFETY: Bun provides process.execve at runtime but @types does not declare
+  // it, so the shape is asserted and re-checked with typeof before it is called.
+  const execve = (
+    process as unknown as {
+      execve?: (file: string, args: string[], env: NodeJS.ProcessEnv) => never;
+    }
+  ).execve;
+  if (typeof execve !== "function")
+    return "this runtime cannot replace its own process image";
+  console.error(
+    `crewplane: running ${error.required} from ${printablePath(path)} for this pinned project`,
+  );
+  try {
+    execve(path, [path, ...process.argv.slice(2)], {
+      ...process.env,
+      CREWPLANE_DISPATCHED: error.required,
+    });
+  } catch (error) {
+    return `exec failed (${error instanceof Error ? error.message : "unknown"})`;
+  }
 }
 async function main() {
   const args = process.argv.slice(2);
@@ -244,6 +314,8 @@ async function main() {
     ctx = (await agents(["init"], requested)) as ProjectContext;
     policy = projectPolicy(ctx.projectRoot);
   } catch (error) {
+    if (error instanceof ProjectVersionError)
+      dispatchSkip = await dispatchToPin(error, command, requested);
     // A replaced binary must never lock the operator out of halting live work,
     // and the pin command exists to resolve this exact state.
     if (
@@ -391,8 +463,17 @@ async function main() {
     if (rest.length) throw new Error("doctor takes no options");
     const config = await optional(join(directory, "config.json"));
     if (config) validateConfig(config);
+    // Retention failures only reach the update cache; surface them here, since a
+    // silently stalled self-update is otherwise invisible.
+    const updateCache = await readUpdateCache(updateCachePath(process.env));
     return output({
       version: 1,
+      update: {
+        latest: updateCache.latest ?? null,
+        lastAttemptAt: updateCache.lastAttemptAt ?? null,
+        error: updateCache.error ?? null,
+        retainedReleases: printablePath(releasesRoot()),
+      },
       root,
       git: execFileSync("git", ["--version"], { encoding: "utf8" }).trim(),
       runtime: "bun",
@@ -805,6 +886,6 @@ await main().catch((error: unknown) => {
     `crewplane: ${error instanceof Error ? error.message : "Command failed"}`,
   );
   if (error instanceof ProjectVersionError)
-    console.error(versionPinHint(error));
+    console.error(versionPinHint(error, dispatchSkip));
   process.exitCode = 1;
 });

@@ -76,6 +76,8 @@ function setup(name: string, mode: string, interval = 1) {
     HOME: join(parent, "home"),
     CREWPLANE_COORD_DIR: "",
     CREWPLANE_NO_AUTO_UPDATE: "1",
+    // Keep dispatch hermetic: never resolve this machine's retained releases.
+    CREWPLANE_RELEASES_DIR: join(parent, "releases"),
     CREWPLANE_FIXTURE_MODE: mode,
     CREWPLANE_FIXTURE_PID_FILE: join(
       root,

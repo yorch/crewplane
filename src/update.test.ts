@@ -23,18 +23,22 @@ import {
   cacheDirectory,
   compareVersions,
   digest,
+  dispatchTarget,
   downloadRelease,
   expectedDigest,
   type FetchLike,
   installBinary,
   isReleaseBuild,
+  isRetained,
   longRunningCommands,
   looksExecutable,
   parseTag,
   platformTarget,
   readUpdateCache,
   registerSupervisor,
+  releasesRoot,
   resolveLatest,
+  retainedReleasePath,
   runUpdate,
   scheduleAutoUpdate,
   shouldScheduleUpdate,
@@ -50,6 +54,8 @@ import {
 const releaseRun = { runVersion: async () => patch };
 
 const temporary = () => mkdtempSync(join(tmpdir(), "crewplane-update-"));
+/** A stand-in release that reports its own version when retained. */
+const fakeRelease = (version: string) => `#!/bin/sh\necho ${version}\n`;
 const patch = "9.9.9";
 const machO = Buffer.from([0xcf, 0xfa, 0xed, 0xfe]);
 const elf = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
@@ -106,6 +112,7 @@ const environment = (cache: string) => ({
   CREWPLANE_RELEASE_API: `${base}/latest`,
   CREWPLANE_RELEASE_BASE: `${base}/download`,
   CREWPLANE_CACHE_DIR: cache,
+  CREWPLANE_RELEASES_DIR: join(cache, "releases"),
 });
 
 beforeAll(async () => {
@@ -239,6 +246,54 @@ describe("release metadata", () => {
     assert.equal(updateTarget(false, "/usr/bin/bun"), null);
     assert.equal(updateTarget(true, ""), null);
   });
+  it("never offers to update a retained copy", () => {
+    const root = "/tmp/crewplane-releases";
+    const env = { CREWPLANE_RELEASES_DIR: root };
+    assert.equal(
+      updateTarget(true, join(root, "0.2.0", "crewplane"), env),
+      null,
+    );
+    assert.equal(updateTarget(true, join(root, "other"), env), null);
+    assert.equal(
+      updateTarget(true, "/usr/local/bin/crewplane", env),
+      "/usr/local/bin/crewplane",
+    );
+    assert.equal(isRetained(join(root, "0.2.0", "crewplane"), env), true);
+    assert.equal(isRetained("/usr/local/bin/crewplane", env), false);
+  });
+  it("resolves a retained release by its layout and verified version", async () => {
+    const directory = temporary();
+    const env = { CREWPLANE_RELEASES_DIR: join(directory, "releases") };
+    assert.equal(releasesRoot(env), join(directory, "releases"));
+    assert.equal(
+      retainedReleasePath("1.2.3", env),
+      join(directory, "releases", "1.2.3", "crewplane"),
+    );
+    assert.equal(await dispatchTarget("1.2.3", env), null);
+
+    const install = (version: string, mode = 0o755) => {
+      const path = retainedReleasePath(version, env);
+      mkdirSync(join(directory, "releases", version), { recursive: true });
+      writeFileSync(path, `#!/bin/sh\necho ${version}\n`, { mode });
+      chmodSync(path, mode);
+      return path;
+    };
+    const path = install("1.2.3");
+    assert.equal(await dispatchTarget("1.2.3", env), path);
+    // A directory named after another version must not be trusted.
+    assert.equal(await dispatchTarget("1.2.4", env), null);
+
+    const tampered = install("1.2.5");
+    writeFileSync(tampered, "#!/bin/sh\necho 9.9.9\n", { mode: 0o755 });
+    assert.equal(await dispatchTarget("1.2.5", env), null);
+
+    const writable = install("1.2.6", 0o777);
+    assert.equal(await dispatchTarget("1.2.6", env), null);
+
+    mkdirSync(join(directory, "releases", "1.2.7"), { recursive: true });
+    symlinkSync(writable, retainedReleasePath("1.2.7", env));
+    assert.equal(await dispatchTarget("1.2.7", env), null);
+  });
 });
 
 describe("cache", () => {
@@ -317,7 +372,7 @@ describe("update runs", () => {
   it("reports an available update in check mode without writing", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     const outcome = await runUpdate({
       current: "0.2.0",
       checkOnly: true,
@@ -331,7 +386,7 @@ describe("update runs", () => {
     expect(outcome.status).toBe("available");
     expect(outcome.latest).toBe(patch);
     expect(outcome.target).toBe(target);
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
   });
 
   it("reports current when the local version is not older", async () => {
@@ -370,10 +425,111 @@ describe("update runs", () => {
     expect(foreign.status).toBe("unsupported");
   });
 
+  it("retains the replaced binary so a pin can still be served", async () => {
+    const directory = temporary();
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const env = environment(join(directory, "cache"));
+    const outcome = await runUpdate({
+      current: "0.2.0",
+      environment: env,
+      releaseMarked: true,
+      runVersion: async () => patch,
+      execPath: target,
+      platform: process.platform,
+      arch: process.arch,
+    });
+    expect(outcome.status).toBe("updated");
+    const retained = retainedReleasePath("0.2.0", env);
+    assert.equal(readFileSync(retained, "utf8"), fakeRelease("0.2.0"));
+    assert.equal(statSync(retained).mode & 0o111, 0o111);
+    // A retained copy is never a self-update target.
+    assert.equal(updateTarget(true, retained, env), null);
+  });
+  it("refuses to swap when the replaced release cannot be retained", async () => {
+    const directory = temporary();
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const blocked = join(directory, "blocked");
+    writeFileSync(blocked, "not a directory");
+    const outcome = await runUpdate({
+      current: "0.2.0",
+      auto: true,
+      environment: {
+        ...environment(join(directory, "cache")),
+        CREWPLANE_RELEASES_DIR: join(blocked, "releases"),
+      },
+      releaseMarked: true,
+      runVersion: async () => patch,
+      execPath: target,
+      platform: process.platform,
+      arch: process.arch,
+    });
+    expect(outcome.status).toBe("failed");
+    expect(outcome.reason).toContain("CREWPLANE_RELEASES_DIR");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
+    // An explicit update fails loudly for the same reason instead of swapping.
+    await expect(
+      runUpdate({
+        current: "0.2.0",
+        environment: {
+          ...environment(join(directory, "cache-2")),
+          CREWPLANE_RELEASES_DIR: join(blocked, "releases"),
+        },
+        releaseMarked: true,
+        runVersion: async () => patch,
+        execPath: target,
+        platform: process.platform,
+        arch: process.arch,
+      }),
+    ).rejects.toThrow("CREWPLANE_RELEASES_DIR");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
+  });
+  it("leaves a retained copy that already verifies untouched", async () => {
+    const directory = temporary();
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const env = environment(join(directory, "cache"));
+    const retained = retainedReleasePath("0.2.0", env);
+    mkdirSync(join(retained, ".."), { recursive: true });
+    writeFileSync(retained, `${fakeRelease("0.2.0")}# kept\n`, { mode: 0o755 });
+    const outcome = await runUpdate({
+      current: "0.2.0",
+      environment: env,
+      releaseMarked: true,
+      runVersion: async () => patch,
+      execPath: target,
+      platform: process.platform,
+      arch: process.arch,
+    });
+    expect(outcome.status).toBe("updated");
+    assert.match(readFileSync(retained, "utf8"), /# kept/);
+  });
+  it("repairs a retained copy that fails verification", async () => {
+    const directory = temporary();
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const env = environment(join(directory, "cache"));
+    const retained = retainedReleasePath("0.2.0", env);
+    mkdirSync(join(retained, ".."), { recursive: true });
+    // A corrupt or wrong-version slot must not be trusted forever.
+    writeFileSync(retained, "broken", { mode: 0o755 });
+    const outcome = await runUpdate({
+      current: "0.2.0",
+      environment: env,
+      releaseMarked: true,
+      runVersion: async () => patch,
+      execPath: target,
+      platform: process.platform,
+      arch: process.arch,
+    });
+    expect(outcome.status).toBe("updated");
+    assert.equal(readFileSync(retained, "utf8"), fakeRelease("0.2.0"));
+  });
   it("replaces the running executable atomically after verification", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     const outcome = await runUpdate({
       current: "0.2.0",
       environment: environment(join(directory, "cache")),
@@ -397,7 +553,7 @@ describe("update runs", () => {
     release.checksum = "b".repeat(64);
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     await assert.rejects(
       runUpdate({
         current: "0.2.0",
@@ -410,7 +566,7 @@ describe("update runs", () => {
       }),
       /Checksum mismatch/,
     );
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
   });
 
   it("refuses an asset that is not a platform executable", async () => {
@@ -452,7 +608,7 @@ describe("update runs", () => {
     const directory = temporary();
     const cacheDirectory = join(directory, "cache");
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     const updated = await runUpdate({
       current: "0.2.0",
       auto: true,
@@ -471,7 +627,7 @@ describe("update runs", () => {
     expect(record.updatedAt).toBeDefined();
     assert.equal(record.error, undefined);
 
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     release.checksum = "c".repeat(64);
     const failed = await runUpdate({
       current: "0.2.0",
@@ -489,7 +645,7 @@ describe("update runs", () => {
       updateCachePath({ CREWPLANE_CACHE_DIR: cacheDirectory }),
     );
     assert.match(failure.error ?? "", /Checksum mismatch/);
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
   });
 
   it("does not contact the network when automatic updates are disabled", async () => {
@@ -566,7 +722,7 @@ describe("update runs", () => {
     const directory = temporary();
     const cacheDirectory = join(directory, "cache");
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     mkdirSync(join(cacheDirectory, "crewplane"), { recursive: true });
     writeFileSync(
       join(cacheDirectory, "crewplane", "update.lock"),
@@ -713,7 +869,7 @@ describe("security boundaries", () => {
   it("refuses a staged binary that reports another version", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     await assert.rejects(
       runUpdate({
         current: "0.2.0",
@@ -726,13 +882,13 @@ describe("security boundaries", () => {
       }),
       /reports 0\.0\.0 but 9\.9\.9 was requested/,
     );
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
   });
 
   it("refuses to replace the binary while a supervisor is live", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     const cache = join(directory, "cache");
     const unregister = await registerSupervisor({ CREWPLANE_CACHE_DIR: cache });
     try {
@@ -748,7 +904,7 @@ describe("security boundaries", () => {
         }),
         /supervisor is running/,
       );
-      assert.equal(readFileSync(target, "utf8"), "old");
+      assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
     } finally {
       await unregister();
     }
@@ -777,7 +933,7 @@ describe("security boundaries", () => {
   it("re-checks the guard after downloading", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     let calls = 0;
     await assert.rejects(
       runUpdate({
@@ -795,7 +951,7 @@ describe("security boundaries", () => {
       }),
       /supervisor started during the update/,
     );
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
   });
 });
 
@@ -942,7 +1098,7 @@ describe("installBinary", () => {
   it("preserves the existing file mode", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o700 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o700 });
     await installBinary(target, elf);
     assert.equal(statSync(target).mode & 0o777, 0o700);
   });
@@ -963,7 +1119,7 @@ describe("installBinary", () => {
   it("proves the staged binary runs before replacing anything", async () => {
     const directory = temporary();
     const target = join(directory, "crewplane");
-    writeFileSync(target, "old", { mode: 0o755 });
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
     await assert.rejects(
       installBinary(target, elf, {
         expectedVersion: "9.9.9",
@@ -971,7 +1127,7 @@ describe("installBinary", () => {
       }),
       /reports 8\.8\.8/,
     );
-    assert.equal(readFileSync(target, "utf8"), "old");
+    assert.equal(readFileSync(target, "utf8"), fakeRelease("0.2.0"));
     await installBinary(target, elf, releaseRun);
     assert.deepEqual(readFileSync(target), elf);
   });
