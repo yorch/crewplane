@@ -82,6 +82,7 @@ export function projectHeadless(
           }
         : null,
     held: value?.held ?? [],
+    instanceHeld: value?.instanceHeld === true,
     budgets,
     lanes: [
       ...new Set([
@@ -97,7 +98,8 @@ export function projectHeadless(
         (b.startedAt ?? "").localeCompare(a.startedAt ?? ""),
       )[0];
       const enabled = config?.lanes[lane]?.enabled ?? false;
-      const held = value?.held.includes(lane) ?? false;
+      const held =
+        value?.instanceHeld === true || (value?.held.includes(lane) ?? false);
       const processAlive = r?.pid ? alive(r.pid) : null;
       const runs = records
         .flatMap((r) => r.runs)

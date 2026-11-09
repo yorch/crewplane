@@ -691,7 +691,9 @@ function renderHealthSummary() {
     row.append(el("span", label), healthBadge(state));
     list.append(row);
   }
-  const held = headless?.held ?? [];
+  const held = headless?.instanceHeld
+    ? ["all lanes (instance hold)"]
+    : (headless?.held ?? []);
   const nodes = [list];
   if (held.length) nodes.push(el("p", `Held: ${held.join(", ")}`, "note"));
   $("health-summary").replaceChildren(...nodes);
@@ -1653,7 +1655,13 @@ function renderSystem() {
   const rows = headless?.checkedAt
     ? [
         ["Last check", timeEl(headless.checkedAt)],
-        ["Held lanes", (headless.held ?? []).join(", "), "none"],
+        [
+          "Held lanes",
+          headless.instanceHeld
+            ? "all lanes (instance hold)"
+            : (headless.held ?? []).join(", "),
+          "none",
+        ],
         [
           "Disk config",
           headless.diskConfigAvailable ? "readable" : "unavailable",

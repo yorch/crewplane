@@ -280,3 +280,33 @@ it("keeps unreported and legacy usage unknown while preserving explicitly report
     )?.usage,
   ).toMatchObject({ inputTokens: 0, outputTokens: 0 });
 });
+
+it("reports an instance-wide hold on every lane instead of an empty held list", () => {
+  const instanceHeld = {
+    ...state,
+    held: [] as State["held"],
+    instanceHeld: true,
+    records: {},
+  };
+  const result = projectHeadless(config, instanceHeld, now, () => true);
+  expect(result.instanceHeld).toBe(true);
+  expect(result.held).toEqual([]);
+  for (const lane of result.lanes) {
+    expect(lane.status).toBe("paused");
+    expect(lane.scheduling.code).toBe("LANE_HELD");
+    expect(lane.reason).toMatch(/^Operator hold/);
+  }
+  const laneHeld = projectHeadless(
+    config,
+    { ...instanceHeld, instanceHeld: false, held: ["B"] },
+    now,
+    () => true,
+  );
+  expect(laneHeld.instanceHeld).toBe(false);
+  expect(laneHeld.lanes.find((lane) => lane.lane === "B")?.status).toBe(
+    "paused",
+  );
+  expect(
+    laneHeld.lanes.find((lane) => lane.lane === "coordinator")?.status,
+  ).toBe("idle");
+});
