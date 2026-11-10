@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0](https://github.com/yorch/crewplane/compare/v0.5.1...v0.6.0) (2026-11-10)
+
+
+### Features
+
+* **dashboard:** report instance-wide holds on every lane ([3c8434e](https://github.com/yorch/crewplane/commit/3c8434e19e1548dab8c3d2a8cc9664c47ff3afa4))
+* **update:** keep replaced releases so pins survive self-update ([#13](https://github.com/yorch/crewplane/issues/13)) ([10d9a20](https://github.com/yorch/crewplane/commit/10d9a20f5356ddb0ca49a072cf005ce772acc3fa))
+
+
+### Bug Fixes
+
+* **cli:** print the control grammar the parser accepts ([519fc9b](https://github.com/yorch/crewplane/commit/519fc9b463f020794dd0a41f09d6207173f3de31))
+* **docs:** restore a green main for 0.5.1 ([7bb79f2](https://github.com/yorch/crewplane/commit/7bb79f247b79d39af49e9f4d939886495b13e09f))
+* **docs:** stop the pin example from breaking every release PR ([60c5156](https://github.com/yorch/crewplane/commit/60c515628248fb5df98bfdcbfd4ff4254aeaca94))
+
 ## [0.5.1](https://github.com/yorch/crewplane/compare/v0.5.0...v0.5.1) (2026-11-09)
 
 
