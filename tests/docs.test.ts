@@ -1,37 +1,25 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
-import pkg from "../package.json" with { type: "json" };
 
 /**
- * Release pins are exact strings, so a documented example that names another
- * release is a trap: copying it locks a project out of every command until the
- * reader repairs it by hand. The docs are not generated, and release-please
- * does not rewrite them, so this test is the forcing function that keeps the
- * pin examples equal to the release being cut.
+ * Release pins are exact strings, so a documented example that names a release
+ * rots on the next bump: it either lies to the reader or blocks the release PR,
+ * because release-please does not rewrite docs. The pin sections therefore name
+ * no concrete release — they teach `crewplane --version` and `crewplane pin`.
+ * This test fails if a literal creeps back in, or if the sections disappear.
  */
 const pinDocs = readFileSync(resolve("docs/USAGE.md"), "utf8")
   .split(/^## /m)
   .filter((section) => /pin/i.test(section.split("\n", 1)[0] ?? ""))
   .join("\n");
 
-it("documents release pins with the release this package is", () => {
+it("documents release pins without naming a release", () => {
   expect(pinDocs).not.toBe("");
-  const pins = [...pinDocs.matchAll(/"requiredVersion":\s*"([^"]+)"/g)].map(
-    (match) => match[1],
-  );
-  const installs = [...pinDocs.matchAll(/--version v(\S+)/g)].map(
-    (match) => match[1],
-  );
-  // The per-release install directory, however its root is spelled.
-  const directories = [...pinDocs.matchAll(/--dir "[^"]*\/([^"/]+)"/g)].map(
-    (match) => match[1],
-  );
-  // Guard the guard: a silently withdrawn example must not pass vacuously.
-  expect(pins.length).toBeGreaterThan(0);
-  expect(installs.length).toBeGreaterThan(0);
-  expect(directories.length).toBeGreaterThan(0);
-  expect(new Set([...pins, ...installs, ...directories])).toEqual(
-    new Set([pkg.version]),
-  );
+  // Guard the guard: the pin sections must still exist to be checked.
+  expect(pinDocs).toMatch(/requiredVersion/);
+  const literals = [
+    ...pinDocs.matchAll(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/g),
+  ].map((match) => match[0]);
+  expect(literals).toEqual([]);
 });
