@@ -262,7 +262,7 @@ Projects need no launcher adapter. Opt into project policy version 2 in crewplan
 ```json
 {
   "version": 2,
-  "requiredVersion": "0.5.1",
+  "requiredVersion": "<release you run: crewplane --version>",
   "coordinator": "captain",
   "reviewers": ["inspector"],
   "promptFiles": {
@@ -272,7 +272,7 @@ Projects need no launcher adapter. Opt into project policy version 2 in crewplan
 }
 ```
 
-The optional requiredVersion is an exact release version, not a range; the example above must equal the release the project was validated against, so raise it whenever the project adopts a newer release. Project commands check the primary checkout's policy before preparing store files; mismatches explain the required and running versions. A pinned project does not schedule automatic self-update. Global --help/--version/update remain available for installation recovery; explicit global update is independent of project pins, so use the upstream installer with CREWPLANE_VERSION to select an exact release. Existing version-1 policies keep their defaults; the new fields require version 2 so older binaries reject them rather than silently skipping enforcement. Policy version is independent of store/config/message schema versions; no store migration occurs.
+The optional requiredVersion is an exact release version, not a range, so the placeholder above must be replaced with the release you run (`crewplane --version`); `crewplane pin --confirm true` writes it for you and keeps the diff to one line. Project commands check the primary checkout's policy before preparing store files; mismatches explain the required and running versions. A pinned project does not schedule automatic self-update. Global --help/--version/update remain available for installation recovery; explicit global update is independent of project pins, so use the upstream installer with CREWPLANE_VERSION to select an exact release. Existing version-1 policies keep their defaults; the new fields require version 2 so older binaries reject them rather than silently skipping enforcement. Policy version is independent of store/config/message schema versions; no store migration occurs.
 
 ## Project version pins
 
@@ -286,13 +286,14 @@ Recovery steps:
 
    ```sh
    root="${CREWPLANE_RELEASES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/crewplane}"
+   version=$(crewplane --version)   # the release the project pins
    curl -fsSL https://raw.githubusercontent.com/yorch/crewplane/main/install.sh \
-     | sh -s -- --version v0.5.1 --dir "$root/0.5.1"
+     | sh -s -- --version "v$version" --dir "$root/$version"
    ```
 
 4. Stop live supervisors before replacing any executable. `update` refuses while a supervisor is registered, but the installer has no such guard; a swapped binary leaves running lanes calling a release they were not started with. Dispatch also refuses to hand a project to an older release while a live, newer supervisor owns the store (a recorded `supervisorVersion` on a running state).
 
-Retention only covers releases replaced by a binary that already has this feature, and only self-update retains: `install.sh`, package managers and manual copies do not. So a 0.5.1 installation updated to the next release is retained from then on, while releases before this feature are not, and every pin needs step 3 once.
+Retention only covers releases replaced by a binary that already has this feature, and only self-update retains: `install.sh`, package managers and manual copies do not. So an installation updated to the next release after adopting this feature is retained from then on, while earlier releases are not, and every pin needs step 3 once.
 
 Retention is also fail-closed. If the running release cannot be retained (unwritable data directory, full disk, root-owned `XDG_DATA_HOME`), the swap is refused rather than silently breaking a pin; the reason lands in the update cache, `crewplane doctor` reports it, and `CREWPLANE_RELEASES_DIR` is the escape hatch. Each retained release costs one binary on disk and nothing prunes them yet.
 
