@@ -167,6 +167,7 @@ export function control(value: unknown): Control {
     ...(task ? { task } : {}),
     ...(run ? { run } : {}),
     ...(all ? { all: true } : {}),
+    ...(c.cancelActive === true ? { cancelActive: true } : {}),
     ...(c.confirmCleanup === true ? { confirmCleanup: true } : {}),
     ...(c.newSession === true ? { newSession: true } : {}),
     ...(c.resolution === "approve" || c.resolution === "deny"
