@@ -208,23 +208,25 @@ export function evaluateWatchdog(
           previous.lastNoticeKey === null ||
           (typeof previous.lastNoticeKey === "string" &&
             previous.lastNoticeKey.length <= 256)
-        ) ||
-        input.now < (previous.lastCheckAt ?? previous.startedAt))
+        ))
     )
       throw 0;
   } catch {
     throw new Error("Invalid watchdog input");
   }
+  // A wall-clock step backwards must not kill the daemon: clamp past timestamps.
+  const clamp = (value: number | null) =>
+    value === null ? null : Math.min(value, input.now);
   const state: WatchdogState = previous
     ? {
         version: 1,
-        startedAt: previous.startedAt,
-        lastCheckAt: previous.lastCheckAt,
+        startedAt: Math.min(previous.startedAt, input.now),
+        lastCheckAt: clamp(previous.lastCheckAt),
         nextCheckAt: previous.nextCheckAt,
-        lastNoticeAt: previous.lastNoticeAt,
+        lastNoticeAt: clamp(previous.lastNoticeAt),
         lastNoticeKey: previous.lastNoticeKey,
         restartAttempts: previous.restartAttempts,
-        lastRecoveryAt: previous.lastRecoveryAt,
+        lastRecoveryAt: clamp(previous.lastRecoveryAt),
       }
     : {
         version: 1,

@@ -25,6 +25,7 @@ const kinds = [
   "usage",
   "omitted",
   "finished",
+  "paused",
   "error",
 ] as const;
 type Kind = (typeof kinds)[number];
@@ -37,6 +38,7 @@ const messages: Record<Kind, string> = {
   usage: "Observed usage metadata",
   omitted: "Native payload omitted by collection policy",
   finished: "Native run finished",
+  paused: "Native run paused",
   error: "Native run failed",
 };
 const tools = new Set([
@@ -299,8 +301,7 @@ export function nativeTrace(
               ? "tool-start"
               : "tool-finish",
           channel,
-          tool:
-            typeof event.toolName === "string" ? event.toolName : "other-tool",
+          tool: traceTool(event.toolName),
           status:
             event.type === "tool_execution_start"
               ? "running"
@@ -333,7 +334,7 @@ export function nativeTrace(
         },
       ];
     }
-  } else {
+  } else if (harness === "codex") {
     if (event.type === "turn.completed") {
       const u = event.usage as Record<string, unknown> | undefined;
       return [
@@ -377,7 +378,11 @@ export function nativeTrace(
             status:
               event.type === "item.started"
                 ? "running"
-                : typeof item.exit_code === "number" && item.exit_code !== 0
+                : (typeof item.exit_code === "number" &&
+                      item.exit_code !== 0) ||
+                    ["failed", "declined", "error"].includes(
+                      String(item.status),
+                    )
                   ? "failed"
                   : "succeeded",
           },
@@ -502,12 +507,14 @@ export async function createTraceStore(
       } catch {
         incomplete = true;
       }
-      if (runs.length === limit) break;
+      if (runs.length > limit) break;
     }
+    const more = runs.length > limit;
+    if (more) runs.length = limit;
     return {
       version: 1,
       runs,
-      nextCursor: runs.length === limit ? (runs.at(-1)?.runId ?? null) : null,
+      nextCursor: more ? (runs.at(-1)?.runId ?? null) : null,
       incomplete,
       retentionLimited: names.length >= limits.maxRuns,
       nativePayloadsExcluded: true,
@@ -561,41 +568,65 @@ export async function createTraceStore(
       )
         throw Error("Invalid active run IDs");
       const active = new Set(activeRunIds);
-      const ids = new Set(
-        (await readdir(root)).flatMap((name) => {
-          const suffix = name.endsWith(".meta.json")
-            ? ".meta.json"
-            : name.endsWith(".meta.tmp")
-              ? ".meta.tmp"
-              : null;
-          const id = suffix ? name.slice(0, -suffix.length) : "";
-          return traceIdPattern.test(id) ? [id] : [];
-        }),
-      );
+      // publishJson temporaries are `<id>.meta.json.<uuid>.tmp`; `<id>.meta.tmp`
+      // is the legacy spelling. Only these exact reserved leaves are recovered.
+      const temporaries = new Map<string, string[]>();
+      const ids = new Set<string>();
+      for (const name of await readdir(root)) {
+        const published = name.match(
+          /^(.+)\.meta\.json\.[0-9a-f-]{36}\.tmp$/,
+        )?.[1];
+        const legacy = name.endsWith(".meta.tmp")
+          ? name.slice(0, -".meta.tmp".length)
+          : undefined;
+        const id = published ?? legacy ?? "";
+        if (id) {
+          if (traceIdPattern.test(id)) {
+            ids.add(id);
+            temporaries.set(id, [...(temporaries.get(id) ?? []), name]);
+          }
+          continue;
+        }
+        if (name.endsWith(".meta.json")) {
+          const base = name.slice(0, -".meta.json".length);
+          if (traceIdPattern.test(base)) ids.add(base);
+        }
+      }
       let reconciled = 0;
       let incomplete = false;
       for (const id of ids) {
         if (active.has(id)) continue;
         try {
-          let meta: TraceMeta;
+          let meta: TraceMeta | undefined;
           let fromTemporary = false;
           try {
             meta = cleanMeta(JSON.parse(await read(id, "meta.json", 8192)));
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            // A crash before the first atomic rename may leave only this file.
+            // A crash before the first atomic rename may leave only a temporary.
             // read() rejects symlinks and oversized/nonregular files.
-            meta = cleanMeta(JSON.parse(await read(id, "meta.tmp", 8192)));
-            fromTemporary = true;
+            for (const name of (temporaries.get(id) ?? []).sort().reverse()) {
+              try {
+                meta = cleanMeta(
+                  JSON.parse(await read(id, name.slice(id.length + 1), 8192)),
+                );
+                fromTemporary = true;
+                break;
+              } catch {
+                /* try the next candidate */
+              }
+            }
+            if (!meta) throw error;
           }
           if (meta.runId !== id) throw Error("Mismatched run");
-          // unlink removes only this reserved leaf (including a stale symlink),
-          // never its target. A live writer's temporary file is protected above.
-          await unlink(path(id, "meta.tmp")).catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code !== "ENOENT") throw error;
-            },
-          );
+          // unlink removes only these reserved leaves (including a stale symlink),
+          // never their targets. A live writer's temporary file is protected above.
+          for (const name of temporaries.get(id) ?? [])
+            await unlink(path(id, name.slice(id.length + 1))).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT") throw error;
+              },
+            );
           if (meta.status === "running" || fromTemporary) {
             meta.status = "paused";
             meta.finalState = null;
@@ -727,7 +758,7 @@ export async function createTraceStore(
           },
           async finish(status: "finished" | "paused", finalState: unknown) {
             await emit({
-              kind: status === "paused" ? "error" : "finished",
+              kind: status === "paused" ? "paused" : "finished",
               status,
             });
             await queue;

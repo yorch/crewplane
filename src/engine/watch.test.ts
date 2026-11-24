@@ -235,3 +235,19 @@ it("records changes once, recovers read errors and stops cleanly without board w
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("reports torn locks and interrupted recovery with a clear manual-inspection error", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "relay-watch-torn-"));
+  try {
+    await writeFile(join(directory, "watcher.lock"), "");
+    await expect(acquire(directory)).rejects.toThrow("inspect it manually");
+    await writeFile(
+      join(directory, "watcher.lock"),
+      JSON.stringify({ pid: 2147483647, token: "dead" }),
+    );
+    await writeFile(join(directory, "recovery.lock"), "1");
+    await expect(acquire(directory)).rejects.toThrow("inspect recovery.lock");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

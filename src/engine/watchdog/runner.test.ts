@@ -703,12 +703,13 @@ it("reports paused retained process groups and identity-free unverified cleanup 
     });
     expect(observed).toContain(-502);
     expect(observed).not.toContain(501);
+    // Running (non-retained) children sort first so a 64-entry cap never drops them.
     expect(input.children).toEqual([
+      { pid: 505, alive: "alive" },
       { pid: 501, alive: "alive", retained: true },
       { pid: 503, alive: "dead", retained: true },
       { pid: null, alive: "unknown", retained: true },
       { pid: 504, alive: "unknown", retained: true },
-      { pid: 505, alive: "alive" },
     ]);
     const result = evaluateWatchdog(input, null, {
       ...settings,

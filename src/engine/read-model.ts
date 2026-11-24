@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-import type { Board, Config, LiveTask, State } from "../contracts.ts";
+import { constants } from "node:fs";
+import { open, readdir, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
+import type { Board, LiveTask } from "../contracts.ts";
 import { gitEnvironment } from "../environment.ts";
 import { relayPlannedTasks } from "../profiles/relay.ts";
 import {
@@ -12,11 +13,36 @@ import {
 } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { buildGraph, type GraphInput } from "./dashboard/graph-builder.ts";
-import { readHeadless } from "./dashboard/headless.ts";
+import {
+  normalizeConfig,
+  normalizeState,
+  readHeadless,
+} from "./dashboard/headless.ts";
 import { schedulingFingerprint, schedulingReason } from "./scheduling.ts";
 import { watchdogHealth } from "./watchdog/dashboard.ts";
 
 export type { Board, LiveTask, Message } from "../contracts.ts";
+
+const projectReadLimit = 1024 * 1024;
+/** Read a project document without following a final symlink, escaping the project, or reading unbounded/special files. */
+async function readProjectFile(root: string, path: string): Promise<string> {
+  const real = await realpath(join(root, path));
+  const within = relative(await realpath(root), real);
+  if (within.startsWith("..") || isAbsolute(within))
+    throw new Error("Project document escapes the project root");
+  const handle = await open(
+    real,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > projectReadLimit)
+      throw new Error("Project document is not a bounded regular file");
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
 
 export function parseTask(id: string, markdown: string, live?: LiveTask) {
   const documentedStatus =
@@ -140,26 +166,24 @@ export async function snapshot(root: string) {
       const id = file.slice(0, -3);
       return parseTask(
         id,
-        await readFile(join(root, policy.tasksPath, file), "utf8"),
+        await readProjectFile(root, join(policy.tasksPath, file)),
         board.tasks.find((t) => t.task === id),
       );
     }),
   );
-  const plan = await readFile(join(root, policy.planPath), "utf8").catch(
-    (error) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    },
-  );
+  const plan = await readProjectFile(root, policy.planPath).catch((error) => {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  });
   if (policy.roadmapFormat === "relay")
     tasks.push(...plannedTasks(plan, new Set(tasks.map((task) => task.id))));
   tasks.sort((a, b) => a.id.localeCompare(b.id));
   const [runtime, configured] = await Promise.all([
     readFile(join(board.store, "supervisor/state.json"), "utf8")
-      .then((s) => JSON.parse(s) as State)
+      .then((s) => normalizeState(JSON.parse(s)))
       .catch(() => null),
     readFile(join(board.store, "supervisor/config.json"), "utf8")
-      .then((s) => JSON.parse(s) as Config)
+      .then((s) => normalizeConfig(JSON.parse(s)))
       .catch(() => null),
   ]);
   for (const task of tasks)
@@ -168,16 +192,22 @@ export async function snapshot(root: string) {
     board.store,
     board.tasks.filter((t) => !t.accepted).map((t) => t.assignment.owner),
   );
-  const worktrees = execFileSync("git", ["worktree", "list", "--porcelain"], {
-    cwd: root,
-    env: gitEnvironment(),
-    encoding: "utf8",
-  })
-    .split("\n\n")
-    .map((entry) => ({
-      path: entry.match(/^worktree (.+)$/m)?.[1],
-      branch: entry.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? "detached",
-    }));
+  // Branch names are decoration: a slow or failing git must not fail the snapshot.
+  let worktreeList = "";
+  try {
+    worktreeList = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: root,
+      env: gitEnvironment(),
+      encoding: "utf8",
+      timeout: 10000,
+    });
+  } catch {
+    worktreeList = "";
+  }
+  const worktrees = worktreeList.split("\n\n").map((entry) => ({
+    path: entry.match(/^worktree (.+)$/m)?.[1],
+    branch: entry.match(/^branch refs\/heads\/(.+)$/m)?.[1] ?? "detached",
+  }));
   const agents = headless.lanes.map((lane) => {
     const task =
       board.tasks.find((t) => t.task === lane.task) ??
@@ -321,12 +351,11 @@ export async function snapshot(root: string) {
     orphanAssignments: board.tasks.filter(
       (t) => !tasks.some((card) => card.id === t.task),
     ),
-    milestoneStatus: await readFile(
-      join(root, policy.statusPath),
-      "utf8",
-    ).catch((error) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    }),
+    milestoneStatus: await readProjectFile(root, policy.statusPath).catch(
+      (error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      },
+    ),
   };
 }

@@ -1,13 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdir,
-  readdir,
-  readFile,
-  rename,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { publishJson } from "../io.ts";
 import { coordinatorOf } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { monitorStatus, snapshot } from "./read-model.ts";
@@ -134,19 +128,24 @@ async function json<T>(path: string): Promise<T | null> {
     throw error;
   }
 }
-async function atomic(path: string, data: unknown) {
-  const temp = `${path}.${randomUUID()}.tmp`;
+const atomic = (path: string, data: unknown) => publishJson(path, data);
+// A torn or empty lock file is never guessed at; the operator must inspect it.
+async function lockJson<T>(path: string): Promise<T | null> {
   try {
-    await writeFile(temp, `${JSON.stringify(data, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600,
-      flush: true,
-    });
-    await rename(temp, path);
-  } finally {
-    await unlink(temp).catch((e: NodeJS.ErrnoException) => {
-      if (e.code !== "ENOENT") throw e;
-    });
+    return await json<T>(path);
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      throw new Error("Invalid watcher lock; inspect it manually");
+    throw error;
+  }
+}
+// A corrupt observation is replaced by the next poll rather than killing it.
+async function readObservation(path: string): Promise<Observation | null> {
+  try {
+    return await json<Observation>(path);
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
   }
 }
 export async function acquire(directory: string) {
@@ -161,23 +160,31 @@ export async function acquire(directory: string) {
         flush: true,
       });
       return async () => {
-        const lock = await json<{ token: string }>(path);
+        const lock = await lockJson<{ token: string }>(path);
         if (lock?.token === token) await unlink(path);
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const lock = await json<{ pid: number; token: string }>(path);
+      const lock = await lockJson<{ pid: number; token: string }>(path);
       if (!lock) continue;
       if (!Number.isInteger(lock.pid) || lock.pid < 1 || !lock.token)
         throw new Error("Invalid watcher lock; inspect it manually");
       // Serialize stale-owner recovery so two starters cannot remove a new owner's lock.
       const recovery = join(directory, "recovery.lock");
-      await writeFile(recovery, String(process.pid), {
-        flag: "wx",
-        mode: 0o600,
-      });
       try {
-        const current = await json<{ pid: number; token: string }>(path);
+        await writeFile(recovery, String(process.pid), {
+          flag: "wx",
+          mode: 0o600,
+        });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "EEXIST")
+          throw new Error(
+            "Watcher recovery is in progress or was interrupted; inspect recovery.lock manually",
+          );
+        throw e;
+      }
+      try {
+        const current = await lockJson<{ pid: number; token: string }>(path);
         if (current?.token !== lock.token) continue;
         let alive = true;
         try {
@@ -209,7 +216,7 @@ export async function poll(
   running = true,
 ) {
   const path = join(directory, "latest.json");
-  const previous = await json<Observation>(path);
+  const previous = await readObservation(path);
   const summary = summarize(await snapshot(root), settings, now);
   const checkedAt = now.toISOString();
   const changed =
@@ -274,11 +281,12 @@ export async function run(
               alerts: last.alerts,
             }),
           );
-      } catch {
+      } catch (cause) {
         // Retain the last successful snapshot, but never present it as current.
         if (!last)
           throw new Error(
             "Cannot read board; inspect coordination records and retry",
+            { cause },
           );
         last = {
           ...last,
@@ -330,7 +338,7 @@ export async function monitorMain(
         "--stale-minutes": "staleMinutes",
         "--unanswered-minutes": "unansweredMinutes",
       };
-      const key = keys[arg ?? ""];
+      const key = Object.hasOwn(keys, arg ?? "") ? keys[arg ?? ""] : undefined;
       const value = Number(args[++i]);
       if (!key || !Number.isInteger(value) || value < 1 || value > 3600)
         throw new Error(
@@ -346,7 +354,7 @@ export async function monitorMain(
   };
   const directory = join(ctx.store, "monitor");
   if (status) {
-    const current = await json<Observation>(join(directory, "latest.json"));
+    const current = await readObservation(join(directory, "latest.json"));
     console.log(
       JSON.stringify(
         {

@@ -219,28 +219,38 @@ describe("private watchdog service", () => {
     expect(await checkWatchdog(options)).not.toBeNull();
     await expect(stat(lease)).rejects.toMatchObject({ code: "ENOENT" });
   });
-  it.each(["unknown", "incomplete"])(
-    "never automatically steals a %s lease",
-    async (kind) => {
-      const { options } = await setup();
-      const lease = join(options.directory, "lease");
-      await mkdir(lease, { mode: 0o700 });
-      if (kind !== "incomplete")
-        await writeFile(
-          join(lease, "owner.json"),
-          JSON.stringify({
-            pid: null,
-            identity: kind,
-          }),
-          { mode: 0o600 },
-        );
-      await expect(checkWatchdog(options)).rejects.toThrow(
-        "Watchdog lease unavailable",
-      );
-      expect(options.notify).not.toHaveBeenCalled();
-      expect((await stat(lease)).isDirectory()).toBe(true);
-    },
-  );
+  it("never automatically steals an unknown-owner lease", async () => {
+    const { options } = await setup();
+    const lease = join(options.directory, "lease");
+    await mkdir(lease, { mode: 0o700 });
+    await writeFile(
+      join(lease, "owner.json"),
+      JSON.stringify({ pid: null, identity: "unknown" }),
+      { mode: 0o600 },
+    );
+    await expect(checkWatchdog(options)).rejects.toThrow(
+      "Watchdog lease unavailable",
+    );
+    expect(options.notify).not.toHaveBeenCalled();
+    expect((await stat(lease)).isDirectory()).toBe(true);
+  });
+  it("recovers an ownerless lease left by a crash before owner publication", async () => {
+    const { options } = await setup();
+    const lease = join(options.directory, "lease");
+    await mkdir(lease, { mode: 0o700 });
+    expect(await checkWatchdog(options)).not.toBeNull();
+    await expect(stat(lease)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("refuses an ownerless lease directory that holds other files", async () => {
+    const { options } = await setup();
+    const lease = join(options.directory, "lease");
+    await mkdir(lease, { mode: 0o700 });
+    await writeFile(join(lease, "stray"), "x", { mode: 0o600 });
+    await expect(checkWatchdog(options)).rejects.toThrow(
+      "Watchdog lease unavailable",
+    );
+    expect((await stat(lease)).isDirectory()).toBe(true);
+  });
   it("aborts during input without invoking effects and stops an outstanding real sleep", async () => {
     const { options, controller } = await setup();
     options.readInput = async () => {

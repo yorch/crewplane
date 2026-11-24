@@ -115,6 +115,22 @@ it("preserves Codex legacy argv and binds exact native resume to harness and epo
   ])
     expect(pi.args).toContain(safe);
 });
+it("accepts only conservative Pi provider/model identifiers", () => {
+  for (const piModel of [
+    { provider: "synthetic", id: "local" },
+    { provider: "a.b-c_d", id: "org/model:1.5" },
+  ])
+    expect(() => validateHarness(config, { ...lane, piModel })).not.toThrow();
+  for (const piModel of [
+    { provider: "--flag", id: "local" },
+    { provider: "synthetic", id: "bad id" },
+    { provider: "synthetic", id: "x".repeat(121) },
+    { provider: "synthetic", id: "line\nbreak" },
+  ])
+    expect(() => validateHarness(config, { ...lane, piModel })).toThrow(
+      "Invalid explicit Pi provider/model",
+    );
+});
 it("fails closed on unsupported permissions/models and requires drained fresh switches", () => {
   expect(() =>
     validateHarness(config, { ...lane, piPermissions: undefined } as never),

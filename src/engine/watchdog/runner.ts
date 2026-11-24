@@ -90,9 +90,6 @@ async function operations(
         continue;
       if (
         !value ||
-        !["rollout", "stop", "hold", "release", "retry", "nudge"].includes(
-          value?.action as string,
-        ) ||
         requestedAt === null ||
         requestedAt < 0 ||
         requestedAt > now
@@ -355,6 +352,13 @@ export async function readHealth(
           pidValue(r.processGroupId) !== null ||
           pidValue(r.pid) !== null,
       )
+      // The policy rejects more than 64 children; keep running/live ones first.
+      .sort(
+        (a, b) =>
+          Number(a.status !== "running" || a.cleanupUnverified === true) -
+          Number(b.status !== "running" || b.cleanupUnverified === true),
+      )
+      .slice(0, 64)
       .map((r) => {
         const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
         const observed = pidValue(r.processGroupId)
@@ -514,7 +518,15 @@ export async function watchdogMain(args = process.argv.slice(2)) {
   else await startWatchdog(options);
 }
 if (import.meta.main)
-  watchdogMain().catch(() => {
-    console.error("Watchdog failed; inspect private health state");
+  watchdogMain().catch((error: unknown) => {
+    // Fixed-message errors only; filesystem errors report their code, not paths.
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    const detail =
+      typeof code === "string"
+        ? code
+        : error instanceof Error
+          ? error.message.slice(0, 200)
+          : "unknown";
+    console.error(`Watchdog failed (${detail}); inspect private health state`);
     process.exitCode = 1;
   });

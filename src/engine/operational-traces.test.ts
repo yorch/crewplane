@@ -421,3 +421,63 @@ it("serializes concurrent emit reservations and finalization against retention",
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("classifies failed codex items and routes pi tool names through the allowlist", () => {
+  const finished = (item: Record<string, unknown>) =>
+    nativeTrace("codex", { type: "item.completed", item })[0]?.status;
+  expect(finished({ type: "mcp_tool_call", status: "failed" })).toBe("failed");
+  expect(finished({ type: "file_change", status: "declined" })).toBe("failed");
+  expect(finished({ type: "file_change", status: "completed" })).toBe(
+    "succeeded",
+  );
+  expect(
+    nativeTrace("pi", { type: "tool_execution_start", toolName: "Bash" })[0]
+      ?.tool,
+  ).toBe("bash");
+  expect(
+    nativeTrace("pi", {
+      type: "tool_execution_start",
+      toolName: "PRIVATE_TOOL_NAME",
+    })[0]?.tool,
+  ).toBe("other-tool");
+});
+
+it("recovers publishJson temporaries, pages without a false cursor and records pause as non-error", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-traces-tmp-"));
+  try {
+    const store = await createTraceStore(root);
+    const writer = await store.begin({
+      runId: run(),
+      lane: "coordinator",
+      task: null,
+      harness: "codex",
+    });
+    await writer.emit({ kind: "started" });
+    const tmp = `${run()}.meta.json.12345678-1234-4234-8234-123456789abc.tmp`;
+    await rename(join(root, `${run()}.meta.json`), join(root, tmp));
+    const recovered = await createTraceStore(root);
+    expect(await recovered.reconcile([])).toEqual({
+      reconciled: 1,
+      incomplete: false,
+    });
+    expect((await readdir(root)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    expect((await recovered.tail(run())).meta.status).toBe("paused");
+    const second = await recovered.begin({
+      runId: run(2),
+      lane: "coordinator",
+      task: null,
+      harness: "codex",
+    });
+    await second.finish("paused", null);
+    const events = (await recovered.tail(run(2))).events;
+    expect(events.map((e) => e.kind)).toEqual(["paused"]);
+    expect(events[0]?.message).not.toMatch(/failed/);
+    const exact = await recovered.list({ limit: 2 });
+    expect(exact.runs).toHaveLength(2);
+    expect(exact.nextCursor).toBeNull();
+    const first = await recovered.list({ limit: 1 });
+    expect(first.nextCursor).toBe(first.runs[0]?.runId);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
