@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -107,4 +108,23 @@ it("requires exact Origin, token and JSON for hold/cancel only", async () => {
     "cancel",
     "pause",
   ]);
+});
+it("answers 503 instead of hanging when a control cannot be queued", async () => {
+  const directory = join(root, ".crewplane-state/supervisor/commands");
+  const moved = `${directory}.moved`;
+  renameSync(directory, moved);
+  writeFileSync(directory, "not a directory");
+  try {
+    const response = await post(
+      { action: "pause", lane: "builder" },
+      { ...origin() },
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Control could not be queued. Retry.",
+    });
+  } finally {
+    rmSync(directory, { force: true });
+    renameSync(moved, directory);
+  }
 });

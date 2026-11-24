@@ -46,6 +46,21 @@ it("keeps transport/identity environment but strips Git repository selectors and
     GIT_SSH_COMMAND: "ssh",
   });
 });
+it("passes Git config location selectors but not counted or parameter overrides", () => {
+  expect(
+    gitEnvironment({
+      GIT_CONFIG_GLOBAL: "/home/x/.gitconfig",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_PARAMETERS: "'core.worktree=/foreign'",
+      GIT_CONFIG_COUNT: "0",
+    }),
+  ).toEqual({
+    GIT_CONFIG_GLOBAL: "/home/x/.gitconfig",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+  });
+});
 it("discovers the explicitly selected project despite a foreign inherited Git directory", () => {
   const parent = realpathSync(
       mkdtempSync(join(tmpdir(), "crewplane-git-env-")),

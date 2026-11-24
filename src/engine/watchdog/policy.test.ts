@@ -267,13 +267,14 @@ describe("watchdog independent expectations", () => {
     expect(() =>
       evaluateWatchdog(fixture(), prior(), { ...settings, cooldownMs: -1 }),
     ).toThrow("Invalid watchdog input");
-    expect(() =>
-      evaluateWatchdog(
-        fixture(),
-        { ...prior(), lastCheckAt: 999999 },
-        settings,
-      ),
-    ).toThrow("Invalid watchdog input");
+    // A clock step backwards clamps remembered timestamps instead of failing.
+    const stepped = evaluateWatchdog(
+      fixture(),
+      { ...prior(), lastCheckAt: 999999, lastNoticeAt: 999999 },
+      settings,
+    );
+    expect(stepped.state.lastCheckAt).toBe(900000);
+    expect(stepped.state.lastNoticeAt).toBe(900000);
     expect(() =>
       codes({
         ...fixture(),

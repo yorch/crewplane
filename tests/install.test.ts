@@ -203,6 +203,21 @@ describe("install.sh", () => {
     assert.match(result.stderr, /attempt 3\/3\)/);
   });
 
+  it.each([
+    "http://127.0.0.1:80@evil.example/x",
+    "http://localhost:x@evil.example/x",
+    "http://127.0.0.1.evil.example/x",
+    "http://localhostevil/x",
+    "http://[::1]@evil.example/x",
+    "http://localhost:80x/x",
+  ])("refuses the loopback-lookalike URL %s", async (url) => {
+    const result = await install(join(temporary(), "bin"), [], {
+      CREWPLANE_RELEASE_API: url,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /refusing non-https URL/);
+  });
+
   it("fails clearly when the release lookup fails", async () => {
     release.apiStatus = 500;
     const result = await install(join(temporary(), "bin"));
@@ -210,14 +225,16 @@ describe("install.sh", () => {
     assert.match(result.stderr, /could not reach/);
   });
 
-  it("rejects an unwritable install directory without sudo", async () => {
-    if (process.getuid?.() === 0) return;
-    const directory = join(temporary(), "bin");
-    mkdirSync(directory, { recursive: true, mode: 0o500 });
-    const result = await install(directory, ["--dir", directory]);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /not writable/);
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    "rejects an unwritable install directory without sudo",
+    async () => {
+      const directory = join(temporary(), "bin");
+      mkdirSync(directory, { recursive: true, mode: 0o500 });
+      const result = await install(directory, ["--dir", directory]);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /not writable/);
+    },
+  );
 
   it("prints the plan without writing on --dry-run", async () => {
     const directory = join(temporary(), "bin");

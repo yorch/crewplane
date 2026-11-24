@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  link,
+  lstat,
+  open,
+  readdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { durableMkdir } from "./io.ts";
 
@@ -45,6 +53,17 @@ function alive(pid: number) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
+/** Remove temp publications orphaned by a crash; young ones may be in flight. */
+async function sweepOrphans(path: string, now = Date.now()) {
+  const prefix = `${basename(path)}.`;
+  for (const name of await readdir(dirname(path)).catch(() => [] as string[])) {
+    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    const file = join(dirname(path), name);
+    const info = await stat(file).catch(() => null);
+    if (info !== null && now - info.mtimeMs >= 60_000)
+      await unlink(file).catch(() => undefined);
+  }
+}
 /** Cross-process exclusion; recover only a verifiably dead owner, never by age. */
 export async function withProcessLock<T>(
   path: string,
@@ -65,15 +84,20 @@ export async function withProcessLock<T>(
   const lease: Owner = { pid: process.pid, token: randomUUID() },
     deadline = Date.now() + 10000;
   while (true) {
+    // Publish a complete owner file atomically so no empty lock is ever visible.
+    const temp = `${path}.${lease.token}.tmp`;
     try {
-      await writeFile(path, JSON.stringify(lease), {
+      await writeFile(temp, JSON.stringify(lease), {
         flag: "wx",
         mode: 0o600,
         flush: true,
       });
+      await link(temp, path);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      await unlink(temp).catch(() => undefined);
     }
     let previous: Owner | null = null;
     try {
@@ -87,8 +111,10 @@ export async function withProcessLock<T>(
       try {
         recoveryHandle = await open(recovery, "wx", 0o600);
         const latest = await owner(path);
-        if (latest?.token === previous.token && !alive(latest.pid))
+        if (latest?.token === previous.token && !alive(latest.pid)) {
           await unlink(path);
+          await sweepOrphans(path);
+        }
       } catch (error) {
         if (
           (error as NodeJS.ErrnoException).code !== "EEXIST" &&
@@ -109,6 +135,10 @@ export async function withProcessLock<T>(
   try {
     return await operation();
   } finally {
-    if ((await owner(path))?.token === lease.token) await unlink(path);
+    try {
+      if ((await owner(path))?.token === lease.token) await unlink(path);
+    } catch {
+      /* Release is best-effort; it must not mask the operation result or error. */
+    }
   }
 }

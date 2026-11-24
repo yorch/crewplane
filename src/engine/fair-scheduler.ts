@@ -1,3 +1,4 @@
+import { defaultCoordinatorRole } from "../project.ts";
 /** FAIR-V1: pure scheduling policy. Authority and durable session routing belong to A. */
 export type Priority =
   | "urgent-operational"
@@ -85,6 +86,32 @@ const count = (x: unknown): x is number =>
   Number.isSafeInteger(x) && (x as number) >= 0;
 const object = (x: unknown): x is Record<string, unknown> =>
   typeof x === "object" && x !== null && !Array.isArray(x);
+/** Per-task scheduling metadata check, shared so a bad task can be isolated instead of failing the whole input. */
+export function validMetadata(m: unknown): boolean {
+  if (m === null) return true;
+  if (
+    !object(m) ||
+    m.version !== 1 ||
+    !priorities.includes(m.priority as string) ||
+    !count(m.enqueuedAt) ||
+    !id(m.updatedBy) ||
+    !Array.isArray(m.dependsOn) ||
+    m.dependsOn.length > 64
+  )
+    return false;
+  for (const d of m.dependsOn)
+    if (
+      !object(d) ||
+      !id(d.taskId) ||
+      !["accepted", "ready"].includes(d.require as string) ||
+      !(d.commit === null || id(d.commit))
+    )
+      return false;
+  return !(
+    m.reviewOf !== null &&
+    (!object(m.reviewOf) || !id(m.reviewOf.taskId) || !id(m.reviewOf.commit))
+  );
+}
 function validate(value: unknown): asserts value is ScheduleInput {
   const fail = () => {
     throw new Error("INVALID_SCHEDULE_INPUT");
@@ -143,31 +170,7 @@ function validate(value: unknown): asserts value is ScheduleInput {
       )
     )
       return fail();
-    const m = t.metadata;
-    if (m === null) continue;
-    if (
-      !object(m) ||
-      m.version !== 1 ||
-      !priorities.includes(m.priority) ||
-      !count(m.enqueuedAt) ||
-      !id(m.updatedBy) ||
-      !Array.isArray(m.dependsOn) ||
-      m.dependsOn.length > 64
-    )
-      return fail();
-    for (const d of m.dependsOn)
-      if (
-        !object(d) ||
-        !id(d.taskId) ||
-        !["accepted", "ready"].includes(d.require) ||
-        !(d.commit === null || id(d.commit))
-      )
-        return fail();
-    if (
-      m.reviewOf !== null &&
-      (!object(m.reviewOf) || !id(m.reviewOf.taskId) || !id(m.reviewOf.commit))
-    )
-      return fail();
+    if (!validMetadata(t.metadata)) return fail();
   }
   for (const c of a.candidates) {
     if (
@@ -338,7 +341,7 @@ export function evaluateSchedule(input: ScheduleInput): ScheduleResult {
   const selected: string[] = [];
   const used = new Set(activeLanes);
   let control = input.active.some(
-    (a) => a.lane === (input.coordinatorLane ?? "coordinator"),
+    (a) => a.lane === (input.coordinatorLane ?? defaultCoordinatorRole),
   );
   let position = 0;
   for (const { c, entry } of rows) {
@@ -354,7 +357,7 @@ export function evaluateSchedule(input: ScheduleInput): ScheduleResult {
       !control &&
       !(
         c.kind === "control" &&
-        c.lane === (input.coordinatorLane ?? "coordinator")
+        c.lane === (input.coordinatorLane ?? defaultCoordinatorRole)
       )
         ? 1
         : 0;
@@ -367,7 +370,7 @@ export function evaluateSchedule(input: ScheduleInput): ScheduleResult {
     used.add(c.lane);
     if (
       c.kind === "control" &&
-      c.lane === (input.coordinatorLane ?? "coordinator")
+      c.lane === (input.coordinatorLane ?? defaultCoordinatorRole)
     )
       control = true;
     entry.status = "selected";

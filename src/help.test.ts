@@ -104,3 +104,8 @@ it("documents each control verb once, with an explicit boolean value", () => {
       `--help shows a form the parser refuses: ${bare}`,
     ).toBe(0);
 });
+
+it("documents the dashboard controls opt-in and the agents help pointer", () => {
+  expect(help).toContain("dashboard [--port PORT] [--controls true]");
+  expect(help).toContain("crewplane agents help");
+});

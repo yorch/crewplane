@@ -19,6 +19,7 @@
 #
 # Never run under sudo: install into a user-writable directory instead.
 set -eu
+umask 022
 
 repo="yorch/crewplane"
 
@@ -73,6 +74,30 @@ trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# Exact loopback host, optional :DIGITS port, then / or end; no userinfo ('@').
+loopback_http_ok() { # url
+  rest=${1#http://}
+  case "$rest" in *@*) return 1 ;; esac
+  authority=${rest%%[/?#]*}
+  case "$authority" in
+    127.0.0.1 | localhost | "[::1]") return 0 ;;
+    127.0.0.1:* | localhost:* | "[::1]":*)
+      port=${authority##*:}
+      case "$port" in '' | *[!0-9]*) return 1 ;; esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+require_secure_url() { # url
+  case "$1" in
+    https://*) ;;
+    http://*) loopback_http_ok "$1" || die "refusing non-https URL (plain http is allowed only for loopback): $1" ;;
+    *) die "refusing non-https URL (plain http is allowed only for loopback): $1" ;;
+  esac
+}
+
 curl_fetch() {
   url=$1
   dest=$2
@@ -86,14 +111,14 @@ curl_fetch() {
       curl -fL --progress-bar --proto '=https' --proto-redir '=https' \
         --connect-timeout 10 --max-time 600 "$url" -o "$dest"
     else
-      curl -fL --progress-bar --connect-timeout 10 --max-time 600 \
+      curl -fL --progress-bar --max-redirs 0 --connect-timeout 10 --max-time 600 \
         "$url" -o "$dest"
     fi
   elif [ "$https_only" -eq 1 ]; then
     curl -fsSL --proto '=https' --proto-redir '=https' \
       --connect-timeout 10 --max-time 600 "$url" -o "$dest"
   else
-    curl -fsSL --connect-timeout 10 --max-time 600 "$url" -o "$dest"
+    curl -fsSL --max-redirs 0 --connect-timeout 10 --max-time 600 "$url" -o "$dest"
   fi
 }
 
@@ -161,6 +186,7 @@ normalize_version() {
 
 resolve_latest() {
   api="${CREWPLANE_RELEASE_API:-https://api.github.com/repos/$repo/releases/latest}"
+  require_secure_url "$api"
   step "resolving the latest release"
   fetch "$api" "$tmp/latest.json" || die "could not reach $api"
   tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -253,6 +279,7 @@ fi
 asset="crewplane-$version-$os-$arch"
 base="${CREWPLANE_RELEASE_BASE:-https://github.com/$repo/releases/download}"
 base=${base%/}
+require_secure_url "$base"
 target="$dir/crewplane"
 
 if [ "$dry_run" -eq 1 ]; then

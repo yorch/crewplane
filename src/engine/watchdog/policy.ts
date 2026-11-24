@@ -11,6 +11,8 @@ export interface WatchdogInput {
     draining: boolean;
   };
   children: Array<{ pid: number | null; alive: Liveness; retained?: boolean }>;
+  /** True when more than the 64-child cap existed; hidden children are treated as unknown, never as dead. */
+  childrenTruncated?: boolean;
   config: { loaded: string | null; disk: string | null };
   queue: Array<{
     id: string;
@@ -138,6 +140,8 @@ export function evaluateWatchdog(
     if (
       !Array.isArray(input.children) ||
       input.children.length > 64 ||
+      (input.childrenTruncated !== undefined &&
+        typeof input.childrenTruncated !== "boolean") ||
       input.children.some(
         (c) =>
           (c.pid !== null && (!Number.isInteger(c.pid) || c.pid <= 0)) ||
@@ -208,23 +212,25 @@ export function evaluateWatchdog(
           previous.lastNoticeKey === null ||
           (typeof previous.lastNoticeKey === "string" &&
             previous.lastNoticeKey.length <= 256)
-        ) ||
-        input.now < (previous.lastCheckAt ?? previous.startedAt))
+        ))
     )
       throw 0;
   } catch {
     throw new Error("Invalid watchdog input");
   }
+  // A wall-clock step backwards must not kill the daemon: clamp past timestamps.
+  const clamp = (value: number | null) =>
+    value === null ? null : Math.min(value, input.now);
   const state: WatchdogState = previous
     ? {
         version: 1,
-        startedAt: previous.startedAt,
-        lastCheckAt: previous.lastCheckAt,
+        startedAt: Math.min(previous.startedAt, input.now),
+        lastCheckAt: clamp(previous.lastCheckAt),
         nextCheckAt: previous.nextCheckAt,
-        lastNoticeAt: previous.lastNoticeAt,
+        lastNoticeAt: clamp(previous.lastNoticeAt),
         lastNoticeKey: previous.lastNoticeKey,
         restartAttempts: previous.restartAttempts,
-        lastRecoveryAt: previous.lastRecoveryAt,
+        lastRecoveryAt: clamp(previous.lastRecoveryAt),
       }
     : {
         version: 1,
@@ -278,6 +284,7 @@ export function evaluateWatchdog(
     else if (old(input.supervisor.heartbeatAt))
       add("supervisor-stale", null, input.supervisor.heartbeatAt);
     if (
+      input.childrenTruncated === true ||
       input.children.some(
         (c) =>
           (input.supervisor.alive === "dead" || c.retained === true) &&
@@ -341,6 +348,7 @@ export function evaluateWatchdog(
     input.config.loaded !== null &&
     input.config.loaded === input.config.disk &&
     input.supervisor.alive === "dead" &&
+    input.childrenTruncated !== true &&
     input.children.every((c) => c.alive === "dead") &&
     (state.lastRecoveryAt === null ||
       input.now - state.lastRecoveryAt >= backoff)

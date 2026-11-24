@@ -320,6 +320,17 @@ describe("cache", () => {
     );
   });
 
+  it("ignores a relative XDG_CACHE_HOME and rejects a relative cache override", () => {
+    assert.equal(
+      updateCachePath({ XDG_CACHE_HOME: "relative/dir" }, "/home/a", "linux"),
+      "/home/a/.cache/crewplane/update.json",
+    );
+    assert.throws(
+      () => updateCachePath({ CREWPLANE_CACHE_DIR: "rel" }, "/home/a", "linux"),
+      /CREWPLANE_CACHE_DIR must be an absolute path/,
+    );
+  });
+
   it("round-trips and tolerates missing or corrupt records", async () => {
     const path = join(temporary(), "nested", "update.json");
     assert.deepEqual(await readUpdateCache(path), { version: 1 });
@@ -718,6 +729,39 @@ describe("update runs", () => {
     expect(outcome.reason).toBe("Another update is already running");
   });
 
+  it("recovers an old empty lock but not a fresh one, and clears a stale guard", async () => {
+    const directory = temporary();
+    const cacheDirectory = join(directory, "cache");
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const dir = join(cacheDirectory, "crewplane");
+    mkdirSync(dir, { recursive: true });
+    const lock = join(dir, "update.lock");
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lock, old, old);
+    const guard = `${lock}.recover`;
+    writeFileSync(guard, "");
+    utimesSync(guard, old, old);
+    const run = () =>
+      runUpdate({
+        current: "0.2.0",
+        auto: true,
+        environment: environment(cacheDirectory),
+        releaseMarked: true,
+        runVersion: async () => patch,
+        execPath: target,
+        platform: process.platform,
+        arch: process.arch,
+      });
+    // First attempt clears the stale guard and refuses; the next recovers.
+    const first = await run();
+    assert.equal(first.status, "failed");
+    assert.equal(existsSync(guard), false);
+    const second = await run();
+    expect(second.status).toBe("updated");
+  });
+
   it("recovers a lock left by a dead process", async () => {
     const directory = temporary();
     const cacheDirectory = join(directory, "cache");
@@ -1075,16 +1119,18 @@ describe("installBinary", () => {
     assert.equal(readFileSync(join(directory, "real"), "utf8"), "old");
   });
 
-  it("refuses a non-writable directory", async () => {
-    if (process.getuid?.() === 0) return;
-    const directory = temporary();
-    chmodSync(directory, 0o500);
-    await assert.rejects(
-      installBinary(join(directory, "crewplane"), elf),
-      /not writable/,
-    );
-    chmodSync(directory, 0o700);
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    "refuses a non-writable directory",
+    async () => {
+      const directory = temporary();
+      chmodSync(directory, 0o500);
+      await assert.rejects(
+        installBinary(join(directory, "crewplane"), elf),
+        /not writable/,
+      );
+      chmodSync(directory, 0o700);
+    },
+  );
 
   it("refuses to replace a directory", async () => {
     const directory = temporary();

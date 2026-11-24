@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { expect, it } from "vitest";
 import { main } from "../src/engine/agents.mjs";
 import { evaluateOrchestration } from "../src/engine/orchestration.ts";
 import { parseTask, snapshot } from "../src/engine/read-model.ts";
+import { projectPolicy } from "../src/project.ts";
 
 it("keeps real snapshots available when task history exceeds graph input limits", async () => {
   const root = realpathSync(
@@ -154,6 +156,87 @@ it("isolates invalid graph display data and inherited Git context from board rea
   } finally {
     if (previous === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("refuses project documents that escape the root, are special files or exceed the read cap", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-read-hardening-")),
+  );
+  const outside = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-read-outside-")),
+  );
+  try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
+    mkdirSync(join(root, "tasks"));
+    writeFileSync(join(outside, "secret.md"), "OUTSIDE_SENTINEL");
+    symlinkSync(join(outside, "secret.md"), join(root, "tasks/ESC.md"));
+    let view = await snapshot(root);
+    expect(JSON.stringify(view)).not.toContain("OUTSIDE_SENTINEL");
+    expect(view.documentProblems.map((p) => p.path)).toEqual(["tasks/ESC.md"]);
+    rmSync(join(root, "tasks/ESC.md"));
+    writeFileSync(join(root, "tasks/BIG.md"), "x".repeat(2 * 1024 * 1024));
+    view = await snapshot(root);
+    expect(view.documentProblems[0]?.reason).toContain("bounded regular file");
+    expect(view.tasks.find((t) => t.id === "BIG")?.markdown).toBe("");
+    rmSync(join(root, "tasks/BIG.md"));
+    writeFileSync(join(root, "tasks/OK.md"), "# OK\n");
+    symlinkSync(join(root, "tasks/OK.md"), join(root, "tasks/LINK.md"));
+    expect((await snapshot(root)).tasks.map((task) => task.id)).toEqual([
+      "LINK",
+      "OK",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+it("does not fail the board snapshot for a symlinked-out or oversized status document", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-status-bad-")),
+  );
+  const outside = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-status-out-")),
+  );
+  try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
+    const statusPath = projectPolicy(root).statusPath;
+    writeFileSync(join(outside, "s.md"), "OUTSIDE_SENTINEL");
+    symlinkSync(join(outside, "s.md"), join(root, statusPath));
+    let view = await snapshot(root);
+    expect(view.milestoneStatus).toBe("");
+    expect(view.documentProblems.map((p) => p.path)).toEqual([statusPath]);
+    rmSync(join(root, statusPath));
+    writeFileSync(join(root, statusPath), "x".repeat(2 * 1024 * 1024));
+    view = await snapshot(root);
+    expect(view.milestoneStatus).toBe("");
+    expect(view.documentProblems).toHaveLength(1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+it("tolerates wrongly shaped supervisor state and config files", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-shape-")));
+  const previous = process.env.CREWPLANE_COORD_DIR;
+  delete process.env.CREWPLANE_COORD_DIR;
+  try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
+    const { store } = (await main(["init"], root)) as { store: string };
+    mkdirSync(join(store, "supervisor"), { recursive: true });
+    writeFileSync(
+      join(store, "supervisor/state.json"),
+      JSON.stringify({ running: true, records: [], held: "x" }),
+    );
+    writeFileSync(join(store, "supervisor/config.json"), "[]");
+    const view = await snapshot(root);
+    expect(view.headless.lanes).toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env.CREWPLANE_COORD_DIR;
+    else process.env.CREWPLANE_COORD_DIR = previous;
     rmSync(root, { recursive: true, force: true });
   }
 });

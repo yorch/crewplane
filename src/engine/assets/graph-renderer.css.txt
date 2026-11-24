@@ -69,6 +69,7 @@
 .relay-edge-open {
   stroke: #b8821f;
   stroke-width: 1.8;
+  stroke-dasharray: 5 3;
 }
 .relay-arrow {
   fill: #8290a3;

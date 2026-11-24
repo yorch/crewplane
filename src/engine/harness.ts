@@ -309,9 +309,11 @@ export function validateHarness(config: HarnessConfig, lane: LaneHarness) {
       throw new Error("Pi requires a fresh explicit session epoch");
     if (
       lane.piModel &&
-      (!lane.piModel.provider ||
-        !lane.piModel.id ||
-        [lane.piModel.provider, lane.piModel.id].some((v) => /[\r\n]/.test(v)))
+      ![lane.piModel.provider, lane.piModel.id].every(
+        (v) =>
+          typeof v === "string" &&
+          /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(v),
+      )
     )
       throw new Error("Invalid explicit Pi provider/model");
   } else if (harness === "claude") {

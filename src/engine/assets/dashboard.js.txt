@@ -236,6 +236,7 @@ function el(tag, text, className) {
 function link(href, text, className) {
   const node = el("a", text, className);
   node.href = href;
+  node.dataset.focusKey ??= `href:${href}:${text ?? ""}`;
   return node;
 }
 function icon(name) {
@@ -433,11 +434,14 @@ function restoreUi(ui) {
   if (ui.active && !ui.active.isConnected) {
     const view = activeView();
     let target = null;
-    if (ui.focusKey)
-      target = view.querySelector(
+    if (ui.focusKey) {
+      // Keys are not guaranteed unique (for example, repeated agent links), so
+      // only restore focus when exactly one element matches.
+      const matches = view.querySelectorAll(
         `[data-focus-key="${CSS.escape(ui.focusKey)}"]`,
       );
-    else if (ui.summaryKey)
+      if (matches.length === 1) target = matches[0];
+    } else if (ui.summaryKey)
       target = view.querySelector(
         `details[data-key="${CSS.escape(ui.summaryKey)}"] > summary`,
       );
@@ -1995,10 +1999,30 @@ function applySnapshot(next) {
   const { updatedAt, ...content } = next;
   const signature = JSON.stringify(content);
   const firstLoad = !data;
-  data = next;
-  lastSuccess = Date.now();
+  const previous = data;
   if (signature !== fingerprint) {
-    fillFilterOptions();
+    data = next;
+    try {
+      fillFilterOptions();
+      if (firstLoad) {
+        applyControls();
+        showActiveView();
+      }
+      render();
+    } catch (error) {
+      // Keep the last good snapshot as the source of truth and force the next
+      // successful snapshot to re-render, even if its content matches.
+      data = previous;
+      fingerprint = undefined;
+      if (previous) {
+        try {
+          render();
+        } catch {
+          // The original error is more useful than a secondary render failure.
+        }
+      }
+      throw error;
+    }
     window.crewplaneGraphSnapshot = {
       graphs: data.graphs,
       coverage: data.graphCoverage,
@@ -2008,13 +2032,9 @@ function applySnapshot(next) {
         detail: window.crewplaneGraphSnapshot,
       }),
     );
-    if (firstLoad) {
-      applyControls();
-      showActiveView();
-    }
-    render();
     fingerprint = signature;
   }
+  lastSuccess = Date.now();
   refreshRelativeTimes();
   setConnection("live", "Live");
   $("connection-time").textContent = `Checked ${date(updatedAt)}`;
@@ -2026,7 +2046,8 @@ function showDisconnected(message) {
   const context = lastSuccess
     ? `Showing the last snapshot from ${date(lastSuccess)}; it may be out of date.`
     : "No snapshot has been received yet.";
-  $("error").textContent = `${message} ${context} Retrying every 5s.`;
+  const text = `${message} ${context} Retrying every 5s.`;
+  if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
   if (!data)
     $("loading").textContent =
@@ -2038,7 +2059,10 @@ async function refresh() {
   $("refresh").setAttribute("aria-busy", "true");
   let next;
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
+    const response = await fetch("/api/snapshot", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10000),
+    });
     if (!response.ok) throw new Error(await snapshotError(response));
     next = await response.json();
   } catch (error) {
@@ -2048,7 +2072,11 @@ async function refresh() {
     busy = false;
     $("refresh").removeAttribute("aria-busy");
   }
-  applySnapshot(next);
+  try {
+    applySnapshot(next);
+  } catch (error) {
+    showDisconnected(`Render failed: ${error.message}`);
+  }
 }
 
 // ---- Wiring ----------------------------------------------------------------
@@ -2106,6 +2134,7 @@ document.addEventListener("click", (event) => {
     anchor.getAttribute("href") !== window.location.hash
   )
     internalNavigation = true;
+  if (event.target.closest?.("#primary-nav a")) closeNav();
   if (
     $("sidebar").classList.contains("nav-open") &&
     !event.target.closest?.("#sidebar")
@@ -2132,4 +2161,9 @@ updateNavLinks();
 showActiveView();
 announceRoute();
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => {
+  if (!document.hidden) refresh();
+}, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});

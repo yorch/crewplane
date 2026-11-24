@@ -101,24 +101,34 @@ async function run(
           throw Error("Watchdog lease unavailable");
         const previous = await readPrivate(ownerPath)
           .then(JSON.parse)
-          .catch(() => {
+          .catch((error: NodeJS.ErrnoException) => {
+            // A crash between mkdir and owner publication leaves an ownerless lease.
+            if (error.code === "ENOENT") return null;
             throw Error("Watchdog lease unavailable");
           });
-        if (
-          !Number.isSafeInteger(previous.pid) ||
-          previous.pid < 1 ||
-          typeof previous.identity !== "string"
-        )
-          throw Error("Watchdog lease unavailable");
-        try {
-          process.kill(previous.pid, 0);
-          throw Error("Watchdog lease unavailable");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        if (previous === null) {
+          // Held under lease-acquire.lock: no live starter is mid-publication.
+          await rmdir(lease).catch(() => {
+            throw Error("Watchdog lease unavailable");
+          });
+          await mkdir(lease, { mode: 0o700 });
+        } else {
+          if (
+            !Number.isSafeInteger(previous.pid) ||
+            previous.pid < 1 ||
+            typeof previous.identity !== "string"
+          )
+            throw Error("Watchdog lease unavailable");
+          try {
+            process.kill(previous.pid, 0);
+            throw Error("Watchdog lease unavailable");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+          await unlink(ownerPath);
+          await rmdir(lease);
+          await mkdir(lease, { mode: 0o700 });
         }
-        await unlink(ownerPath);
-        await rmdir(lease);
-        await mkdir(lease, { mode: 0o700 });
       }
       await atomic(ownerPath, owner, options.directory);
     },
@@ -214,12 +224,17 @@ async function run(
     return null;
   } finally {
     if (ownsLease) {
-      const current = JSON.parse(
-        await readFile(ownerPath, "utf8"),
-      ) as typeof owner;
-      if (current.pid === owner.pid && current.identity === owner.identity) {
-        await unlink(ownerPath);
-        await rmdir(lease);
+      // Cleanup must never mask the run's own result or error.
+      try {
+        const current = JSON.parse(
+          await readFile(ownerPath, "utf8"),
+        ) as typeof owner;
+        if (current.pid === owner.pid && current.identity === owner.identity) {
+          await unlink(ownerPath);
+          await rmdir(lease);
+        }
+      } catch {
+        /* a missing or unreadable owner file is left for next-start recovery */
       }
     }
   }

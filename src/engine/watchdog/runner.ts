@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { durableMkdir, publishJson } from "../../io.ts";
 import {
   coordinatorOf,
+  defaultReviewerRoles,
   discoverProject,
   reviewersOf,
   validId,
@@ -90,9 +91,6 @@ async function operations(
         continue;
       if (
         !value ||
-        !["rollout", "stop", "hold", "release", "retry", "nudge"].includes(
-          value?.action as string,
-        ) ||
         requestedAt === null ||
         requestedAt < 0 ||
         requestedAt > now
@@ -113,7 +111,7 @@ async function operations(
 const queueState = (
   reason: string,
   lane: string,
-  reviewers: string[] = ["reviewer", "visual"],
+  reviewers: readonly string[] = defaultReviewerRoles,
 ): WatchdogInput["queue"][number]["state"] | null => {
   if (["ELIGIBLE", "SELECTED"].includes(reason))
     return reviewers.includes(lane) ? "review" : "eligible";
@@ -330,6 +328,22 @@ export async function readHealth(
       : []),
     ...(pendingOperations !== undefined ? ["operations"] : []),
   ];
+  // The policy rejects more than 64 children: running first, then unverified/retained, then the rest.
+  const childRank = (r: (typeof records)[number]) =>
+    r.status === "running" && r.cleanupUnverified !== true
+      ? 0
+      : r.cleanupUnverified === true
+        ? 1
+        : 2;
+  const childRows = records
+    .filter(
+      (r) =>
+        r.status === "running" ||
+        r.cleanupUnverified === true ||
+        pidValue(r.processGroupId) !== null ||
+        pidValue(r.pid) !== null,
+    )
+    .sort((a, b) => childRank(a) - childRank(b));
   return {
     version: 1,
     now,
@@ -347,32 +361,25 @@ export async function readHealth(
         state?.running === true &&
         supervisorAlive === "alive",
     },
-    children: records
-      .filter(
-        (r) =>
-          r.status === "running" ||
-          r.cleanupUnverified === true ||
-          pidValue(r.processGroupId) !== null ||
-          pidValue(r.pid) !== null,
-      )
-      .map((r) => {
-        const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
-        const observed = pidValue(r.processGroupId)
-          ? observe(-(pidValue(r.processGroupId) as number))
-          : pid === null
-            ? "unknown"
-            : observe(pid);
-        return {
-          ...(r.status !== "running" || r.cleanupUnverified === true
-            ? { retained: true }
-            : {}),
-          pid,
-          alive:
-            r.cleanupUnverified === true && observed === "dead"
-              ? ("unknown" as const)
-              : observed,
-        };
-      }),
+    children: childRows.slice(0, 64).map((r) => {
+      const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
+      const observed = pidValue(r.processGroupId)
+        ? observe(-(pidValue(r.processGroupId) as number))
+        : pid === null
+          ? "unknown"
+          : observe(pid);
+      return {
+        ...(r.status !== "running" || r.cleanupUnverified === true
+          ? { retained: true }
+          : {}),
+        pid,
+        alive:
+          r.cleanupUnverified === true && observed === "dead"
+            ? ("unknown" as const)
+            : observed,
+      };
+    }),
+    ...(childRows.length > 64 ? { childrenTruncated: true } : {}),
     config: {
       loaded: fingerprint(object(state?.scheduling)?.fingerprint),
       disk,
@@ -514,7 +521,15 @@ export async function watchdogMain(args = process.argv.slice(2)) {
   else await startWatchdog(options);
 }
 if (import.meta.main)
-  watchdogMain().catch(() => {
-    console.error("Watchdog failed; inspect private health state");
+  watchdogMain().catch((error: unknown) => {
+    // Fixed-message errors only; filesystem errors report their code, not paths.
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    const detail =
+      typeof code === "string"
+        ? code
+        : error instanceof Error
+          ? error.message.slice(0, 200)
+          : "unknown";
+    console.error(`Watchdog failed (${detail}); inspect private health state`);
     process.exitCode = 1;
   });

@@ -9,7 +9,7 @@ Usage: crewplane [--project PATH] COMMAND
   pin --confirm true           Point the project's version pin at this release
   doctor                       Check project and configured harness prerequisites
   configure --file PATH        Validate and install an explicit supervisor config
-  agents COMMAND [OPTIONS]     Assign/scope/claim/status/send/inbox/accept/release
+  agents COMMAND [OPTIONS]     Task and message coordination; see crewplane agents help
   task list                    Show durable tasks and messages
   agent list                   Show configured agents and observed process state
   start                        Run the supervisor in the foreground
@@ -29,7 +29,9 @@ Usage: crewplane [--project PATH] COMMAND
   cancel --all true            Terminate every live run
   stop [--cancel-active true]  Request intentional stop and drain
   rollout                      Request an authorized drain; no automatic restart
-  dashboard [--port PORT]      Serve read-only dashboard on loopback (default 4310)
+  dashboard [--port PORT] [--controls true]
+                               Serve the dashboard on loopback (default 4310); read-only
+                               unless --controls true enables token-guarded controls
   evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
   monitor [--once|--status]     Observe task progress and unanswered messages
   watchdog start|once|status    Independent notice-only health observer

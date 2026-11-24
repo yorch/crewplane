@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
@@ -39,6 +47,55 @@ it("recovers only a dead lock owner and serializes a live owner's critical secti
     release();
     await Promise.all([first, second]);
     expect(entered).toBe(true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("leaves no temp files and does not mask the result when the owner file becomes unreadable", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "process-lock-"));
+  const path = join(root, "lock");
+  try {
+    const value = await withProcessLock(path, async () => {
+      await rm(path);
+      await writeFile(path, "not json", { mode: 0o600 });
+      return "done";
+    });
+    expect(value).toBe("done");
+    await rm(path);
+    await withProcessLock(path, async () => undefined);
+    expect(await readdir(root)).toEqual([]);
+    await expect(
+      withProcessLock(path, async () => {
+        await rm(path);
+        await writeFile(path, "not json", { mode: 0o600 });
+        throw new Error("operation failed");
+      }),
+    ).rejects.toThrow("operation failed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("sweeps stale temp files orphaned by a crash while recovering a dead owner", async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), "process-lock-"));
+  const path = join(root, "lock");
+  try {
+    await writeFile(
+      path,
+      JSON.stringify({ pid: 2147483647, token: randomUUID() }),
+      { mode: 0o600 },
+    );
+    const stale = `${path}.${randomUUID()}.tmp`;
+    const fresh = `${path}.${randomUUID()}.tmp`;
+    await writeFile(stale, "{}");
+    await writeFile(fresh, "{}");
+    const old = new Date(Date.now() - 120_000);
+    await utimes(stale, old, old);
+    await withProcessLock(path, async () => undefined);
+    const names = await readdir(root);
+    expect(names).not.toContain(stale.split("/").pop());
+    expect(names).toContain(fresh.split("/").pop());
   } finally {
     await rm(root, { recursive: true, force: true });
   }

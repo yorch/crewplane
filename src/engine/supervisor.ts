@@ -18,6 +18,7 @@ import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
   coordinatorOf,
+  defaultCoordinatorRole,
   projectPolicy,
   reviewersOf,
   validId,
@@ -43,7 +44,10 @@ import {
   nativeTrace,
   type TraceInput,
 } from "./operational-traces.ts";
-import { evaluateOrchestration } from "./orchestration.ts";
+import {
+  evaluateOrchestration,
+  type SchedulingError,
+} from "./orchestration.ts";
 import { snapshot } from "./read-model.ts";
 import { loadedScheduling } from "./scheduling.ts";
 import { evaluateTurnWait } from "./wait-policy.ts";
@@ -397,7 +401,7 @@ export async function progress(
   board: Board,
   cwd: string,
   work: Pick<Work, "lane" | "task">,
-  coordinator = "coordinator",
+  coordinator: string = defaultCoordinatorRole,
 ) {
   let code = "";
   try {
@@ -502,6 +506,31 @@ export async function serve(
     if (timer) clearTimeout(timer);
     cancelTimers.delete(key);
   };
+  // Escalate to SIGKILL only if the same child/run is still active after the grace period.
+  const armCancelKill = (record: RecordState) => {
+    clearCancelTimer(record.key);
+    const child = children.get(record.key);
+    const runId = record.runId;
+    const armedPid = record.processGroupId ?? record.pid;
+    cancelTimers.set(
+      record.key,
+      setTimeout(() => {
+        cancelTimers.delete(record.key);
+        if (children.get(record.key) !== child || record.runId !== runId)
+          return;
+        const targetPid = record.processGroupId ?? record.pid;
+        if (!targetPid || targetPid !== armedPid) return;
+        try {
+          process.kill(
+            process.platform === "win32" ? targetPid : -targetPid,
+            "SIGKILL",
+          );
+        } catch {
+          /* finish retains identity when unverified */
+        }
+      }, options.cleanupGraceMs ?? 1000),
+    );
+  };
   const settling = new Map<string, Promise<void>>();
   let saving = Promise.resolve();
   const bumpLane = (name: string) => {
@@ -596,8 +625,10 @@ export async function serve(
     const initial = await readBoard(config.root);
 
     await save();
+    let stopRecorded = false;
     while (!state.draining || children.size) {
-      if (signal.aborted && !state.draining) {
+      if (signal.aborted && !stopRecorded) {
+        stopRecorded = true;
         await atomic(join(directory, "desired.json"), {
           version: 1,
           desiredRunning: false,
@@ -605,6 +636,28 @@ export async function serve(
           at: new Date().toISOString(),
         });
         state.draining = true;
+      }
+      // Re-verify retained process identities of runs this supervisor no longer owns.
+      for (const record of Object.values(state.records)) {
+        if (
+          children.has(record.key) ||
+          record.status === "running" ||
+          (!record.pid && !record.processGroupId)
+        )
+          continue;
+        try {
+          process.kill(
+            process.platform === "win32"
+              ? (record.pid as number)
+              : -(record.processGroupId ?? (record.pid as number)),
+            0,
+          );
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ESRCH") {
+            delete record.pid;
+            delete record.processGroupId;
+          }
+        }
       }
       const pendingCommands = await Promise.all(
         (await readdir(commandsDir))
@@ -763,22 +816,7 @@ export async function serve(
                 } catch {
                   /* verified by the run cleanup */
                 }
-              cancelTimers.set(
-                record.key,
-                setTimeout(() => {
-                  if (!children.has(record.key)) return;
-                  const targetPid = record.processGroupId ?? record.pid;
-                  if (targetPid)
-                    try {
-                      process.kill(
-                        process.platform === "win32" ? targetPid : -targetPid,
-                        "SIGKILL",
-                      );
-                    } catch {
-                      /* finish retains identity when unverified */
-                    }
-                }, options.cleanupGraceMs ?? 1000),
-              );
+              armCancelKill(record);
             }
           outcome = "applied";
           code = c.cancelActive === true ? "STOP_CANCEL" : "DRAINING";
@@ -826,22 +864,7 @@ export async function serve(
                 } catch {
                   /* verified by the run cleanup */
                 }
-              cancelTimers.set(
-                record.key,
-                setTimeout(() => {
-                  if (!children.has(record.key)) return;
-                  const targetPid = record.processGroupId ?? record.pid;
-                  if (targetPid)
-                    try {
-                      process.kill(
-                        process.platform === "win32" ? targetPid : -targetPid,
-                        "SIGKILL",
-                      );
-                    } catch {
-                      /* finish retains identity when unverified */
-                    }
-                }, options.cleanupGraceMs ?? 1000),
-              );
+              armCancelKill(record);
             }
             outcome = "applied";
             code = "CANCEL_REQUESTED";
@@ -955,7 +978,17 @@ export async function serve(
               outcome = "applied";
               code = "CLEANUP_ACKNOWLEDGED";
             }
-          } else {
+          } else if (
+            laneRecords.some(
+              (r) =>
+                r.pid ||
+                r.processGroupId ||
+                r.status === "running" ||
+                r.cleanupUnverified,
+            )
+          )
+            code = "CLEANUP_UNVERIFIED";
+          else {
             const recoverable = laneRecords.filter(
               (record) =>
                 record.status === "paused" &&
@@ -1093,9 +1126,44 @@ export async function serve(
               .map((t) => t.id),
           ),
         );
-        const evaluation = evaluateOrchestration(board, state, config);
+        let evaluation: ReturnType<typeof evaluateOrchestration>;
+        try {
+          evaluation = evaluateOrchestration(board, state, config);
+        } catch (error) {
+          // Never let a stale queue read as current: withhold it and record why.
+          delete state.queue;
+          state.planning = null;
+          const failure: SchedulingError = {
+            code: (error as Error).message.slice(0, 100),
+            at: new Date().toISOString(),
+          };
+          state.schedulingError = failure;
+          console.error(
+            `Scheduling evaluation failed (${failure.code}); retrying without launching lanes`,
+          );
+          await save();
+          if (signal.aborted && children.size)
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          else
+            await idleWait(
+              Math.min(1000, config.intervalSeconds * 1000),
+              signal,
+            );
+          continue;
+        }
         state.queue = evaluation.queue;
         state.planning = evaluation.planning;
+        state.schedulingError = evaluation.invalidSchedulingTaskIds.length
+          ? {
+              code: "INVALID_TASK_SCHEDULING",
+              taskIds: evaluation.invalidSchedulingTaskIds.slice(0, 20),
+              at: new Date().toISOString(),
+            }
+          : null;
+        if (evaluation.invalidSchedulingTaskIds.length)
+          console.error(
+            `Invalid scheduling metadata isolated for task(s): ${evaluation.invalidSchedulingTaskIds.slice(0, 20).join(", ")}`,
+          );
         const pendingTimes = board.unanswered
           .filter((m) => m.to === coordinatorOf(config))
           .map((m) => Date.parse(m.at))
@@ -1307,6 +1375,8 @@ export async function serve(
             });
           } catch {
             record.status = "paused";
+            record.pauseKind = "failure";
+            delete record.runId;
             record.reason =
               "Operational trace storage unavailable; inspect private disk";
             record.finishedAt = new Date().toISOString();
@@ -1351,7 +1421,7 @@ export async function serve(
             record.reason =
               "Native launch preparation failed; inspect storage and retry";
             record.finishedAt = new Date().toISOString();
-            await trace.finish("paused", null);
+            await trace.finish("paused", null, { failure: true });
             throw error;
           }
           if (child.pid !== undefined) {
@@ -1418,8 +1488,10 @@ export async function serve(
               }
             }
           };
-          child.stdout?.on("data", (chunk: Buffer) => {
-            let text = chunk.toString();
+          child.stdout?.setEncoding("utf8");
+          child.stderr?.setEncoding("utf8");
+          child.stdout?.on("data", (chunk: string) => {
+            let text = chunk;
             if (droppingLine) {
               const newline = text.indexOf("\n");
               if (newline < 0) return;
@@ -1623,9 +1695,7 @@ export async function serve(
                 }),
               );
               await save();
-              const oldLogs = (await readdir(logs)).sort();
-              for (const name of oldLogs.slice(0, -40))
-                await unlink(join(logs, name));
+              await rotateLogs(logs);
               return;
             }
             record.noProgress = wait.noProgress;
@@ -1686,6 +1756,14 @@ export async function serve(
             await trace.finish(
               pause ? "paused" : "finished",
               valid ? final.state : null,
+              {
+                // Run failures trace as errors; decision/operator/budget pauses are not failures.
+                failure:
+                  !!pause &&
+                  !budgetPause &&
+                  (record.pauseKind === "failure" ||
+                    record.pauseKind === "no-progress"),
+              },
             );
             console.log(
               JSON.stringify({
@@ -1696,9 +1774,7 @@ export async function serve(
               }),
             );
             await save();
-            const oldLogs = (await readdir(logs)).sort();
-            for (const name of oldLogs.slice(0, -40))
-              await unlink(join(logs, name));
+            await rotateLogs(logs);
           };
           let finished = false;
           const done = (code: number | null) => {
@@ -1712,7 +1788,9 @@ export async function serve(
                   "Result handling failed; inspect controlled result and storage before retry";
                 record.finishedAt = new Date().toISOString();
                 // Retain unverified group identity; retry must not overlap it.
-                await trace.finish("paused", null).catch(() => {});
+                await trace
+                  .finish("paused", null, { failure: true })
+                  .catch(() => {});
                 await save();
               })
               .finally(() => {
@@ -1904,4 +1982,15 @@ function occupiedTaskScope(
         other.startsWith(`${path}/`),
     ),
   );
+}
+
+/** Keep the newest logs; rotation happens after completion is persisted, so it is best-effort. */
+async function rotateLogs(logs: string) {
+  try {
+    const old = (await readdir(logs)).sort();
+    for (const name of old.slice(0, -40))
+      await unlink(join(logs, name)).catch(() => {});
+  } catch {
+    /* completion is already durable */
+  }
 }

@@ -4,6 +4,7 @@ import { constants, realpathSync } from "node:fs";
 import {
   access,
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -418,12 +419,17 @@ export function cacheDirectory(
   platform: string = process.platform,
 ): string {
   const explicit = environment.CREWPLANE_CACHE_DIR;
+  if (explicit !== undefined && explicit !== "" && !isAbsolute(explicit))
+    throw new Error("CREWPLANE_CACHE_DIR must be an absolute path");
+  const xdg = environment.XDG_CACHE_HOME;
   const base =
     explicit !== undefined && explicit !== ""
       ? explicit
       : platform === "darwin"
         ? join(home, "Library", "Caches")
-        : join(environment.XDG_CACHE_HOME || join(home, ".cache"));
+        : xdg && isAbsolute(xdg)
+          ? xdg
+          : join(home, ".cache");
   return join(base, "crewplane");
 }
 
@@ -511,7 +517,11 @@ export function updateDue(
  * without reading the environment. Local builds keep the runtime lookup.
  */
 export function isReleaseBuild(): boolean {
-  return process.env.CREWPLANE_RELEASE_BUILD === "1";
+  return (
+    process.env.CREWPLANE_RELEASE_BUILD === "1" &&
+    (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
+      ?.isStandaloneExecutable === true
+  );
 }
 
 /** Only a compiled, release-marked binary replaces itself, never a retained copy. */
@@ -649,7 +659,56 @@ async function acquireUpdateLock(
       )
         return null;
       if (owner === null && (await recentlyWritten(path, now))) return null;
-      await unlink(path).catch(() => {});
+      const observed =
+        owner === null ? await stat(path).catch(() => null) : null;
+      // Only one process may judge and remove a stale lock; otherwise a slower
+      // racer could delete the fresh lock a faster one just created.
+      const recovery = `${path}.recover`;
+      let guard: Awaited<ReturnType<typeof open>>;
+      try {
+        guard = await open(recovery, "wx", 0o600);
+      } catch (guardError) {
+        if ((guardError as NodeJS.ErrnoException).code !== "EEXIST")
+          throw guardError;
+        // A crashed recoverer must not wedge updates forever.
+        const info = await stat(recovery).catch(() => null);
+        if (info !== null && now.getTime() - info.mtimeMs >= 30_000) {
+          // Move the observed guard aside and delete it only if it is still
+          // the stale one; a newer guard is put back.
+          const aside = `${recovery}.${randomUUID()}.stale`;
+          try {
+            await rename(recovery, aside);
+            const moved = await stat(aside);
+            if (moved.ino === info.ino && moved.dev === info.dev) {
+              await unlink(aside);
+            } else {
+              await link(aside, recovery).catch(() => {});
+              await unlink(aside);
+            }
+          } catch {
+            /* another process won the race */
+          }
+        }
+        return null;
+      }
+      try {
+        const current = await lockOwnerFor(path);
+        const after = await stat(path).catch(() => null);
+        const same =
+          owner === null
+            ? current === null &&
+              after !== null &&
+              observed !== null &&
+              after.ino === observed.ino &&
+              after.dev === observed.dev &&
+              after.mtimeMs === observed.mtimeMs &&
+              !(await recentlyWritten(path, now))
+            : current?.token === owner.token;
+        if (same) await unlink(path).catch(() => {});
+      } finally {
+        await guard.close();
+        await unlink(recovery).catch(() => {});
+      }
     }
   }
   return null;
@@ -662,9 +721,10 @@ async function acquireUpdateLock(
 export async function registerSupervisor(
   environment: UpdateEnvironment = process.env,
 ): Promise<() => Promise<void>> {
-  const directory = join(cacheDirectory(environment), "supervisors");
-  const path = join(directory, `${process.pid}.json`);
+  let path: string;
   try {
+    const directory = join(cacheDirectory(environment), "supervisors");
+    path = join(directory, `${process.pid}.json`);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(
       path,
@@ -755,6 +815,23 @@ async function readBody(
   return bytes;
 }
 
+/** A redirect must not downgrade to plain http unless the target is loopback. */
+function assertSecureFinalUrl(response: Response, requested: string): void {
+  const final = response.url;
+  if (!final || final === requested) return;
+  let parsed: URL;
+  try {
+    parsed = new URL(final);
+  } catch {
+    throw new Error(`Release request ended at an unparsable URL: ${final}`);
+  }
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
+    parsed.hostname,
+  );
+  if (parsed.protocol !== "https:" && !loopback)
+    throw new Error(`Release request redirected to a non-https URL: ${final}`);
+}
+
 async function fetchText(
   url: string,
   fetchImpl: FetchLike,
@@ -770,6 +847,7 @@ async function fetchText(
   })) as Response;
   if (!response.ok)
     throw new Error(`Release request failed: ${url} (HTTP ${response.status})`);
+  assertSecureFinalUrl(response, url);
   return new TextDecoder().decode(
     await readBody(response, options.maxBytes ?? maxMetadataBytes),
   );
@@ -787,6 +865,7 @@ async function fetchBytes(
   })) as Response;
   if (!response.ok)
     throw new Error(`Release request failed: ${url} (HTTP ${response.status})`);
+  assertSecureFinalUrl(response, url);
   return readBody(response, maxBytes);
 }
 
