@@ -6,6 +6,7 @@ import {
   readFile,
   rm,
   stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -236,10 +237,29 @@ it("records changes once, recovers read errors and stops cleanly without board w
   }
 });
 
+it("treats a young empty lock as another starter's publication in progress", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "relay-watch-empty-"));
+  try {
+    const path = join(directory, "watcher.lock");
+    await writeFile(path, "");
+    setTimeout(() => {
+      void writeFile(
+        path,
+        JSON.stringify({ pid: process.pid, token: "live-owner" }),
+      );
+    }, 200);
+    await expect(acquire(directory)).rejects.toThrow("already owns");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 it("reports torn locks and interrupted recovery with a clear manual-inspection error", async () => {
   const directory = await mkdtemp(join(tmpdir(), "relay-watch-torn-"));
   try {
     await writeFile(join(directory, "watcher.lock"), "");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(join(directory, "watcher.lock"), old, old);
     await expect(acquire(directory)).rejects.toThrow("inspect it manually");
     await writeFile(
       join(directory, "watcher.lock"),

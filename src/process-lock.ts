@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, open, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import {
+  link,
+  lstat,
+  open,
+  readdir,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { durableMkdir } from "./io.ts";
 
@@ -43,6 +51,17 @@ function alive(pid: number) {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+/** Remove temp publications orphaned by a crash; young ones may be in flight. */
+async function sweepOrphans(path: string, now = Date.now()) {
+  const prefix = `${basename(path)}.`;
+  for (const name of await readdir(dirname(path)).catch(() => [] as string[])) {
+    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    const file = join(dirname(path), name);
+    const info = await stat(file).catch(() => null);
+    if (info !== null && now - info.mtimeMs >= 60_000)
+      await unlink(file).catch(() => undefined);
   }
 }
 /** Cross-process exclusion; recover only a verifiably dead owner, never by age. */
@@ -92,8 +111,10 @@ export async function withProcessLock<T>(
       try {
         recoveryHandle = await open(recovery, "wx", 0o600);
         const latest = await owner(path);
-        if (latest?.token === previous.token && !alive(latest.pid))
+        if (latest?.token === previous.token && !alive(latest.pid)) {
           await unlink(path);
+          await sweepOrphans(path);
+        }
       } catch (error) {
         if (
           (error as NodeJS.ErrnoException).code !== "EEXIST" &&

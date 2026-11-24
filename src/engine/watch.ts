@@ -1,5 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { publishJson } from "../io.ts";
 import { coordinatorOf } from "../project.ts";
@@ -131,13 +138,25 @@ async function json<T>(path: string): Promise<T | null> {
 const atomic = (path: string, data: unknown) => publishJson(path, data);
 // A torn or empty lock file is never guessed at; the operator must inspect it.
 async function lockJson<T>(path: string): Promise<T | null> {
-  try {
-    return await json<T>(path);
-  } catch (error) {
-    if (error instanceof SyntaxError)
-      throw new Error("Invalid watcher lock; inspect it manually");
-    throw error;
+  // An empty lock is the transient state of another starter's publication;
+  // wait briefly for it to fill before declaring it corrupt.
+  const deadline = Date.now() + 3000;
+  for (;;) {
+    try {
+      return await json<T>(path);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      const info = await stat(path).catch(() => null);
+      if (info === null) return null;
+      const young = Date.now() - info.mtimeMs < 2000;
+      if (info.size === 0 && young && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+        continue;
+      }
+      break;
+    }
   }
+  throw new Error("Invalid watcher lock; inspect it manually");
 }
 // A corrupt observation is replaced by the next poll rather than killing it.
 async function readObservation(path: string): Promise<Observation | null> {

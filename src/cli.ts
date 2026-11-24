@@ -810,7 +810,9 @@ async function main() {
     await publishJson(join(directory, "commands", `${id}.json`), value);
     if (!state?.running)
       console.error(
-        "crewplane: no supervisor is running; the command stays queued",
+        command === "pause"
+          ? "crewplane: no supervisor is running; the pause applies when a supervisor starts"
+          : `crewplane: no supervisor is running; this ${command} is bound to the current generation and will be refused as stale by the next start`,
       );
     if (opts["--wait"] !== undefined) {
       const seconds = Number(opts["--wait"]);

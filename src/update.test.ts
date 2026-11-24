@@ -729,6 +729,39 @@ describe("update runs", () => {
     expect(outcome.reason).toBe("Another update is already running");
   });
 
+  it("recovers an old empty lock but not a fresh one, and clears a stale guard", async () => {
+    const directory = temporary();
+    const cacheDirectory = join(directory, "cache");
+    const target = join(directory, "crewplane");
+    writeFileSync(target, fakeRelease("0.2.0"), { mode: 0o755 });
+    const dir = join(cacheDirectory, "crewplane");
+    mkdirSync(dir, { recursive: true });
+    const lock = join(dir, "update.lock");
+    writeFileSync(lock, "");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lock, old, old);
+    const guard = `${lock}.recover`;
+    writeFileSync(guard, "");
+    utimesSync(guard, old, old);
+    const run = () =>
+      runUpdate({
+        current: "0.2.0",
+        auto: true,
+        environment: environment(cacheDirectory),
+        releaseMarked: true,
+        runVersion: async () => patch,
+        execPath: target,
+        platform: process.platform,
+        arch: process.arch,
+      });
+    // First attempt clears the stale guard and refuses; the next recovers.
+    const first = await run();
+    assert.equal(first.status, "failed");
+    assert.equal(existsSync(guard), false);
+    const second = await run();
+    expect(second.status).toBe("updated");
+  });
+
   it("recovers a lock left by a dead process", async () => {
     const directory = temporary();
     const cacheDirectory = join(directory, "cache");

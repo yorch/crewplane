@@ -4,6 +4,7 @@ import { constants, realpathSync } from "node:fs";
 import {
   access,
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -658,6 +659,8 @@ async function acquireUpdateLock(
       )
         return null;
       if (owner === null && (await recentlyWritten(path, now))) return null;
+      const observed =
+        owner === null ? await stat(path).catch(() => null) : null;
       // Only one process may judge and remove a stale lock; otherwise a slower
       // racer could delete the fresh lock a faster one just created.
       const recovery = `${path}.recover`;
@@ -669,14 +672,39 @@ async function acquireUpdateLock(
           throw guardError;
         // A crashed recoverer must not wedge updates forever.
         const info = await stat(recovery).catch(() => null);
-        if (info !== null && now.getTime() - info.mtimeMs >= 30_000)
-          await unlink(recovery).catch(() => {});
+        if (info !== null && now.getTime() - info.mtimeMs >= 30_000) {
+          // Move the observed guard aside and delete it only if it is still
+          // the stale one; a newer guard is put back.
+          const aside = `${recovery}.${randomUUID()}.stale`;
+          try {
+            await rename(recovery, aside);
+            const moved = await stat(aside);
+            if (moved.ino === info.ino && moved.dev === info.dev) {
+              await unlink(aside);
+            } else {
+              await link(aside, recovery).catch(() => {});
+              await unlink(aside);
+            }
+          } catch {
+            /* another process won the race */
+          }
+        }
         return null;
       }
       try {
         const current = await lockOwnerFor(path);
-        if ((current?.token ?? null) === (owner?.token ?? null))
-          await unlink(path).catch(() => {});
+        const after = await stat(path).catch(() => null);
+        const same =
+          owner === null
+            ? current === null &&
+              after !== null &&
+              observed !== null &&
+              after.ino === observed.ino &&
+              after.dev === observed.dev &&
+              after.mtimeMs === observed.mtimeMs &&
+              !(await recentlyWritten(path, now))
+            : current?.token === owner.token;
+        if (same) await unlink(path).catch(() => {});
       } finally {
         await guard.close();
         await unlink(recovery).catch(() => {});
@@ -795,7 +823,7 @@ function assertSecureFinalUrl(response: Response, requested: string): void {
   try {
     parsed = new URL(final);
   } catch {
-    return;
+    throw new Error(`Release request ended at an unparsable URL: ${final}`);
   }
   const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(
     parsed.hostname,
