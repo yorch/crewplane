@@ -114,8 +114,6 @@ export function schedulingReason(
     records.some((r) => r.task === task.id && r.status === "paused")
   )
     return result("paused", "Lane/task is explicitly held or paused");
-  if (state.draining || !state.running)
-    return result("draining", "Supervisor is draining or stopped");
   const loaded = state.scheduling;
   if (!loaded)
     return result(

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, open, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { durableMkdir } from "./io.ts";
@@ -65,15 +65,20 @@ export async function withProcessLock<T>(
   const lease: Owner = { pid: process.pid, token: randomUUID() },
     deadline = Date.now() + 10000;
   while (true) {
+    // Publish a complete owner file atomically so no empty lock is ever visible.
+    const temp = `${path}.${lease.token}.tmp`;
     try {
-      await writeFile(path, JSON.stringify(lease), {
+      await writeFile(temp, JSON.stringify(lease), {
         flag: "wx",
         mode: 0o600,
         flush: true,
       });
+      await link(temp, path);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally {
+      await unlink(temp).catch(() => undefined);
     }
     let previous: Owner | null = null;
     try {
@@ -109,6 +114,10 @@ export async function withProcessLock<T>(
   try {
     return await operation();
   } finally {
-    if ((await owner(path))?.token === lease.token) await unlink(path);
+    try {
+      if ((await owner(path))?.token === lease.token) await unlink(path);
+    } catch {
+      /* Release is best-effort; it must not mask the operation result or error. */
+    }
   }
 }

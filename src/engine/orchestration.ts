@@ -123,6 +123,12 @@ export function evaluateOrchestration(
       }
     }
   }
+  // Commit evidence comes from worker-written status; treat malformed values as absent.
+  const commitId = (value: unknown) =>
+    typeof value === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9:_./-]{0,199}$/.test(value)
+      ? value
+      : null;
   const tasks: ScheduleTask[] = board.tasks
     .filter((t) => t.live && needed.has(t.id))
     .map((t) => ({
@@ -130,7 +136,7 @@ export function evaluateOrchestration(
       state: t.live?.accepted
         ? "accepted"
         : ((t.live?.status?.state ?? "assigned") as ScheduleTask["state"]),
-      readyCommit: t.live?.status?.commit ?? null,
+      readyCommit: commitId(t.live?.status?.commit),
       acceptedCommit: t.live?.accepted?.commit ?? null,
       acceptedSourceCommit: t.live?.accepted?.sourceCommit ?? null,
       metadata: t.live?.scheduling ?? null,
@@ -515,13 +521,23 @@ export function evaluateOrchestration(
     for (const [id, task] of required) projectedTasks.set(id, task);
     projectedCandidates.push(candidate);
   }
+  const failurePaused = (lane: string) =>
+    Object.values(state.records).some(
+      (r) =>
+        r.lane === lane &&
+        r.status === "paused" &&
+        (!r.task || active.some((t) => t.id === r.task)),
+    );
   const result = evaluateSchedule({
     version: 1,
     now,
     maxParallel: config.maxParallel,
     coordinatorLane: coordinator,
     coordinatorReserved:
-      !!config.lanes[coordinator]?.enabled && config.maxParallel > 1,
+      !!config.lanes[coordinator]?.enabled &&
+      config.maxParallel > 1 &&
+      !state.held.includes(coordinator) &&
+      !failurePaused(coordinator),
     active: Object.values(state.records)
       .filter((r) => r.status === "running")
       .map((r) => ({ key: workKey(r.key), lane: r.lane })),
@@ -529,12 +545,7 @@ export function evaluateOrchestration(
       lane,
       enabled: config.lanes[lane]?.enabled ?? false,
       held: state.held.includes(lane),
-      failurePaused: Object.values(state.records).some(
-        (r) =>
-          r.lane === lane &&
-          r.status === "paused" &&
-          (!r.task || active.some((t) => t.id === r.task)),
-      ),
+      failurePaused: failurePaused(lane),
       runsLastHour: [
         ...Object.values(state.records)
           .filter((r) => r.lane === lane)

@@ -1078,7 +1078,8 @@ async function execute(command, o, ctx) {
     messageId: event.id,
   });
   if (o.state === "ready") {
-    for (const request of await messages(ctx)) {
+    const all = await messages(ctx);
+    for (const request of all) {
       if (
         request.from === coordinatorOf(ctx.policy) &&
         request.to === agent &&
@@ -1088,7 +1089,6 @@ async function execute(command, o, ctx) {
         (previous?.state !== "ready" ||
           request.id === previous.revisionRequestId)
       ) {
-        const all = await messages(ctx);
         if (!all.some((m) => m.kind === "answer" && m.replyTo === request.id))
           await send(ctx, {
             from: agent,

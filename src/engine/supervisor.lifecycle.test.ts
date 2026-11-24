@@ -616,8 +616,14 @@ it("requires explicit inspected-cleanup acknowledgement across every task in a l
         }
       });
       await f.command("retry");
-      await until(async () => !!(await f.load()).notices.coordinator?.length);
+      await until(async () => (await f.load()).commands.length > 0);
+      // A plain retry must be refused, not reported as applied and then re-paused.
+      expect((await f.load()).notices.coordinator).toBeUndefined();
       expect((await f.load()).records.old?.cleanupUnverified).toBe(true);
+      expect((await f.load()).records.old?.status).toBe("paused");
+      expect((await f.load()).records.old?.reason).toBe(
+        "Unverified descendants",
+      );
       expect((await f.load()).records["coordinator:control"]).toBeUndefined();
       await writeFile(
         join(f.directory, "commands/22222222-2222-4222-8222-222222222222.json"),
@@ -958,6 +964,57 @@ it("rejects invalid native argv before ownership, trace creation or private-mask
       await expect(access(join(f.directory, "watcher.lock"))).rejects.toThrow();
     } finally {
       process.umask(priorMask);
+      await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+it("keeps supervising when a task carries invalid scheduling metadata", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    f.config.allowedTasks = ["T1"];
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(f.config));
+    let reads = 0;
+    const controller = new AbortController();
+    const running = serve(f.config, f.directory, controller.signal, {
+      readBoard: async (root) => {
+        const board = await snapshot(root);
+        reads++;
+        board.tasks.push({
+          id: "T1",
+          title: "Synthetic invalid metadata",
+          owner: "coordinator",
+          phase: "test",
+          state: "assigned",
+          documentedStatus: "assigned",
+          goal: "Exercise invalid input",
+          dependencies: "",
+          scheduling: { code: "ready", label: "ready" },
+          markdown: "Synthetic",
+          live: {
+            task: "T1",
+            assignment: {
+              owner: "coordinator",
+              baseCommit: "b".repeat(40),
+              at: new Date().toISOString(),
+              text: "Synthetic",
+            },
+            claim: null,
+            status: null,
+            accepted: null,
+            scheduling: { version: 99 },
+          },
+        } as unknown as (typeof board.tasks)[number]);
+        return board;
+      },
+    });
+    try {
+      await until(async () => reads >= 3);
+      const state = await f.load();
+      expect(state.running).toBe(true);
+      expect(state.draining).toBe(false);
+    } finally {
+      controller.abort();
+      await running;
       await rm(f.root, { recursive: true, force: true });
     }
   }));
