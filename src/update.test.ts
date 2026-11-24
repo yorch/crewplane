@@ -320,6 +320,17 @@ describe("cache", () => {
     );
   });
 
+  it("ignores a relative XDG_CACHE_HOME and rejects a relative cache override", () => {
+    assert.equal(
+      updateCachePath({ XDG_CACHE_HOME: "relative/dir" }, "/home/a", "linux"),
+      "/home/a/.cache/crewplane/update.json",
+    );
+    assert.throws(
+      () => updateCachePath({ CREWPLANE_CACHE_DIR: "rel" }, "/home/a", "linux"),
+      /CREWPLANE_CACHE_DIR must be an absolute path/,
+    );
+  });
+
   it("round-trips and tolerates missing or corrupt records", async () => {
     const path = join(temporary(), "nested", "update.json");
     assert.deepEqual(await readUpdateCache(path), { version: 1 });
@@ -1075,16 +1086,18 @@ describe("installBinary", () => {
     assert.equal(readFileSync(join(directory, "real"), "utf8"), "old");
   });
 
-  it("refuses a non-writable directory", async () => {
-    if (process.getuid?.() === 0) return;
-    const directory = temporary();
-    chmodSync(directory, 0o500);
-    await assert.rejects(
-      installBinary(join(directory, "crewplane"), elf),
-      /not writable/,
-    );
-    chmodSync(directory, 0o700);
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    "refuses a non-writable directory",
+    async () => {
+      const directory = temporary();
+      chmodSync(directory, 0o500);
+      await assert.rejects(
+        installBinary(join(directory, "crewplane"), elf),
+        /not writable/,
+      );
+      chmodSync(directory, 0o700);
+    },
+  );
 
   it("refuses to replace a directory", async () => {
     const directory = temporary();

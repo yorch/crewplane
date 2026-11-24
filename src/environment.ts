@@ -17,12 +17,20 @@ const repositoryVariables = new Set([
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 ]);
+/** Config-location selectors are safe; counted overrides can inject config. */
+const allowedConfigVariables = new Set([
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_CONFIG_NOSYSTEM",
+]);
 export function gitEnvironment(
   input: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   return Object.fromEntries(
     Object.entries(input).filter(
-      ([key]) => !repositoryVariables.has(key) && !key.startsWith("GIT_CONFIG"),
+      ([key]) =>
+        !repositoryVariables.has(key) &&
+        (!key.startsWith("GIT_CONFIG") || allowedConfigVariables.has(key)),
     ),
   );
 }

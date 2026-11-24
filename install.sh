@@ -19,6 +19,7 @@
 #
 # Never run under sudo: install into a user-writable directory instead.
 set -eu
+umask 022
 
 repo="yorch/crewplane"
 
@@ -72,6 +73,14 @@ trap cleanup EXIT
 trap 'on_signal 129' HUP
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
+
+require_secure_url() { # url
+  case "$1" in
+    https://*) ;;
+    http://127.0.0.1 | http://127.0.0.1[:/]* | http://localhost | http://localhost[:/]* | http://\[::1\] | http://\[::1\][:/]*) ;;
+    *) die "refusing non-https URL (plain http is allowed only for loopback): $1" ;;
+  esac
+}
 
 curl_fetch() {
   url=$1
@@ -161,6 +170,7 @@ normalize_version() {
 
 resolve_latest() {
   api="${CREWPLANE_RELEASE_API:-https://api.github.com/repos/$repo/releases/latest}"
+  require_secure_url "$api"
   step "resolving the latest release"
   fetch "$api" "$tmp/latest.json" || die "could not reach $api"
   tag=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
@@ -253,6 +263,7 @@ fi
 asset="crewplane-$version-$os-$arch"
 base="${CREWPLANE_RELEASE_BASE:-https://github.com/$repo/releases/download}"
 base=${base%/}
+require_secure_url "$base"
 target="$dir/crewplane"
 
 if [ "$dry_run" -eq 1 ]; then

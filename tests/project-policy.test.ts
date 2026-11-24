@@ -68,6 +68,24 @@ function fixture() {
   save(policy);
   return { outer, root, save, policy };
 }
+it("refuses a symlinked or oversized crewplane.json", () => {
+  const f = fixture();
+  try {
+    const file = join(f.root, "crewplane.json");
+    writeFileSync(join(f.root, "real.json"), JSON.stringify({ version: 1 }));
+    rmSync(file);
+    symlinkSync(join(f.root, "real.json"), file);
+    expect(() => projectPolicy(f.root)).toThrow("Invalid crewplane.json");
+    rmSync(file);
+    writeFileSync(
+      file,
+      JSON.stringify({ version: 1, pad: "x".repeat(300 * 1024) }),
+    );
+    expect(() => projectPolicy(f.root)).toThrow("Invalid crewplane.json");
+  } finally {
+    rmSync(f.outer, { recursive: true, force: true });
+  }
+});
 it("keeps v1 defaults and requires v2 for additive project capabilities", () => {
   const f = fixture();
   try {

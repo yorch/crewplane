@@ -1,6 +1,6 @@
 # Extraction plan and status
 
-Steps 1–5 are implemented. See [status and verification](STATUS.md) and [operating guide](USAGE.md). This is a standalone extraction baseline with synthetic acceptance, not certification of live harnesses/providers or production operation.
+Steps 1–5 and 8 are complete; step 6 is not started and step 7 is deferred. See [status and verification](STATUS.md) and [operating guide](USAGE.md). This is a standalone extraction baseline with synthetic acceptance, not certification of live harnesses/providers or production operation.
 
 | Step | Task  | Status      | Delivered                                                                                                                                                                           |
 | ---- | ----- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

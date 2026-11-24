@@ -76,21 +76,37 @@ const lanePermissions = (lane: Config["lanes"][string]) => {
       return "harness-controlled";
   }
 };
-const readConfig = async (directory: string) =>
-  validateConfig((await optional(join(directory, "config.json"))) as Config);
+const readConfig = async (directory: string) => {
+  const config = await optional(join(directory, "config.json"));
+  if (config === null)
+    throw new Error(
+      "Project is not configured; run crewplane configure --file PATH",
+    );
+  return validateConfig(config as Config);
+};
+/** Read an operator-named input file, naming it when it does not exist. */
+const readInput = async (path: string) => {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      throw new Error(`file not found: ${printablePath(path)}`);
+    throw error;
+  }
+};
 function options(args: string[], allowed: string[]) {
   const result: Record<string, string> = {};
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i],
       value = args[i + 1];
-    if (
-      !key ||
-      !allowed.includes(key) ||
-      value === undefined ||
-      value.startsWith("--") ||
-      key in result
-    )
-      throw new Error("Invalid command options");
+    if (!key || !allowed.includes(key))
+      throw new Error(
+        `Invalid command options: unexpected ${printablePath(String(key))}`,
+      );
+    if (value === undefined || value.startsWith("--"))
+      throw new Error(`Invalid command options: ${key} requires a value`);
+    if (key in result)
+      throw new Error(`Invalid command options: ${key} given twice`);
     result[key] = value;
   }
   return result;
@@ -98,8 +114,12 @@ function options(args: string[], allowed: string[]) {
 function flags(args: string[], allowed: string[]) {
   const result = new Set<string>();
   for (const arg of args) {
-    if (!allowed.includes(arg) || result.has(arg))
-      throw new Error("Invalid command options");
+    if (!allowed.includes(arg))
+      throw new Error(
+        `Invalid command options: unexpected ${printablePath(arg)}`,
+      );
+    if (result.has(arg))
+      throw new Error(`Invalid command options: ${arg} given twice`);
     result.add(arg);
   }
   return result;
@@ -119,11 +139,14 @@ const knownCommands = new Set([
   "nudge",
   "stop",
   "rollout",
+  "resolve",
+  "cancel",
   "dashboard",
   "evidence",
   "monitor",
   "watchdog",
 ]);
+const projectCommands = new Set([...knownCommands, "pin"]);
 /**
  * Best-effort background check. It never delays or fails a foreground command
  * and never replaces the executable while long-lived work or any live
@@ -161,7 +184,7 @@ type ProjectContext = {
 /**
  * Commands that must still run when the binary does not match the project pin:
  * every operator safety and authority verb (halting, cancelling, resolving a
- * decision, repointing a stale pin). Node every other project command stays
+ * decision, repointing a stale pin). Note every other project command stays
  * blocked. Queued verbs are interpreted by the running supervisor's release.
  */
 const pinMismatchBypass = new Set([
@@ -177,6 +200,14 @@ let dispatchSkip: string | undefined;
 const standaloneBinary = () =>
   (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
     ?.isStandaloneExecutable === true;
+/** The retained-release directory, or why it cannot be determined. */
+const safeRoot = () => {
+  try {
+    return printablePath(releasesRoot());
+  } catch (error) {
+    return `(unavailable: ${error instanceof Error ? error.message : "invalid environment"})`;
+  }
+};
 /**
  * Extra recovery lines for a pin mismatch. They are rendered by the CLI only:
  * the error message itself stays one line because the supervisor persists it.
@@ -187,7 +218,7 @@ function versionPinHint(error: ProjectVersionError, skipped?: string): string {
     order > 0
       ? "this project pins an OLDER release; `crewplane update` only installs the latest release"
       : `this project requires a NEWER release; \`crewplane update\` installs the latest, which may not be ${error.required}`;
-  const retained = `${printablePath(releasesRoot())}/${error.required}`;
+  const retained = `${safeRoot()}/${error.required}`;
   const lines = [
     `  pin:     requiredVersion in ${printablePath(error.policyPath)} (primary checkout; applies to every worktree)`,
   ];
@@ -196,7 +227,7 @@ function versionPinHint(error: ProjectVersionError, skipped?: string): string {
   lines.push(`  ${direction}`, `  retained: ${retained}`);
   if (skipped !== undefined) lines.push(`  dispatch: ${skipped}`);
   lines.push(
-    `  cure:    install ${error.required} into that directory (install.sh --version v${error.required} --dir ${retained})`,
+    `  cure:    install release ${error.required} into that directory (see docs/USAGE.md "Project version pins")`,
     '  details: docs/USAGE.md "Project version pins"',
   );
   return lines.join("\n");
@@ -241,9 +272,13 @@ async function dispatchToPin(
     const reason = error instanceof Error ? error.message : "unreadable state";
     return `project state is unusable (${reason})`;
   }
-  const path = await dispatchTarget(error.required);
-  if (path === null)
-    return `no verified ${error.required} under ${printablePath(releasesRoot())}`;
+  let path: string | null;
+  try {
+    path = await dispatchTarget(error.required);
+  } catch (failure) {
+    return `release directory unavailable (${failure instanceof Error ? failure.message : "unknown"})`;
+  }
+  if (path === null) return `no verified ${error.required} under ${safeRoot()}`;
   // SAFETY: Bun provides process.execve at runtime but @types does not declare
   // it, so the shape is asserted and re-checked with typeof before it is called.
   const execve = (
@@ -278,7 +313,10 @@ async function main() {
   }
   const [command = "--help", ...rest] = args;
   if (command === "--help" || command === "-h") return output(help);
-  if (command === "--version") return output(pkg.version);
+  if (command === "--version" || command === "-v") return output(pkg.version);
+  if (command === "help") return output(help);
+  if (command !== "update" && !projectCommands.has(command))
+    throw new Error("Unknown command. Run crewplane --help.");
   if (command === "update") {
     const set = flags(rest, ["--check", "--auto", "--force"]);
     if (set.has("--check") && set.has("--auto"))
@@ -296,12 +334,14 @@ async function main() {
         }),
       );
     } catch (error) {
+      const reason = error instanceof Error ? error.message : "Update failed";
+      console.error(`crewplane: ${reason}`);
       output({
         version: 1,
         status: "failed",
         current: pkg.version,
         checkedAt: new Date().toISOString(),
-        reason: error instanceof Error ? error.message : "Update failed",
+        reason,
       });
       process.exitCode = 1;
       return;
@@ -395,11 +435,14 @@ async function main() {
     const exclude = join(common, "info/exclude");
     await mkdir(dirname(exclude), { recursive: true });
     const prior = await readFile(exclude, "utf8").catch(() => "");
-    const lines = ["/.crewplane-state/", "/.crewplane-local/"];
-    await appendFile(
-      exclude,
-      `\n${lines.filter((line) => !prior.split("\n").includes(line)).join("\n")}\n`,
+    const missing = ["/.crewplane-state/", "/.crewplane-local/"].filter(
+      (line) => !prior.split("\n").includes(line),
     );
+    if (missing.length)
+      await appendFile(
+        exclude,
+        `${prior === "" || prior.endsWith("\n") ? "" : "\n"}${missing.join("\n")}\n`,
+      );
     return output({
       version: 1,
       root,
@@ -416,11 +459,10 @@ async function main() {
   if (command === "configure") {
     const opts = options(rest, ["--file"]);
     if (!opts["--file"]) throw new Error("configure requires --file PATH");
+    const text = await readInput(resolve(requested, opts["--file"]));
     let value: Record<string, unknown>;
     try {
-      value = JSON.parse(
-        await readFile(resolve(requested, opts["--file"]), "utf8"),
-      );
+      value = JSON.parse(text);
     } catch {
       throw new Error("Configuration file is not valid JSON");
     }
@@ -472,7 +514,7 @@ async function main() {
         latest: updateCache.latest ?? null,
         lastAttemptAt: updateCache.lastAttemptAt ?? null,
         error: updateCache.error ?? null,
-        retainedReleases: printablePath(releasesRoot()),
+        retainedReleases: safeRoot(),
       },
       root,
       git: execFileSync("git", ["--version"], { encoding: "utf8" }).trim(),
@@ -513,10 +555,7 @@ async function main() {
           }))
         : [],
       globalInstructions: (() => {
-        const problem = instructionFileProblem(
-          root,
-          projectPolicy(root).instructionsPath,
-        );
+        const problem = instructionFileProblem(root, policy.instructionsPath);
         return problem ?? "ok";
       })(),
       providerCredentials: "not-probed",
@@ -690,6 +729,14 @@ async function main() {
     const lane = opts["--lane"];
     const task = opts["--task"];
     const widening = ["retry", "resolve", "resume"].includes(command);
+    if (
+      opts["--expect-rev"] !== undefined &&
+      !(
+        /^\d+$/.test(opts["--expect-rev"]) &&
+        Number.isSafeInteger(Number(opts["--expect-rev"]))
+      )
+    )
+      throw new Error("--expect-rev must be a non-negative integer");
     const expectedRev =
       opts["--expect-rev"] !== undefined
         ? Number(opts["--expect-rev"])
@@ -761,10 +808,12 @@ async function main() {
     await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });
     const id = randomUUID();
     await publishJson(join(directory, "commands", `${id}.json`), value);
+    if (!state?.running)
+      console.error(
+        "crewplane: no supervisor is running; the command stays queued",
+      );
     if (opts["--wait"] !== undefined) {
       const seconds = Number(opts["--wait"]);
-      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60)
-        throw new Error("Wait must be an integer from 1 to 60 seconds");
       const deadline = Date.now() + seconds * 1000;
       while (Date.now() < deadline) {
         const current = (await optional(join(directory, "state.json"))) as {
@@ -799,10 +848,9 @@ async function main() {
     const metadata = async () => {
       if (!opts["--input"])
         throw new Error("Evidence mutation requires --input metadata.json");
+      const text = await readInput(resolve(requested, opts["--input"]));
       try {
-        return JSON.parse(
-          await readFile(resolve(requested, opts["--input"]), "utf8"),
-        );
+        return JSON.parse(text);
       } catch {
         throw new Error("Evidence metadata is not valid JSON");
       }
@@ -819,7 +867,13 @@ async function main() {
       return output(await store.manifest(opts["--run"]));
     if (action === "append" && opts["--run"] && opts["--file"]) {
       const path = resolve(requested, opts["--file"]);
-      const stat = await import("node:fs/promises").then((fs) => fs.stat(path));
+      const stat = await import("node:fs/promises")
+        .then((fs) => fs.stat(path))
+        .catch((error: NodeJS.ErrnoException) => {
+          throw error.code === "ENOENT"
+            ? new Error(`file not found: ${printablePath(path)}`)
+            : error;
+        });
       if (stat.size > 16 * 1024 * 1024)
         throw new Error("Evidence file exceeds artifact limit");
       return output(
@@ -843,8 +897,9 @@ async function main() {
   }
   if (command === "dashboard") {
     const opts = options(rest, ["--port", "--controls"]);
-    const port = Number(opts["--port"] ?? 4310);
-    if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    const rawPort = opts["--port"] ?? "4310";
+    const port = Number(rawPort);
+    if (!/^\d+$/.test(rawPort) || port < 1024 || port > 65535)
       throw new Error("Invalid port");
     const controls =
       opts["--controls"] === "true" ? { token: randomUUID() } : undefined;
@@ -865,7 +920,7 @@ async function main() {
     return;
   }
   if (command === "start") {
-    if (!Bun.isStandaloneExecutable)
+    if (!standaloneBinary())
       throw new Error(
         "Build and use dist/crewplane start so agents can invoke the same executable",
       );
@@ -875,8 +930,16 @@ async function main() {
       throw new Error("Configuration belongs to another project");
     process.env.CREWPLANE_EXECUTABLE = process.execPath;
     const controller = new AbortController();
+    // Stay handled until the drain finishes: a repeated signal must not fall
+    // back to the default action and kill the supervisor mid-drain.
     for (const signal of ["SIGINT", "SIGTERM"] as const)
-      process.once(signal, () => controller.abort());
+      process.on(signal, () => {
+        if (controller.signal.aborted) return;
+        console.error(
+          `crewplane: ${signal} received; draining and stopping (further signals are ignored)`,
+        );
+        controller.abort();
+      });
     return serve(config, directory, controller.signal);
   }
   throw new Error("Unknown command. Run crewplane --help.");

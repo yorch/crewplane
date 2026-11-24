@@ -1,6 +1,10 @@
 import { execFileSync } from "node:child_process";
 import {
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -92,13 +96,29 @@ export const defaultPolicy: ProjectPolicy = {
   statusPath: "STATUS.md",
   instructionsPath: "AGENTS.md",
 };
+const maxPolicyBytes = 256 * 1024;
+/** Policy is committed repository content: no symlinks, FIFOs or unbounded reads. */
+function readPolicyFile(path: string): string {
+  const handle = openSync(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const info = fstatSync(handle);
+    if (!info.isFile() || info.size > maxPolicyBytes)
+      throw new Error("Invalid crewplane.json");
+    return readFileSync(handle, "utf8");
+  } finally {
+    closeSync(handle);
+  }
+}
 export function projectPolicy(
   root: string,
   options: { checkVersion?: boolean } = {},
 ): ProjectPolicy {
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(`${root}/crewplane.json`, "utf8"));
+    raw = JSON.parse(readPolicyFile(`${root}/crewplane.json`));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
       return { ...defaultPolicy };
@@ -268,7 +288,13 @@ export function discoverProject(cwd: string) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-  if (git("rev-parse", "--is-bare-repository") === "true")
+  let bare: string;
+  try {
+    bare = git("rev-parse", "--is-bare-repository");
+  } catch {
+    throw new Error("Not a git repository (use --project PATH)");
+  }
+  if (bare === "true")
     throw new Error("Crewplane requires a non-bare Git project");
   const root = realpathSync(git("rev-parse", "--show-toplevel"));
   const common = realpathSync(
@@ -294,7 +320,12 @@ export function discoverProject(cwd: string) {
       const actualCommon = execFileSync(
         "git",
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        { cwd: primary, env: gitEnvironment(), encoding: "utf8" },
+        {
+          cwd: primary,
+          env: gitEnvironment(),
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
       ).trim();
       if (realpathSync(actualCommon) !== common)
         throw new Error("Primary binding belongs to another repository");

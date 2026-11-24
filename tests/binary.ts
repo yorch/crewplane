@@ -121,6 +121,19 @@ try {
   git("config", "user.name", "Synthetic");
   git("config", "user.email", "fixture@example.invalid");
   json("init");
+  const unknown = spawnSync(bin, ["--project", root, "frobnicate"], {
+    env,
+    encoding: "utf8",
+    timeout: 15000,
+  });
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /Unknown command/);
+  const missingFile = spawnSync(
+    bin,
+    ["--project", root, "configure", "--file", "no-such-file.json"],
+    { env, encoding: "utf8", timeout: 15000 },
+  );
+  assert.match(missingFile.stderr, /file not found: .*no-such-file\.json/);
   writeFileSync(
     join(root, "crewplane.json"),
     JSON.stringify({
