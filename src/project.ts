@@ -50,10 +50,13 @@ export interface Roles {
   coordinator?: string;
   reviewers?: string[];
 }
+/** Single source of default role names; projects override them through policy. */
+export const defaultCoordinatorRole = "coordinator";
+export const defaultReviewerRoles: readonly string[] = ["reviewer", "visual"];
 export const coordinatorOf = (config?: Roles | null) =>
-  config?.coordinator ?? "coordinator";
+  config?.coordinator ?? defaultCoordinatorRole;
 export const reviewersOf = (config?: Roles | null) =>
-  config?.reviewers ?? ["reviewer", "visual"];
+  config?.reviewers ?? [...defaultReviewerRoles];
 export interface ProjectPolicy extends Roles {
   version: 1 | 2;
   requiredVersion?: string;
@@ -88,8 +91,8 @@ export class ProjectVersionError extends Error {
 export const defaultPolicy: ProjectPolicy = {
   version: 1,
   roadmapFormat: "none",
-  coordinator: "coordinator",
-  reviewers: ["reviewer", "visual"],
+  coordinator: defaultCoordinatorRole,
+  reviewers: [...defaultReviewerRoles],
   reviewerRoles: { visual: "visual" },
   tasksPath: "tasks",
   planPath: "PLAN.md",

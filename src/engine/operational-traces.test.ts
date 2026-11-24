@@ -472,8 +472,19 @@ it("recovers publishJson temporaries, pages without a false cursor and records p
     const events = (await recovered.tail(run(2))).events;
     expect(events.map((e) => e.kind)).toEqual(["paused"]);
     expect(events[0]?.message).not.toMatch(/failed/);
-    const exact = await recovered.list({ limit: 2 });
-    expect(exact.runs).toHaveLength(2);
+    const third = await recovered.begin({
+      runId: run(3),
+      lane: "coordinator",
+      task: null,
+      harness: "codex",
+    });
+    await third.finish("paused", null, { failure: true });
+    expect((await recovered.tail(run(3))).events.map((e) => e.kind)).toEqual([
+      "error",
+    ]);
+    expect((await recovered.tail(run(3))).meta.status).toBe("paused");
+    const exact = await recovered.list({ limit: 3 });
+    expect(exact.runs).toHaveLength(3);
     expect(exact.nextCursor).toBeNull();
     const first = await recovered.list({ limit: 1 });
     expect(first.nextCursor).toBe(first.runs[0]?.runId);

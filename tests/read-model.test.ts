@@ -13,6 +13,7 @@ import { expect, it } from "vitest";
 import { main } from "../src/engine/agents.mjs";
 import { evaluateOrchestration } from "../src/engine/orchestration.ts";
 import { parseTask, snapshot } from "../src/engine/read-model.ts";
+import { projectPolicy } from "../src/project.ts";
 
 it("keeps real snapshots available when task history exceeds graph input limits", async () => {
   const root = realpathSync(
@@ -171,10 +172,14 @@ it("refuses project documents that escape the root, are special files or exceed 
     mkdirSync(join(root, "tasks"));
     writeFileSync(join(outside, "secret.md"), "OUTSIDE_SENTINEL");
     symlinkSync(join(outside, "secret.md"), join(root, "tasks/ESC.md"));
-    await expect(snapshot(root)).rejects.toThrow();
+    let view = await snapshot(root);
+    expect(JSON.stringify(view)).not.toContain("OUTSIDE_SENTINEL");
+    expect(view.documentProblems.map((p) => p.path)).toEqual(["tasks/ESC.md"]);
     rmSync(join(root, "tasks/ESC.md"));
     writeFileSync(join(root, "tasks/BIG.md"), "x".repeat(2 * 1024 * 1024));
-    await expect(snapshot(root)).rejects.toThrow("bounded regular file");
+    view = await snapshot(root);
+    expect(view.documentProblems[0]?.reason).toContain("bounded regular file");
+    expect(view.tasks.find((t) => t.id === "BIG")?.markdown).toBe("");
     rmSync(join(root, "tasks/BIG.md"));
     writeFileSync(join(root, "tasks/OK.md"), "# OK\n");
     symlinkSync(join(root, "tasks/OK.md"), join(root, "tasks/LINK.md"));
@@ -182,6 +187,32 @@ it("refuses project documents that escape the root, are special files or exceed 
       "LINK",
       "OK",
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+it("does not fail the board snapshot for a symlinked-out or oversized status document", async () => {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-status-bad-")),
+  );
+  const outside = realpathSync(
+    mkdtempSync(join(tmpdir(), "crewplane-status-out-")),
+  );
+  try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
+    const statusPath = projectPolicy(root).statusPath;
+    writeFileSync(join(outside, "s.md"), "OUTSIDE_SENTINEL");
+    symlinkSync(join(outside, "s.md"), join(root, statusPath));
+    let view = await snapshot(root);
+    expect(view.milestoneStatus).toBe("");
+    expect(view.documentProblems.map((p) => p.path)).toEqual([statusPath]);
+    rmSync(join(root, statusPath));
+    writeFileSync(join(root, statusPath), "x".repeat(2 * 1024 * 1024));
+    view = await snapshot(root);
+    expect(view.milestoneStatus).toBe("");
+    expect(view.documentProblems).toHaveLength(1);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });

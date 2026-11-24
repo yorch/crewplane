@@ -83,6 +83,8 @@ export interface State {
   checkedAt: string;
   pid: number;
   draining: boolean;
+  /** Set when scheduling input was invalid; cleared by the next clean evaluation. */
+  schedulingError?: { code: string; at: string; taskIds?: string[] } | null;
   held: Lane[];
   commands: string[];
   records: Record<string, RecordState>;

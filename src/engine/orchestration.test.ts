@@ -884,3 +884,20 @@ it("treats a malformed worker-written commit as absent instead of faulting sched
     evaluateOrchestration(board([t]), state(), config, now),
   ).not.toThrow();
 });
+it("isolates a task with invalid scheduling metadata while other tasks keep scheduling", () => {
+  for (const bad of [
+    { version: 2 },
+    { version: 1, priority: "x", dependsOn: [], reviewOf: null },
+    { version: 1, priority: "normal", dependsOn: "nope", reviewOf: null },
+  ]) {
+    const b = board([task("P1-01"), task("P1-02", "C")]);
+    must(must(b.tasks[0]).live).scheduling = bad as never;
+    const r = evaluateOrchestration(b, state(), config, now);
+    expect(r.invalidSchedulingTaskIds).toEqual(["P1-01"]);
+    expect(r.work.some((w) => w.lane === "B")).toBe(false);
+    expect(r.work.some((w) => w.lane === "C")).toBe(true);
+    expect(r.queue.queue.find((q) => q.taskId === "P1-01")?.reason).toBe(
+      "INVALID_SCHEDULING_METADATA",
+    );
+  }
+});

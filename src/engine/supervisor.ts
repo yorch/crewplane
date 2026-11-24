@@ -18,6 +18,7 @@ import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
   coordinatorOf,
+  defaultCoordinatorRole,
   projectPolicy,
   reviewersOf,
   validId,
@@ -43,7 +44,10 @@ import {
   nativeTrace,
   type TraceInput,
 } from "./operational-traces.ts";
-import { evaluateOrchestration } from "./orchestration.ts";
+import {
+  evaluateOrchestration,
+  type SchedulingError,
+} from "./orchestration.ts";
 import { snapshot } from "./read-model.ts";
 import { loadedScheduling } from "./scheduling.ts";
 import { evaluateTurnWait } from "./wait-policy.ts";
@@ -397,7 +401,7 @@ export async function progress(
   board: Board,
   cwd: string,
   work: Pick<Work, "lane" | "task">,
-  coordinator = "coordinator",
+  coordinator: string = defaultCoordinatorRole,
 ) {
   let code = "";
   try {
@@ -1126,9 +1130,16 @@ export async function serve(
         try {
           evaluation = evaluateOrchestration(board, state, config);
         } catch (error) {
-          // Invalid task metadata must not drain the whole supervisor.
+          // Never let a stale queue read as current: withhold it and record why.
+          delete state.queue;
+          state.planning = null;
+          const failure: SchedulingError = {
+            code: (error as Error).message.slice(0, 100),
+            at: new Date().toISOString(),
+          };
+          state.schedulingError = failure;
           console.error(
-            `Board temporarily unavailable; scheduling input invalid (${(error as Error).message}); retrying without launching lanes`,
+            `Scheduling evaluation failed (${failure.code}); retrying without launching lanes`,
           );
           await save();
           if (signal.aborted && children.size)
@@ -1142,6 +1153,17 @@ export async function serve(
         }
         state.queue = evaluation.queue;
         state.planning = evaluation.planning;
+        state.schedulingError = evaluation.invalidSchedulingTaskIds.length
+          ? {
+              code: "INVALID_TASK_SCHEDULING",
+              taskIds: evaluation.invalidSchedulingTaskIds.slice(0, 20),
+              at: new Date().toISOString(),
+            }
+          : null;
+        if (evaluation.invalidSchedulingTaskIds.length)
+          console.error(
+            `Invalid scheduling metadata isolated for task(s): ${evaluation.invalidSchedulingTaskIds.slice(0, 20).join(", ")}`,
+          );
         const pendingTimes = board.unanswered
           .filter((m) => m.to === coordinatorOf(config))
           .map((m) => Date.parse(m.at))
@@ -1399,7 +1421,7 @@ export async function serve(
             record.reason =
               "Native launch preparation failed; inspect storage and retry";
             record.finishedAt = new Date().toISOString();
-            await trace.finish("paused", null);
+            await trace.finish("paused", null, { failure: true });
             throw error;
           }
           if (child.pid !== undefined) {
@@ -1734,6 +1756,14 @@ export async function serve(
             await trace.finish(
               pause ? "paused" : "finished",
               valid ? final.state : null,
+              {
+                // Run failures trace as errors; decision/operator/budget pauses are not failures.
+                failure:
+                  !!pause &&
+                  !budgetPause &&
+                  (record.pauseKind === "failure" ||
+                    record.pauseKind === "no-progress"),
+              },
             );
             console.log(
               JSON.stringify({
@@ -1758,7 +1788,9 @@ export async function serve(
                   "Result handling failed; inspect controlled result and storage before retry";
                 record.finishedAt = new Date().toISOString();
                 // Retain unverified group identity; retry must not overlap it.
-                await trace.finish("paused", null).catch(() => {});
+                await trace
+                  .finish("paused", null, { failure: true })
+                  .catch(() => {});
                 await save();
               })
               .finally(() => {

@@ -437,6 +437,14 @@ it("recovers a transient state write failure without abandoning final persistenc
     );
     const trace = JSON.parse(await readFile(tracePath, "utf8"));
     expect(trace.status).toBe("paused");
+    // A launch-preparation failure is a real failure, not a decision pause.
+    const events = (
+      await readFile(tracePath.replace(/meta\.json$/, "events.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).kind);
+    expect(events.at(-1)).toBe("error");
     const before = await readFile(tracePath, "utf8");
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(await readFile(tracePath, "utf8")).toBe(before);
@@ -625,6 +633,9 @@ it("requires explicit inspected-cleanup acknowledgement across every task in a l
         "Unverified descendants",
       );
       expect((await f.load()).records["coordinator:control"]).toBeUndefined();
+      expect((await f.load()).controlLog?.at(-1)?.code).toBe(
+        "CLEANUP_UNVERIFIED",
+      );
       await writeFile(
         join(f.directory, "commands/22222222-2222-4222-8222-222222222222.json"),
         JSON.stringify({

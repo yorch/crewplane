@@ -6,6 +6,7 @@ import {
   type Metadata,
   type ScheduleCandidate,
   type ScheduleTask,
+  validMetadata,
 } from "./fair-scheduler.ts";
 import { harnessKey } from "./harness.ts";
 import type { snapshot } from "./read-model.ts";
@@ -20,6 +21,12 @@ const workKey = (key: string) =>
     : `work:${digest(key)}`;
 const instant = (value: string | undefined, fallback: number) =>
   value && Number.isFinite(Date.parse(value)) ? Date.parse(value) : fallback;
+/** Visible scheduling failure; persisted beside the queue (State.schedulingError). */
+export interface SchedulingError {
+  code: string;
+  taskIds?: string[];
+  at: string;
+}
 export function evaluateOrchestration(
   board: Board,
   state: State,
@@ -115,8 +122,10 @@ export function evaluateOrchestration(
       needed.add(request.task);
   const pending = [...needed];
   for (let i = 0; i < pending.length; i++) {
-    for (const dependency of taskById.get(pending[i] as string)?.live
-      ?.scheduling?.dependsOn ?? []) {
+    const rawDependsOn = taskById.get(pending[i] as string)?.live?.scheduling
+      ?.dependsOn;
+    for (const dependency of Array.isArray(rawDependsOn) ? rawDependsOn : []) {
+      if (typeof dependency?.taskId !== "string") continue;
       if (!needed.has(dependency.taskId)) {
         needed.add(dependency.taskId);
         pending.push(dependency.taskId);
@@ -129,6 +138,11 @@ export function evaluateOrchestration(
     /^[A-Za-z0-9][A-Za-z0-9:_./-]{0,199}$/.test(value)
       ? value
       : null;
+  // A task whose scheduling metadata is invalid is isolated (unschedulable), never allowed to fail the whole evaluation.
+  const invalidScheduling = new Set<string>();
+  for (const t of board.tasks)
+    if (t.live && needed.has(t.id) && !validMetadata(t.live.scheduling ?? null))
+      invalidScheduling.add(t.id);
   const tasks: ScheduleTask[] = board.tasks
     .filter((t) => t.live && needed.has(t.id))
     .map((t) => ({
@@ -139,8 +153,11 @@ export function evaluateOrchestration(
       readyCommit: commitId(t.live?.status?.commit),
       acceptedCommit: t.live?.accepted?.commit ?? null,
       acceptedSourceCommit: t.live?.accepted?.sourceCommit ?? null,
-      metadata: t.live?.scheduling ?? null,
+      metadata: invalidScheduling.has(t.id)
+        ? null
+        : (t.live?.scheduling ?? null),
     }));
+  const invalidCandidates: ScheduleCandidate[] = [];
   const add = (
     work: Work,
     kind: ScheduleCandidate["kind"],
@@ -181,6 +198,23 @@ export function evaluateOrchestration(
       )
     )
       return;
+    if (invalidScheduling.has(schedulerTask)) {
+      invalidCandidates.push({
+        key: work.key,
+        lane: work.lane,
+        taskId: schedulerTask,
+        kind,
+        enqueuedAt,
+        authorized: false,
+        phaseAllowed: false,
+        ownershipValid: false,
+        pathsDisjoint: false,
+        acceptedBase: false,
+        configLoaded: true,
+        blocksAcceptance: false,
+      });
+      return;
+    }
     works.push(work);
     candidates.push({
       key: work.key,
@@ -579,6 +613,24 @@ export function evaluateOrchestration(
           ?.metadata?.dependsOn.map((dependency) => dependency.taskId) ?? [],
     })),
   );
+  result.queue.push(
+    ...invalidCandidates.map((candidate) => ({
+      key: candidate.key,
+      lane: candidate.lane,
+      taskId: candidate.taskId,
+      status: "blocked" as const,
+      reason: "INVALID_SCHEDULING_METADATA",
+      position: null,
+      components: {
+        priority: 0,
+        aging: 0,
+        unblocks: 0,
+        review: false,
+        enqueue: candidate.enqueuedAt,
+      },
+      dependencyIds: [],
+    })),
+  );
   const selectedScopes: (string[] | null)[] = [];
   result.selected = result.selected.filter((key) => {
     const candidate = candidates.find((c) => c.key === key);
@@ -599,6 +651,7 @@ export function evaluateOrchestration(
   return {
     work: result.selected.flatMap((key) => works.filter((w) => w.key === key)),
     queue: result,
+    invalidSchedulingTaskIds: [...invalidScheduling].sort(),
     planning: planningId
       ? {
           event: planningId,

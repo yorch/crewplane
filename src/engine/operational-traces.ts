@@ -756,9 +756,18 @@ export async function createTraceStore(
           session(id: string) {
             if (validSessionId(meta.harness, id)) meta.sessionId = id;
           },
-          async finish(status: "finished" | "paused", finalState: unknown) {
+          async finish(
+            status: "finished" | "paused",
+            finalState: unknown,
+            options: { failure?: boolean } = {},
+          ) {
             await emit({
-              kind: status === "paused" ? "paused" : "finished",
+              kind:
+                status === "paused"
+                  ? options.failure
+                    ? "error"
+                    : "paused"
+                  : "finished",
               status,
             });
             await queue;

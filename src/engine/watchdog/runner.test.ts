@@ -706,11 +706,12 @@ it("reports paused retained process groups and identity-free unverified cleanup 
     // Running (non-retained) children sort first so a 64-entry cap never drops them.
     expect(input.children).toEqual([
       { pid: 505, alive: "alive" },
-      { pid: 501, alive: "alive", retained: true },
-      { pid: 503, alive: "dead", retained: true },
       { pid: null, alive: "unknown", retained: true },
       { pid: 504, alive: "unknown", retained: true },
+      { pid: 501, alive: "alive", retained: true },
+      { pid: 503, alive: "dead", retained: true },
     ]);
+    expect(input.childrenTruncated).toBeUndefined();
     const result = evaluateWatchdog(input, null, {
       ...settings,
       startupGraceMs: 0,
@@ -723,6 +724,54 @@ it("reports paused retained process groups and identity-free unverified cleanup 
       { ...settings, startupGraceMs: 0 },
     );
     expect(healthy.codes).not.toContain("orphan-or-unknown-child");
+  } finally {
+    await rm(store, { recursive: true, force: true });
+  }
+});
+
+it("orders unverified children before plain retained ones and signals truncation past 64", async () => {
+  const store = await mkdtemp(join(tmpdir(), "watchdog-children-cap-"));
+  try {
+    await mkdir(join(store, "supervisor"), { recursive: true, mode: 0o700 });
+    const now = 900000;
+    await writeFile(
+      join(store, "supervisor/desired.json"),
+      JSON.stringify({ desiredRunning: true }),
+      { mode: 0o600 },
+    );
+    const records: Record<string, unknown> = {};
+    for (let i = 0; i < 70; i++)
+      records[`retained-${i}`] = {
+        lane: "B",
+        status: "paused",
+        pid: 1000 + i,
+      };
+    records.unverified = {
+      lane: "C",
+      status: "paused",
+      pid: 2000,
+      cleanupUnverified: true,
+    };
+    await writeFile(
+      join(store, "supervisor/state.json"),
+      JSON.stringify({
+        pid: 500,
+        checkedAt: new Date(now).toISOString(),
+        records,
+      }),
+      { mode: 0o600 },
+    );
+    const input = await readHealth(store, now, () => "dead");
+    expect(input.children).toHaveLength(64);
+    expect(input.children[0]?.pid).toBe(2000);
+    expect(input.childrenTruncated).toBe(true);
+    const result = evaluateWatchdog(input, null, {
+      ...settings,
+      startupGraceMs: 0,
+      recoveryEnabled: true,
+    });
+    expect(result.codes).toContain("orphan-or-unknown-child");
+    expect(result.recovery).not.toBe("request-restart");
   } finally {
     await rm(store, { recursive: true, force: true });
   }

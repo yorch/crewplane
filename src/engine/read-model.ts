@@ -44,6 +44,29 @@ async function readProjectFile(root: string, path: string): Promise<string> {
   }
 }
 
+export interface DocumentProblem {
+  path: string;
+  reason: string;
+}
+
+/** Never throws for a bad document: a missing file is empty, anything else is reported as a problem. */
+async function readProjectDocument(
+  root: string,
+  path: string,
+  problems: DocumentProblem[],
+): Promise<string> {
+  try {
+    return await readProjectFile(root, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "";
+    problems.push({
+      path,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return "";
+  }
+}
+
 export function parseTask(id: string, markdown: string, live?: LiveTask) {
   const documentedStatus =
     markdown.match(/Status:\s*([^\n]+)/)?.[1] ?? "Not started";
@@ -152,6 +175,7 @@ export const headlessStatus = readHeadless;
 
 export async function snapshot(root: string) {
   const board = (await coordination(["board"], root)) as Board;
+  const documentProblems: DocumentProblem[] = [];
   const policy = projectPolicy(root);
   const cards = (
     await readdir(join(root, policy.tasksPath)).catch((error) => {
@@ -166,15 +190,20 @@ export async function snapshot(root: string) {
       const id = file.slice(0, -3);
       return parseTask(
         id,
-        await readProjectFile(root, join(policy.tasksPath, file)),
+        await readProjectDocument(
+          root,
+          join(policy.tasksPath, file),
+          documentProblems,
+        ),
         board.tasks.find((t) => t.task === id),
       );
     }),
   );
-  const plan = await readProjectFile(root, policy.planPath).catch((error) => {
-    if (error.code === "ENOENT") return "";
-    throw error;
-  });
+  const plan = await readProjectDocument(
+    root,
+    policy.planPath,
+    documentProblems,
+  );
   if (policy.roadmapFormat === "relay")
     tasks.push(...plannedTasks(plan, new Set(tasks.map((task) => task.id))));
   tasks.sort((a, b) => a.id.localeCompare(b.id));
@@ -351,11 +380,11 @@ export async function snapshot(root: string) {
     orphanAssignments: board.tasks.filter(
       (t) => !tasks.some((card) => card.id === t.task),
     ),
-    milestoneStatus: await readProjectFile(root, policy.statusPath).catch(
-      (error) => {
-        if (error.code === "ENOENT") return "";
-        throw error;
-      },
+    milestoneStatus: await readProjectDocument(
+      root,
+      policy.statusPath,
+      documentProblems,
     ),
+    documentProblems,
   };
 }

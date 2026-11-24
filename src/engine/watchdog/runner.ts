@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { durableMkdir, publishJson } from "../../io.ts";
 import {
   coordinatorOf,
+  defaultReviewerRoles,
   discoverProject,
   reviewersOf,
   validId,
@@ -110,7 +111,7 @@ async function operations(
 const queueState = (
   reason: string,
   lane: string,
-  reviewers: string[] = ["reviewer", "visual"],
+  reviewers: readonly string[] = defaultReviewerRoles,
 ): WatchdogInput["queue"][number]["state"] | null => {
   if (["ELIGIBLE", "SELECTED"].includes(reason))
     return reviewers.includes(lane) ? "review" : "eligible";
@@ -327,6 +328,22 @@ export async function readHealth(
       : []),
     ...(pendingOperations !== undefined ? ["operations"] : []),
   ];
+  // The policy rejects more than 64 children: running first, then unverified/retained, then the rest.
+  const childRank = (r: (typeof records)[number]) =>
+    r.status === "running" && r.cleanupUnverified !== true
+      ? 0
+      : r.cleanupUnverified === true
+        ? 1
+        : 2;
+  const childRows = records
+    .filter(
+      (r) =>
+        r.status === "running" ||
+        r.cleanupUnverified === true ||
+        pidValue(r.processGroupId) !== null ||
+        pidValue(r.pid) !== null,
+    )
+    .sort((a, b) => childRank(a) - childRank(b));
   return {
     version: 1,
     now,
@@ -344,39 +361,25 @@ export async function readHealth(
         state?.running === true &&
         supervisorAlive === "alive",
     },
-    children: records
-      .filter(
-        (r) =>
-          r.status === "running" ||
-          r.cleanupUnverified === true ||
-          pidValue(r.processGroupId) !== null ||
-          pidValue(r.pid) !== null,
-      )
-      // The policy rejects more than 64 children; keep running/live ones first.
-      .sort(
-        (a, b) =>
-          Number(a.status !== "running" || a.cleanupUnverified === true) -
-          Number(b.status !== "running" || b.cleanupUnverified === true),
-      )
-      .slice(0, 64)
-      .map((r) => {
-        const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
-        const observed = pidValue(r.processGroupId)
-          ? observe(-(pidValue(r.processGroupId) as number))
-          : pid === null
-            ? "unknown"
-            : observe(pid);
-        return {
-          ...(r.status !== "running" || r.cleanupUnverified === true
-            ? { retained: true }
-            : {}),
-          pid,
-          alive:
-            r.cleanupUnverified === true && observed === "dead"
-              ? ("unknown" as const)
-              : observed,
-        };
-      }),
+    children: childRows.slice(0, 64).map((r) => {
+      const pid = pidValue(r.pid) ?? pidValue(r.processGroupId);
+      const observed = pidValue(r.processGroupId)
+        ? observe(-(pidValue(r.processGroupId) as number))
+        : pid === null
+          ? "unknown"
+          : observe(pid);
+      return {
+        ...(r.status !== "running" || r.cleanupUnverified === true
+          ? { retained: true }
+          : {}),
+        pid,
+        alive:
+          r.cleanupUnverified === true && observed === "dead"
+            ? ("unknown" as const)
+            : observed,
+      };
+    }),
+    ...(childRows.length > 64 ? { childrenTruncated: true } : {}),
     config: {
       loaded: fingerprint(object(state?.scheduling)?.fingerprint),
       disk,
