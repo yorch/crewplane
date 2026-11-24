@@ -236,6 +236,7 @@ function el(tag, text, className) {
 function link(href, text, className) {
   const node = el("a", text, className);
   node.href = href;
+  node.dataset.focusKey ??= `href:${href}:${text ?? ""}`;
   return node;
 }
 function icon(name) {
@@ -2026,7 +2027,8 @@ function showDisconnected(message) {
   const context = lastSuccess
     ? `Showing the last snapshot from ${date(lastSuccess)}; it may be out of date.`
     : "No snapshot has been received yet.";
-  $("error").textContent = `${message} ${context} Retrying every 5s.`;
+  const text = `${message} ${context} Retrying every 5s.`;
+  if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
   if (!data)
     $("loading").textContent =
@@ -2038,7 +2040,10 @@ async function refresh() {
   $("refresh").setAttribute("aria-busy", "true");
   let next;
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
+    const response = await fetch("/api/snapshot", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10000),
+    });
     if (!response.ok) throw new Error(await snapshotError(response));
     next = await response.json();
   } catch (error) {
@@ -2048,7 +2053,11 @@ async function refresh() {
     busy = false;
     $("refresh").removeAttribute("aria-busy");
   }
-  applySnapshot(next);
+  try {
+    applySnapshot(next);
+  } catch (error) {
+    showDisconnected(`Render failed: ${error.message}`);
+  }
 }
 
 // ---- Wiring ----------------------------------------------------------------
@@ -2106,6 +2115,7 @@ document.addEventListener("click", (event) => {
     anchor.getAttribute("href") !== window.location.hash
   )
     internalNavigation = true;
+  if (event.target.closest?.("#primary-nav a")) closeNav();
   if (
     $("sidebar").classList.contains("nav-open") &&
     !event.target.closest?.("#sidebar")
@@ -2132,4 +2142,9 @@ updateNavLinks();
 showActiveView();
 announceRoute();
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => {
+  if (!document.hidden) refresh();
+}, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});

@@ -129,7 +129,7 @@
     try {
       const response = await fetch(
         `/api/runs/${encodeURIComponent(id)}?after=${cursor}&limit=100`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: AbortSignal.timeout(10000) },
       );
       if (!response.ok)
         throw Error("Selected run unavailable or no longer retained");
@@ -142,6 +142,10 @@
       renderSummary(value.meta, value.incomplete);
       if (!events.length)
         timelinePlaceholder("No events retained for this run.");
+    } catch (error) {
+      if (run === generation && !events.length)
+        timelinePlaceholder(error.message);
+      throw error;
     } finally {
       if (tailing === run) tailing = -1;
     }
@@ -250,7 +254,10 @@
       ])
         if (get(id).value) query.set(key, get(id).value);
       if (older && before) query.set("before", before);
-      const response = await fetch(`/api/runs?${query}`, { cache: "no-store" });
+      const response = await fetch(`/api/runs?${query}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(10000),
+      });
       if (!response.ok) throw Error("Run history unavailable; check filters");
       const value = await response.json();
       if (startKey !== filterKey) return;
@@ -340,16 +347,16 @@
   get("run-copy").addEventListener("click", () => {
     const text = events.map(copyLine).join("\n");
     if (!navigator.clipboard) {
-      setText("runs-status", "Copy unavailable; select timeline text");
+      setText("run-copy-status", "Copy unavailable; select timeline text");
       return;
     }
     navigator.clipboard
       .writeText(text)
       .then(() => {
-        setText("runs-status", "Copied sanitized metadata excerpt");
+        setText("run-copy-status", "Copied sanitized metadata excerpt");
       })
       .catch(() => {
-        setText("runs-status", "Copy unavailable; select timeline text");
+        setText("run-copy-status", "Copy unavailable; select timeline text");
       });
   });
   window.addEventListener("crewplane-route", (event) =>
@@ -357,6 +364,9 @@
   );
   syncRoute(window.crewplane.route);
   setInterval(() => {
-    if (viewActive) refresh();
+    if (viewActive && !document.hidden) refresh();
   }, 2500);
+  document.addEventListener("visibilitychange", () => {
+    if (viewActive && !document.hidden) refresh();
+  });
 })();

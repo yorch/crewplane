@@ -2,6 +2,24 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config, State } from "../../contracts.ts";
 
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === "object" && !Array.isArray(v);
+// Persisted files are untrusted shapes: normalize the fields the projection indexes.
+export function normalizeState(v: unknown): State | null {
+  if (!isObject(v)) return null;
+  return {
+    ...v,
+    held: Array.isArray(v.held) ? v.held : [],
+    records: isObject(v.records) ? v.records : {},
+  } as unknown as State;
+}
+export function normalizeConfig(v: unknown): Config | null {
+  if (!isObject(v)) return null;
+  return {
+    ...v,
+    lanes: isObject(v.lanes) ? v.lanes : {},
+  } as unknown as Config;
+}
 const count = (n: number | undefined) =>
   Number.isSafeInteger(n) && (n ?? -1) >= 0 ? n : null;
 
@@ -99,7 +117,7 @@ export function projectHeadless(
       )[0];
       const enabled = config?.lanes[lane]?.enabled ?? false;
       const held =
-        value?.instanceHeld === true || (value?.held.includes(lane) ?? false);
+        value?.instanceHeld === true || (value?.held?.includes(lane) ?? false);
       const processAlive = r?.pid ? alive(r.pid) : null;
       const runs = records
         .flatMap((r) => r.runs)
@@ -208,8 +226,8 @@ export async function readHeadless(store: string, knownAgents: string[] = []) {
       read<State>("state.json"),
     ]);
     return projectHeadless(
-      config,
-      state,
+      normalizeConfig(config),
+      normalizeState(state),
       Date.now(),
       (pid) => {
         try {
