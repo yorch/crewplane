@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/yorch/crewplane/compare/v0.6.0...v0.6.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* multi-aspect review fixes (bugs, security, UX, CI) ([#16](https://github.com/yorch/crewplane/issues/16)) ([0fdca82](https://github.com/yorch/crewplane/commit/0fdca82a32bc0761f1f2d4f4ce76225a47716de9))
+* **security:** give harness children an allowlisted environment ([#18](https://github.com/yorch/crewplane/issues/18)) ([04ffa99](https://github.com/yorch/crewplane/commit/04ffa999801f4b67f362a9467e25e63840d64d50))
+
 ## [0.6.0](https://github.com/yorch/crewplane/compare/v0.5.1...v0.6.0) (2026-11-10)
 
 
