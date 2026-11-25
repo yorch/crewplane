@@ -60,6 +60,7 @@ A successful `updated` outcome reports `integrity`: `"signed"` (with `signingKey
 | `CREWPLANE_UPDATE_DOWNLOAD_TIMEOUT_MS` | Timeout for the asset download (default 300000)                                                                                |
 | `CREWPLANE_UPDATE_MAX_BYTES`           | Streamed asset download limit (default 256 MiB; metadata is capped at 1 MiB)                                                   |
 | `CREWPLANE_RELEASE_BUILD=1`            | Treat this binary as a release build (used by acceptance tests)                                                                |
+| `CREWPLANE_STATE_DIR`                  | Absolute base for the private control directory (see "Control directory"); default `$XDG_STATE_HOME` or `~/.local/state`       |
 | `GITHUB_TOKEN` / `GH_TOKEN`            | Optional; sent only to `https://api.github.com` for explicit release lookups                                                   |
 
 The update cache records `target`, `lastAttemptAt`, `latest`, `updatedAt` and the last `error`. A signed release is not a freshness guarantee: someone with release write access can still point `latest` at an older, validly signed release, and signatures do not expire (see docs/RELEASING.md, trust model). Until a release key is configured, checksums come from the same release as the binary: verification proves transport integrity, not publisher identity, and assumes the GitHub release account and storage are not compromised. Once a key is configured, a release must carry a valid signature from a key compiled into the running binary, so replacing release assets is no longer enough to ship a binary to auto-updating machines. Notarization is still not done.
@@ -68,7 +69,39 @@ The update cache records `target`, `lastAttemptAt`, `latest`, `updatedAt` and th
 
 Run `crewplane --project /path/to/repo init` in a non-bare Git project. This creates a `crewplane.json` policy if absent, a task directory and private shared file store. It adds private runtime directories to Git's local exclude file. Existing instructions and configuration are preserved. Commit policy and task cards; never commit runtime state.
 
-Linked worktrees discover the same primary project and store through Git. `CREWPLANE_COORD_DIR` optionally selects an absolute shared private store. Repository identity and the Crewplane namespace are checked before use; Relay state is never implicitly adopted.
+Linked worktrees discover the same primary project and store through Git. `CREWPLANE_COORD_DIR` optionally selects an absolute shared board store. Repository identity and the Crewplane namespace are checked before use; Relay state is never implicitly adopted.
+
+### Control directory
+
+Two kinds of state are kept apart:
+
+- The **board** (tasks, messages, assignments, claims, evidence, operational traces, monitor output) stays in the project store, `<primary>/.crewplane-state` or `CREWPLANE_COORD_DIR`. Agents read and write it through `crewplane agents`; it is the only location supervised children are told about.
+- The **control plane** lives in a private per-user directory outside the project: `<base>/crewplane/projects/<key>`, where `<base>` is `$CREWPLANE_STATE_DIR` (must be absolute, otherwise the command fails), else an absolute `$XDG_STATE_HOME`, else `~/.local/state`, and `<key>` is the first 24 hex digits of the SHA-256 of the canonical (symlink-resolved) primary root, so every linked worktree and symlinked path of one project agrees. It holds `config.json` (including `allowedTasks` and lane enablement), `state.json`, `desired.json`, the `commands/` queue, supervisor and watchdog leases, run logs, native session files and the watchdog's own state and notices. `crewplane doctor` prints the exact `controlDirectory`.
+
+The directory is created with mode 0700 and verified on every use: it must be a real directory (not a symlink), owned by the current user and not group- or world-writable, including its `crewplane` and `projects` parents; otherwise the command fails with `Unsafe control directory`. The supervisor, `configure`, control verbs, the dashboard's control endpoint and the watchdog write only here. Children keep `CREWPLANE_COORD_DIR=<store>`; the control directory is never placed in a child's environment. A child running `crewplane agents ...` derives the same directory from the project root (forwarding `HOME`, `XDG_STATE_HOME` and, if you set it, `CREWPLANE_STATE_DIR`) purely to read run state for its safety guards (`claim`/`release` refuse while a native record is running); it never writes there, and a sandbox, not Crewplane, is what would make that read-only.
+
+**This is defense in depth, not a sandbox.** Without an operating-system sandbox, an agent running as the same user can still read or write any file that user can reach, including this directory. The relocation protects against harnesses that enforce directory-scoped writes (for example Codex workspace-write, which is handed the project root, or Claude `acceptEdits`) and against prompt-injected accidental writes: a forged `commands/*.json` or `config.json` in the project store no longer reaches the supervisor, and the supervisor no longer hot-reloads `allowedTasks` or lane enablement from a location an agent can edit.
+
+#### Migrating from an older release
+
+Releases before this change kept the control plane in `<store>/supervisor` (and the watchdog in `<store>/watchdog`). While `<store>/supervisor` exists, every project command refuses with one stable line and exit code 1:
+
+```text
+crewplane: Legacy supervisor state detected in the project store; run `crewplane migrate` before any other command (see docs/USAGE.md "Control directory")
+```
+
+Only commands that never touch supervisor state are exempt: `--help`, `-h`, `help`, `--version`, `-v`, `update`, `init` (policy and board directories only), `migrate` itself and `pin` (which checks both layouts for a running supervisor before editing policy).
+
+```sh
+crewplane migrate --dry-run   # validate and report; changes nothing
+crewplane migrate
+```
+
+`migrate` prints a JSON summary (`status`: `migrated`, `dry-run` or `nothing-to-migrate`, plus `from`, `to`, `method`, `files`, `bytes`, `watchdog`, `quarantinedCommands`, `leftover`). It refuses, changing nothing, while a supervisor lease is held by a live PID, state records a live supervisor PID, a fresh heartbeat (within 60 seconds) or a live child process, or a watchdog lease is live; when the destination already has content; and when the old directory is a symlink, is owned by another user or holds anything other than regular files and directories. It never deletes lease files: a dead supervisor's `watcher.lock` is moved intact and recovered by the normal start path. The move is a rename when both locations share a filesystem. Otherwise it copies into a staging directory, verifies every file by size and SHA-256, fsyncs, publishes atomically and then retires the old directory, so two populated copies never remain; a delete failure after publication leaves an inert, named leftover reported in `leftover`. Rerunning it is harmless.
+
+Pending files in the old `commands/` directory were writable by agents and cannot be authenticated, so they are parked in `quarantined-commands/` inside the control directory (counted in `quarantinedCommands`) rather than re-armed; re-issue any control you still want. The migrated `config.json` is also trusted as written: if you suspect tampering, review it with `crewplane doctor` and re-run `crewplane configure --file PATH` before starting.
+
+While an older-release supervisor is still live, the halting verbs stay usable so live work can always be stopped: `status`, `stop`, `pause` and `cancel` operate on the old directory with a warning (an older supervisor reads commands there). Every other verb (`resume`, `resolve`, `retry`, `nudge`, `rollout`, `start`, `configure`) keeps refusing. Stop the old supervisor, wait for `running:false`, then run `crewplane migrate`. The same halting verbs operate on the new directory, with a warning, if an unexpected legacy directory appears next to a live new supervisor; inspect it and run `migrate` or remove it once stale.
 
 ```json
 {
@@ -299,7 +332,7 @@ Retention only covers releases replaced by a binary that already has this featur
 
 Retention is also fail-closed. If the running release cannot be retained (unwritable data directory, full disk, root-owned `XDG_DATA_HOME`), the swap is refused rather than silently breaking a pin; the reason lands in the update cache, `crewplane doctor` reports it, and `CREWPLANE_RELEASES_DIR` is the escape hatch. Each retained release costs one binary on disk and nothing prunes them yet.
 
-`crewplane update` only moves forward to the latest release and never downgrades, so it cannot satisfy a pin by itself: a newer binary in an older-pinned project dispatches to the retained release, and in the newer-pin direction `update` may overshoot the required version entirely. Under a mismatch that cannot dispatch — `pin` itself, a second hop for the same version, failed verification, no usable `execve`, unusable project state, or a store owned by a live newer supervisor — the operator verbs `stop`, `pause`, `resume`, `cancel`, `resolve` and `pin` still run so live work can always be halted, a decision pause can be answered and a stale pin can be repointed; every other project command stays blocked. Queued verbs are interpreted by the release that owns the live supervisor, so the CLI warns when that release differs from the one you are running: a release that does not know a verb ignores it silently. Supervisors record their release in the supervisor state (`supervisorVersion`); a supervisor old enough to predate that field cannot be named, and the CLI says so instead of guessing. Prefer the pinned release's binary for any decision the running release may not understand. Switching a project between releases is not field-neutral: an older release ignores lane settings it does not know, such as cost caps, MCP/tool allowlists or opencode automation, so re-run `crewplane doctor` and `crewplane configure` after the switch and treat the pin as the validated capability set.
+`crewplane update` only moves forward to the latest release and never downgrades, so it cannot satisfy a pin by itself: a newer binary in an older-pinned project dispatches to the retained release, and in the newer-pin direction `update` may overshoot the required version entirely. Under a mismatch that cannot dispatch — `pin` itself, a second hop for the same version, failed verification, no usable `execve`, unusable project state, or a store owned by a live newer supervisor — the operator verbs `stop`, `pause`, `resume`, `cancel`, `resolve` and `pin` still run so live work can always be halted, a decision pause can be answered and a stale pin can be repointed; every other project command stays blocked. The migration gate (see "Control directory") applies on top of this: under a mismatch these verbs still need no legacy `<store>/supervisor` directory, except that `stop`, `pause` and `cancel` keep halting a live older-release supervisor. Queued verbs are interpreted by the release that owns the live supervisor, so the CLI warns when that release differs from the one you are running: a release that does not know a verb ignores it silently. Supervisors record their release in the supervisor state (`supervisorVersion`); a supervisor old enough to predate that field cannot be named, and the CLI says so instead of guessing. Prefer the pinned release's binary for any decision the running release may not understand. Switching a project between releases is not field-neutral: an older release ignores lane settings it does not know, such as cost caps, MCP/tool allowlists or opencode automation, so re-run `crewplane doctor` and `crewplane configure` after the switch and treat the pin as the validated capability set.
 
 ## Upgrading a pinned project
 
@@ -325,7 +358,7 @@ Keep engineering instructions, lane guidance and task cards in the project. A su
 
 ### Control plane semantics
 
-Operator controls are queued as private command files and applied only by the supervisor loop. Every command records exactly one outcome (`applied`, `noop`, `refused`, `stale` or `invalid`) in `state.controlLog` with a monotonic `seq`; `--wait N` reports the outcome and exits 0 for applied/noop, 2 for refused/invalid and 3 for stale.
+Operator controls are queued as private command files in the control directory and applied only by the supervisor loop. Every command records exactly one outcome (`applied`, `noop`, `refused`, `stale` or `invalid`) in `state.controlLog` with a monotonic `seq`; `--wait N` reports the outcome and exits 0 for applied/noop, 2 for refused/invalid and 3 for stale.
 
 - `pause --lane ID` holds one lane; `pause --all true` holds the whole instance without draining or stopping it. `resume` releases only the requested hold and clears operator pauses, never failures or decisions.
 - `cancel --lane ID --run RUN_ID` or `cancel --all true` terminates live runs with SIGTERM, then SIGKILL after the cleanup grace. Cancellation never resets budgets and always leaves a paused failure when cleanup is unverified.
