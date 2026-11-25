@@ -35,6 +35,10 @@ export function controlStateBase(
   }
   const xdg = env.XDG_STATE_HOME;
   if (xdg !== undefined && xdg !== "" && isAbsolute(xdg)) return xdg;
+  if (!isAbsolute(home))
+    throw new Error(
+      "HOME must be an absolute path to locate the control directory",
+    );
   return join(home, ".local", "state");
 }
 
@@ -61,7 +65,11 @@ export const legacySupervisorDirectory = (store: string) =>
 export const legacyWatchdogDirectory = (store: string) =>
   join(store, "watchdog");
 
-/** Directories this module owns: `<base>/crewplane/projects/<key>` is checked whole. */
+/**
+ * Directories this module owns: `<base>/crewplane/projects/<key>` is checked
+ * whole. Ancestors above `crewplane/` (for example `~/.local/state`) belong to
+ * the user and are not checked.
+ */
 function chain(path: string): string[] {
   const parent = dirname(path);
   const grand = dirname(parent);
@@ -87,7 +95,7 @@ function problem(path: string): string | "absent" | null {
     );
   if (info.uid !== uid) return "is not owned by the current user";
   if ((info.mode & 0o022) !== 0) return "is group or world writable";
-  if ((info.mode & 0o004) !== 0) return "is readable by other users";
+  if ((info.mode & 0o007) !== 0) return "is accessible by other users";
   return null;
 }
 
@@ -157,6 +165,7 @@ export function checkBinding(
   store: string,
   control: string,
   identity: BindingIdentity,
+  options: { narrowing?: boolean } = {},
 ): void {
   const marker = readBinding(markerPath(store));
   const present = existsSync(control);
@@ -173,7 +182,9 @@ export function checkBinding(
       throw new Error(
         `Control directory ${printable(control)} is bound to a different project identity (${printable(String(ident.primaryRoot))}); the repository was moved or its identity changed`,
       );
-    if (!marker || marker.id !== ident.bindingId)
+    // Narrowing into a directory bound to this very project is safe even when
+    // the store marker was lost or rewritten; widening and start are not.
+    if (!options.narrowing && (!marker || marker.id !== ident.bindingId))
       throw new Error(
         `Control directory ${printable(control)} belongs to a different checkout of this path (the project store has no matching control-binding.json); refusing to inherit its configuration. If this is intended, move that directory aside`,
       );
@@ -187,8 +198,11 @@ export async function bindControl(
   store: string,
   control: string,
   identity: BindingIdentity,
+  options: { narrowing?: boolean } = {},
 ): Promise<void> {
-  checkBinding(store, control, identity);
+  checkBinding(store, control, identity, options);
+  // A narrowing write into an already bound directory records nothing.
+  if (options.narrowing && readBinding(identityPath(control))) return;
   let marker = readBinding(markerPath(store));
   if (!marker) {
     marker = {
@@ -214,4 +228,39 @@ export async function bindControl(
         : { gitCommon: identity.gitCommon }),
     });
   checkBinding(store, control, identity);
+}
+
+/**
+ * Rewrite the store marker from the control directory's identity, for an
+ * operator who lost or damaged control-binding.json. Only when the identity
+ * names this very project.
+ */
+export async function rebindControl(
+  store: string,
+  control: string,
+  identity: BindingIdentity,
+): Promise<"rebound" | "unchanged"> {
+  const ident = readBinding(identityPath(control));
+  if (!ident)
+    throw new Error(
+      `${printable(control)} has no identity.json to rebind from; nothing to do`,
+    );
+  if (
+    ident.primaryRoot !== identity.primaryRoot ||
+    (identity.gitCommon !== undefined &&
+      ident.gitCommon !== undefined &&
+      ident.gitCommon !== identity.gitCommon)
+  )
+    throw new Error(
+      "The control directory is bound to a different project identity; refusing to rebind",
+    );
+  const marker = readBinding(markerPath(store));
+  if (marker && marker.id === ident.bindingId) return "unchanged";
+  await publishJson(markerPath(store), {
+    version: 1,
+    id: ident.bindingId,
+    key: basename(control),
+    controlDirectory: control,
+  });
+  return "rebound";
 }

@@ -24,6 +24,7 @@ import {
   controlDirectory,
   ensureControlDirectory,
   legacySupervisorDirectory,
+  rebindControl,
 } from "./control.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
@@ -458,7 +459,9 @@ async function main() {
             );
       if (!["agents", "task", "evidence", "monitor"].includes(command)) {
         try {
-          checkBinding(ctx.store, controlDir, identity);
+          checkBinding(ctx.store, controlDir, identity, {
+            narrowing: ["stop", "pause", "cancel"].includes(command),
+          });
         } catch (error) {
           // Read-only status may report the mismatch; a verb that would queue
           // into a directory no supervisor reads must not pretend to halt.
@@ -522,28 +525,41 @@ async function main() {
   if (command === "migrate") {
     let dryRun = false,
       discardLegacy = false,
-      acceptConfig = false;
+      rebind = false,
+      acceptConfig: string | undefined;
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
       if (arg === "--dry-run" && !dryRun) dryRun = true;
       else if (arg === "--discard-legacy" && !discardLegacy)
         discardLegacy = true;
+      else if (arg === "--rebind" && !rebind) rebind = true;
       else if (
         arg === "--accept-config" &&
-        rest[i + 1] === "true" &&
-        !acceptConfig
+        /^[a-f0-9]{64}$/.test(rest[i + 1] ?? "") &&
+        acceptConfig === undefined
       ) {
-        acceptConfig = true;
+        acceptConfig = rest[i + 1];
         i++;
       } else
         throw new Error(
           `Invalid command options: unexpected ${printablePath(String(arg))}`,
         );
     }
-    if (discardLegacy && acceptConfig)
+    if (
+      [discardLegacy, rebind, acceptConfig !== undefined].filter(Boolean)
+        .length > 1
+    )
       throw new Error(
-        "--discard-legacy and --accept-config are mutually exclusive",
+        "--discard-legacy, --rebind and --accept-config are mutually exclusive",
       );
+    if (rebind) {
+      if (dryRun) throw new Error("--rebind has no dry run");
+      return output({
+        version: 1,
+        status: await rebindControl(ctx.store, controlDir, identity),
+        to: controlDir,
+      });
+    }
     const report = await migrateControl({
       store: ctx.store,
       control: controlDir,
@@ -557,7 +573,7 @@ async function main() {
       console.error(`crewplane: ignoring legacy liveness claim: ${claim}`);
     if (report.config && dryRun)
       console.error(
-        `crewplane: legacy configuration to review:\n${describeConfig(report.config)}`,
+        `crewplane: legacy configuration to review:\n${describeConfig(report.config, { root, store: ctx.store })}\ncrewplane: staged snapshot digest ${report.digest}; adopt exactly this with \`crewplane migrate --accept-config ${report.digest}\``,
       );
     return output(report);
   }
@@ -1064,20 +1080,43 @@ async function main() {
       throw new Error("Unknown configured agent");
     if (directory === controlDir) {
       await ensureControlDirectory(directory);
-      await bindControl(ctx.store, directory, identity);
+      await bindControl(ctx.store, directory, identity, {
+        narrowing: ["stop", "pause", "cancel"].includes(command),
+      });
     }
     const id = randomUUID();
     // Narrowing verbs are safe to apply late, so ambiguous legacy liveness
-    // queues them in every candidate directory.
-    for (const target of [
+    // queues them in every candidate directory. Each copy is bound to THAT
+    // directory's own supervisor generation, never the primary's.
+    let anyRunning = state?.running === true;
+    const targets = [
       directory,
       ...(["pause", "stop", "cancel"].includes(command) ? also : []),
-    ]) {
+    ];
+    for (const target of targets) {
+      let queued = value;
+      if (target !== directory) {
+        const own = (await optional(join(target, "state.json")).catch(
+          () => null,
+        )) as { generation?: string; running?: boolean } | null;
+        const config = (await optional(join(target, "config.json")).catch(
+          () => null,
+        )) as { lanes?: Record<string, unknown> } | null;
+        if (value.lane && config?.lanes && !(value.lane in config.lanes)) {
+          console.error(
+            `crewplane: ${printablePath(target)} does not configure that agent; not queued there`,
+          );
+          continue;
+        }
+        anyRunning ||= own?.running === true;
+        queued = control({ ...value, generation: own?.generation });
+      }
       if (target === controlDir) await ensureControlDirectory(target);
       await mkdir(join(target, "commands"), { recursive: true, mode: 0o700 });
-      await publishJson(join(target, "commands", `${id}.json`), value);
+      await publishJson(join(target, "commands", `${id}.json`), queued);
     }
-    if (!state?.running)
+    anyRunning ||= isLive(supervisorLiveness(directory));
+    if (!anyRunning)
       console.error(
         command === "pause"
           ? "crewplane: no supervisor is running; the pause applies when a supervisor starts"

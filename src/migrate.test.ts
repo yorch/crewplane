@@ -1,8 +1,11 @@
+import { spawn } from "node:child_process";
 import {
-  chmodSync,
+  closeSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -10,23 +13,28 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
-import { copyFile, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { controlDirectory } from "./control.ts";
 import {
+  describeConfig,
   legacyRefusal,
   type MigrateOptions,
   migrateControl,
   type Owner,
   processOwner,
+  registeredSupervisor,
   resolveControlTarget,
 } from "./migrate.ts";
+import { cacheDirectory } from "./update.ts";
 
 const scratch: string[] = [];
 const deadPid = 2 ** 22 + 12345;
+const trusted = (pid: number) => pid === process.pid;
+const realSupervisor = registeredSupervisor;
 const uuid = (n: number) =>
   `${String(n).padStart(8, "0")}-1111-4111-8111-111111111111`;
 const validState = (extra: Record<string, unknown> = {}) => ({
@@ -89,16 +97,44 @@ function project() {
         }),
       );
   };
-  const migrate = (extra: Partial<MigrateOptions> = {}) =>
-    migrateControl({
-      store,
-      control,
-      root,
-      acceptConfig: true,
-      identity: { primaryRoot: root },
-      ...extra,
-    });
-  return { base, root, store, control, legacy, seed, write, migrate, config };
+  const options = (extra: Partial<MigrateOptions> = {}): MigrateOptions => ({
+    store,
+    control,
+    root,
+    identity: { primaryRoot: root },
+    isSupervisor: trusted,
+    ...extra,
+  });
+  /** Dry-run first, then adopt exactly the reviewed digest unless told otherwise. */
+  const migrate = async (extra: Partial<MigrateOptions> = {}) => {
+    const full = options(extra);
+    if (
+      !full.dryRun &&
+      !full.discardLegacy &&
+      full.acceptConfig === undefined
+    ) {
+      const reviewed = await migrateControl({
+        ...full,
+        dryRun: true,
+        ...(full.afterPreflight ? { afterPreflight: async () => {} } : {}),
+      });
+      full.acceptConfig = reviewed.digest ?? undefined;
+    }
+    return migrateControl(full);
+  };
+  return {
+    base,
+    root,
+    store,
+    control,
+    legacy,
+    binary,
+    seed,
+    write,
+    migrate,
+    config,
+    options,
+  };
 }
 afterEach(() => {
   for (const path of scratch.splice(0))
@@ -120,7 +156,7 @@ const foreign =
   (pid) =>
     pids.includes(pid) ? "foreign" : processOwner(pid);
 
-it("moves the legacy directory by rename, privatizes it, binds it and is idempotent", async () => {
+it("stages fresh private copies, publishes them, binds the directory and is idempotent", async () => {
   const p = project();
   p.seed();
   const report = await p.migrate();
@@ -128,63 +164,113 @@ it("moves the legacy directory by rename, privatizes it, binds it and is idempot
     status: "migrated",
     from: p.legacy,
     to: p.control,
-    method: "rename",
+    method: "staged-copy",
     leftover: null,
     configAccepted: true,
+    lateFilesLeftBehind: [],
   });
+  expect(report.digest).toMatch(/^[a-f0-9]{64}$/);
   expect(existsSync(p.legacy)).toBe(false);
   expect(readFileSync(join(p.control, "desired.json"), "utf8")).toBe(
     '{"desiredRunning":false}',
   );
-  // Whatever the old modes were, everything migrated is private.
   for (const entry of tree(p.control))
     expect(mode(join(p.control, entry)) & 0o077, entry).toBe(0);
   expect(mode(p.control)).toBe(0o700);
   expect(existsSync(join(p.control, "identity.json"))).toBe(true);
   expect(existsSync(join(p.store, "control-binding.json"))).toBe(true);
+  expect(
+    readdirSync(join(p.control, "..")).filter((e) => e.includes("staging")),
+  ).toEqual([]);
   expect((await p.migrate()).status).toBe("nothing-to-migrate");
 });
 
-it("dry-run reports the plan and the configuration and changes nothing", async () => {
+it("dry-run prints the complete configuration and a digest and changes nothing", async () => {
   const p = project();
   p.seed();
   const before = tree(p.legacy);
-  const report = await p.migrate({ dryRun: true, acceptConfig: false });
-  expect(report).toMatchObject({
-    status: "dry-run",
-    method: null,
-    configAccepted: false,
-  });
+  const report = await p.migrate({ dryRun: true });
+  expect(report).toMatchObject({ status: "dry-run", configAccepted: false });
   expect(report.config).toMatchObject({
     allowedTasks: ["T-1"],
-    lanes: { builder: { enabled: true, harness: "codex" } },
+    lanes: { builder: { enabled: true } },
   });
+  expect(report.digest).toMatch(/^[a-f0-9]{64}$/);
   expect(tree(p.legacy)).toEqual(before);
   expect(existsSync(join(p.base, "state"))).toBe(false);
+  // The digest is stable for unchanged content.
+  expect((await p.migrate({ dryRun: true })).digest).toBe(report.digest);
 });
 
-it("shows a planted configuration and adopts it only with explicit acceptance", async () => {
+it("adopts a configuration only when its reviewed digest matches the staged snapshot", async () => {
   const p = project();
   p.seed();
+  const reviewed = await p.migrate({ dryRun: true });
+  const none = await p
+    .migrate({ acceptConfig: "" })
+    .catch((e: Error) => e.message);
+  expect(none).toContain(reviewed.digest);
+  expect(none).toContain("--accept-config");
+  const wrong = await p
+    .migrate({ acceptConfig: "0".repeat(64) })
+    .catch((e: Error) => e.message);
+  expect(wrong).toContain("does not match");
+  expect(existsSync(p.control)).toBe(false);
+  expect(existsSync(join(p.legacy, "config.json"))).toBe(true);
+  expect(
+    readdirSync(join(p.control, "..")).filter((e) => e.includes("staging")),
+  ).toEqual([]);
+  expect(
+    (await p.migrate({ acceptConfig: reviewed.digest as string })).status,
+  ).toBe("migrated");
+});
+
+it("shows every effective binary, passEnv and Claude setting of a planted configuration, flagged and escaped", async () => {
+  const p = project();
+  p.seed();
+  const evil = join(p.store, "evidence-evil.sh");
+  writeFileSync(evil, "#!/bin/sh\n", { mode: 0o755 });
+  const bidi = join(p.base, "codex‮txt");
+  writeFileSync(bidi, "#!/bin/sh\n", { mode: 0o755 });
   p.write(
     join(p.legacy, "config.json"),
     JSON.stringify(
       p.config({
-        allowedTasks: ["EVIL-1"],
-        lanes: { attacker: { enabled: true } },
+        binary: bidi,
+        binaries: { claude: evil },
+        lanes: {
+          builder: {
+            enabled: true,
+            harness: "claude",
+            model: "opus",
+            claudePermissionMode: "acceptEdits",
+            claudeMcp: "inherit",
+            claudeSettingSources: ["user", "project", "local"],
+            passEnv: ["GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY"],
+            instructionsPath: "GUIDE.md",
+          },
+        },
       }),
     ),
   );
-  const refusal = await p
-    .migrate({ acceptConfig: false })
-    .catch((error: Error) => error.message);
-  expect(refusal).toContain("--accept-config true");
-  expect(refusal).toContain("EVIL-1");
-  expect(refusal).toContain("attacker");
-  expect(refusal).toContain(join(p.base, "harness"));
-  expect(existsSync(join(p.legacy, "config.json"))).toBe(true);
-  expect(existsSync(p.control)).toBe(false);
-  expect((await p.migrate()).status).toBe("migrated");
+  const dry = await p.migrate({ dryRun: true });
+  const text = describeConfig(dry.config as never, {
+    root: p.root,
+    store: p.store,
+  });
+  expect(text).toContain(evil);
+  expect(text).toContain("builder (claude, enabled)");
+  expect(text).toMatch(/evidence-evil\.sh\s+\[WARNING: inside the project/);
+  expect(text).toContain("GITHUB_TOKEN");
+  expect(text).toContain("AWS_SECRET_ACCESS_KEY");
+  expect(text).toContain("acceptEdits");
+  expect(text).toContain('"claudeMcp": "inherit"');
+  expect(text).toContain("GUIDE.md");
+  expect(text).toMatch(/GUIDE\.md\s+\[WARNING: inside the project/);
+  expect(text).toContain("maxParallel");
+  // Bidi controls are shown as escapes, never rendered.
+  expect(text).not.toContain("‮");
+  expect(text).toContain("\\u{202e}");
 });
 
 it("refuses an invalid, foreign-root or structurally broken legacy payload", async () => {
@@ -215,6 +301,42 @@ it("refuses an invalid, foreign-root or structurally broken legacy payload", asy
         "state.json failed structural validation",
       ],
       [
+        "invalid supervisor pid",
+        (p) =>
+          p.write(
+            join(p.legacy, "state.json"),
+            JSON.stringify(validState({ pid: -4 })),
+          ),
+        "invalid supervisor pid",
+      ],
+      [
+        "invalid record pid",
+        (p) =>
+          p.write(
+            join(p.legacy, "state.json"),
+            JSON.stringify(
+              validState({
+                records: {
+                  a: {
+                    key: "a",
+                    lane: "builder",
+                    task: null,
+                    cwd: p.root,
+                    status: "idle",
+                    processGroupId: 0,
+                    seen: [],
+                    runs: [],
+                    noProgress: 0,
+                    inputTokens: 0,
+                    outputTokens: 0,
+                  },
+                },
+              }),
+            ),
+          ),
+        "invalid processGroupId",
+      ],
+      [
         "invalid desired",
         (p) => p.write(join(p.legacy, "desired.json"), '{"desiredRunning":1}'),
         "desired.json failed structural validation",
@@ -224,13 +346,16 @@ it("refuses an invalid, foreign-root or structurally broken legacy payload", asy
     const p = project();
     p.seed();
     corrupt(p);
-    await expect(p.migrate(), label).rejects.toThrow(message);
+    await expect(
+      p.migrate({ acceptConfig: "0".repeat(64) }),
+      label,
+    ).rejects.toThrow(message);
     expect(existsSync(p.control), label).toBe(false);
     expect(existsSync(p.legacy), label).toBe(true);
   }
 });
 
-it("adopts crash-recovery state structurally and keeps its dead lease file", async () => {
+it("adopts crash-recovery state, lists its processes and drops re-armed ids from the command log", async () => {
   const p = project();
   const records = {
     "builder:T-1": {
@@ -248,31 +373,53 @@ it("adopts crash-recovery state structurally and keeps its dead lease file", asy
       outputTokens: 0,
     },
   };
-  p.seed(validState({ running: true, records }));
+  p.seed(
+    validState({
+      running: true,
+      records,
+      // A forged log would make the supervisor skip the re-armed pause.
+      commands: [`${uuid(1)}.json`, "other.json"],
+    }),
+  );
   p.write(
     join(p.legacy, "watcher.lock"),
     JSON.stringify({ pid: deadPid, token: "dead" }),
   );
-  await p.migrate();
+  const report = await p.migrate();
+  expect(report.adoptedProcesses).toEqual([
+    {
+      record: "builder:T-1",
+      pid: deadPid,
+      processGroupId: deadPid,
+      alive: false,
+    },
+  ]);
   const adopted = JSON.parse(
     readFileSync(join(p.control, "state.json"), "utf8"),
   );
   expect(adopted.records["builder:T-1"].processGroupId).toBe(deadPid);
+  expect(adopted.commands).toEqual(["other.json"]);
   expect(readFileSync(join(p.control, "watcher.lock"), "utf8")).toContain(
     "dead",
   );
 });
 
-it("re-arms narrowing commands and quarantines widening, hostile or undecodable ones", async () => {
+it("re-arms only a normalized narrowing command and quarantines everything else", async () => {
   const p = project();
   p.seed(validState(), false);
   const at = new Date().toISOString();
   const put = (n: number, value: unknown) =>
     p.write(join(p.legacy, `commands/${uuid(n)}.json`), JSON.stringify(value));
-  put(1, { action: "pause", all: true, at });
+  put(1, {
+    action: "pause",
+    all: true,
+    issuer: "root",
+    generation: "forged-generation",
+    at: "2099-01-01T00:00:00.000Z",
+  });
   put(2, { action: "stop", at });
   put(3, { action: "cancel", all: true, at });
-  put(4, { action: "resume", all: true, at });
+  put(4, { action: "resume", all: true, at: "2099-01-01T00:00:00.000Z" });
   put(5, { action: "retry", lane: "builder", at });
   put(6, {
     action: "resolve",
@@ -287,16 +434,9 @@ it("re-arms narrowing commands and quarantines widening, hostile or undecodable 
   put(9, { action: "stop", cancelActive: true, at });
   put(10, { action: "delete-everything" });
   p.write(join(p.legacy, "commands/not-a-uuid.json"), "{}");
-  // A previous interrupted attempt left quarantine content behind.
   p.write(join(p.legacy, `quarantined-commands/${uuid(5)}.json`), "old");
-  const dry = await p.migrate({ dryRun: true });
-  expect(dry.rearmedCommands.map((c) => c.action).sort()).toEqual([
-    "cancel",
-    "pause",
-    "stop",
-  ]);
   const report = await p.migrate();
-  expect(report.rearmedCommands.map((c) => `${c.action}`).sort()).toEqual([
+  expect(report.rearmedCommands.map((c) => c.action).sort()).toEqual([
     "cancel",
     "pause",
     "stop",
@@ -321,11 +461,111 @@ it("re-arms narrowing commands and quarantines widening, hostile or undecodable 
   const parked = readdirSync(join(p.control, "quarantined-commands"));
   expect(parked).toHaveLength(9);
   expect(parked).toContain(`${uuid(5)}.json.dup1`);
+  const pause = JSON.parse(
+    readFileSync(join(p.control, "commands", `${uuid(1)}.json`), "utf8"),
+  );
+  expect(pause).toMatchObject({
+    action: "pause",
+    all: true,
+    issuer: "migrate",
+  });
+  expect(pause.generation).toBeUndefined();
+  expect(Date.parse(pause.at)).toBeLessThanOrEqual(Date.now() + 1000);
+});
+
+it("never arms a widening command that arrives or is swapped after the snapshot or preflight", async () => {
+  // A resume with a future timestamp arrives before the snapshot: it is staged,
+  // classified and changes the digest, so the earlier acceptance no longer holds.
+  const early = project();
+  early.seed();
+  const reviewed = await early.migrate({ dryRun: true });
+  await expect(
+    early.migrate({
+      acceptConfig: reviewed.digest as string,
+      afterPreflight: async () => {
+        writeFileSync(
+          join(early.legacy, "commands", `${uuid(33)}.json`),
+          JSON.stringify({
+            action: "resume",
+            all: true,
+            at: "2099-01-01T00:00:00.000Z",
+          }),
+        );
+      },
+    }),
+  ).rejects.toThrow("does not match");
+  expect(existsSync(early.control)).toBe(false);
+
+  // After the snapshot nothing is published any more: the late file and the
+  // swapped config stay behind in an inert directory.
+  const late = project();
+  late.seed();
+  const evil = join(late.store, "evil.sh");
+  writeFileSync(evil, "#!/bin/sh\n", { mode: 0o755 });
+  const report = await late.migrate({
+    move: {
+      afterSnapshot: async () => {
+        writeFileSync(
+          join(late.legacy, "commands", `${uuid(34)}.json`),
+          JSON.stringify({
+            action: "resume",
+            all: true,
+            at: "2099-01-01T00:00:00.000Z",
+          }),
+        );
+        writeFileSync(
+          join(late.legacy, "config.json"),
+          JSON.stringify(late.config({ binary: evil })),
+        );
+        writeFileSync(join(late.legacy, "state.json"), "{ not json");
+      },
+    },
+  });
+  expect(report.status).toBe("migrated");
+  expect(report.lateFilesLeftBehind.sort()).toEqual([
+    `commands/${uuid(34)}.json`,
+    "config.json",
+    "state.json",
+  ]);
   expect(
-    JSON.parse(
-      readFileSync(join(p.control, "commands", `${uuid(1)}.json`), "utf8"),
-    ),
-  ).toMatchObject({ action: "pause", all: true });
+    existsSync(join(report.leftover as string, "commands", `${uuid(34)}.json`)),
+  ).toBe(true);
+  expect(readdirSync(join(late.control, "commands"))).toEqual([
+    `${uuid(1)}.json`,
+  ]);
+  expect(
+    JSON.parse(readFileSync(join(late.control, "config.json"), "utf8")).binary,
+  ).toBe(late.binary);
+  expect(() =>
+    JSON.parse(readFileSync(join(late.control, "state.json"), "utf8")),
+  ).not.toThrow();
+});
+
+it("a hard link or an open descriptor into the legacy tree cannot reach the migrated files", async () => {
+  const p = project();
+  p.seed();
+  linkSync(join(p.legacy, "config.json"), join(p.store, "config-link.json"));
+  const fd = openSync(join(p.legacy, "state.json"), "r+");
+  const configBefore = readFileSync(join(p.legacy, "config.json"), "utf8");
+  try {
+    const report = await p.migrate();
+    expect(report.hardlinkedSources).toContain("config.json");
+    // The agent keeps writing through its link and its descriptor.
+    writeFileSync(
+      join(p.store, "config-link.json"),
+      '{"allowedTasks":["*EVIL*"]}',
+    );
+    writeSync(fd, "X".repeat(40), 0);
+  } finally {
+    closeSync(fd);
+  }
+  const adopted = readFileSync(join(p.control, "config.json"), "utf8");
+  expect(JSON.parse(adopted).allowedTasks).toEqual(["T-1"]);
+  expect(JSON.parse(adopted)).toEqual(JSON.parse(configBefore));
+  expect(statSync(join(p.control, "config.json")).nlink).toBe(1);
+  expect(
+    JSON.parse(readFileSync(join(p.control, "state.json"), "utf8")).version,
+  ).toBe(2);
 });
 
 it("refuses on credible liveness but ignores forged claims, naming them", async () => {
@@ -362,7 +602,6 @@ it("refuses on credible liveness but ignores forged claims, naming them", async 
     expect(tree(p.legacy), label).toEqual(before);
     expect(existsSync(p.control), label).toBe(false);
   }
-  // Forged: a lease and supervisor owned by pid 1 (not ours), a heartbeat from 2099.
   const forged = project();
   forged.seed(
     validState({
@@ -381,6 +620,48 @@ it("refuses on credible liveness but ignores forged claims, naming them", async 
     "PID 1 is not owned by you",
   );
   expect(report.ignoredLivenessClaims.join("\n")).toContain("in the future");
+});
+
+it("does not take a same-user process for a supervisor unless it is registered or runs as one", async () => {
+  const p = project();
+  p.seed();
+  const daemon = spawn("sleep", ["30"], { stdio: "ignore" });
+  const registration = join(
+    cacheDirectory(),
+    "supervisors",
+    `${daemon.pid}.json`,
+  );
+  try {
+    // An agent plants a lease naming any long-lived process of the same user.
+    p.write(
+      join(p.legacy, "watcher.lock"),
+      JSON.stringify({ pid: daemon.pid, token: "x" }),
+    );
+    const target = resolveControlTarget(p.store, p.control, "stop");
+    expect(target.directory).toBe(p.control);
+    expect(target.also).toEqual([p.legacy]);
+    expect(target.warning).toContain("not a registered Crewplane supervisor");
+    expect(() => resolveControlTarget(p.store, p.control, "start")).toThrow(
+      legacyRefusal,
+    );
+    const dry = await p.migrate({
+      dryRun: true,
+      isSupervisor: realSupervisor,
+    });
+    expect(dry.ignoredLivenessClaims.join()).toContain("not a registered");
+    // Registered: now it is credible and blocks.
+    mkdirSync(join(registration, ".."), { recursive: true, mode: 0o700 });
+    writeFileSync(registration, "{}");
+    await expect(p.migrate({ isSupervisor: realSupervisor })).rejects.toThrow(
+      "Refusing to migrate",
+    );
+    rmSync(registration);
+    const done = await p.migrate({ isSupervisor: realSupervisor });
+    expect(done.status).toBe("migrated");
+  } finally {
+    rmSync(registration, { force: true });
+    daemon.kill();
+  }
 });
 
 it("sets a forged legacy directory aside only when nothing credible is live", async () => {
@@ -412,29 +693,66 @@ it("sets a forged legacy directory aside only when nothing credible is live", as
   expect(existsSync(real.legacy)).toBe(true);
 });
 
-it("re-checks liveness and the destination after the preflight and holds the legacy lease", async () => {
+it("holds the legacy lease and recovery.lock for the whole critical section and re-checks afterwards", async () => {
+  const held = project();
+  held.seed();
+  let seen: string[] = [];
+  await held.migrate({
+    move: {
+      afterSnapshot: async () => {
+        seen = [
+          existsSync(join(held.legacy, "watcher.lock")) ? "lease" : "",
+          existsSync(join(held.legacy, "recovery.lock")) ? "recovery" : "",
+        ];
+      },
+    },
+  });
+  expect(seen).toEqual(["lease", "recovery"]);
+  expect(existsSync(held.legacy)).toBe(false);
+  // Our guards are never part of the snapshot.
+  expect(existsSync(join(held.control, "recovery.lock"))).toBe(false);
+  expect(existsSync(join(held.control, "watcher.lock"))).toBe(false);
+
+  // A failed run removes only its own recovery lock.
+  const failed = project();
+  failed.seed();
+  await expect(
+    failed.migrate({ acceptConfig: "0".repeat(64) }),
+  ).rejects.toThrow("digest");
+  expect(existsSync(join(failed.legacy, "recovery.lock"))).toBe(false);
+  expect(existsSync(join(failed.legacy, "watcher.lock"))).toBe(false);
+
+  // Someone else's recovery lock is never touched, and blocks us.
+  const other = project();
+  other.seed();
+  other.write(join(other.legacy, "recovery.lock"), "424242");
+  await expect(
+    other.migrate({ dryRun: false, acceptConfig: "0".repeat(64) }),
+  ).rejects.toThrow("recovery.lock exists");
+  expect(readFileSync(join(other.legacy, "recovery.lock"), "utf8")).toBe(
+    "424242",
+  );
+
   const late = project();
   late.seed();
   await expect(
     late.migrate({
       afterPreflight: async () => {
-        // A supervisor of an older release comes alive between check and move.
         writeFileSync(
           join(late.legacy, "state.json"),
           JSON.stringify(validState({ running: true, pid: process.pid })),
         );
       },
     }),
-  ).rejects.toThrow("appeared during migration");
+  ).rejects.toThrow(/appeared during migration|does not match/);
   expect(existsSync(late.legacy)).toBe(true);
-  expect(existsSync(join(late.legacy, "watcher.lock"))).toBe(false);
+  expect(existsSync(join(late.legacy, "recovery.lock"))).toBe(false);
 
   const started = project();
   started.seed();
   await expect(
     started.migrate({
       afterPreflight: async () => {
-        // A new supervisor creates the destination between check and move.
         mkdirSync(started.control, { recursive: true, mode: 0o700 });
         writeFileSync(join(started.control, "state.json"), "{}", {
           mode: 0o600,
@@ -445,60 +763,22 @@ it("re-checks liveness and the destination after the preflight and holds the leg
   expect(existsSync(join(started.legacy, "state.json"))).toBe(true);
 });
 
-it("falls back to verified copy across filesystems", async () => {
-  const p = project();
-  p.seed();
-  p.write(join(p.legacy, "pi-sessions/s1.jsonl"), "line\n".repeat(1000));
-  let attempts = 0;
-  const report = await p.migrate({
-    move: {
-      rename: (async (from: string, to: string) => {
-        if (attempts++ === 0)
-          throw Object.assign(new Error("cross-device"), { code: "EXDEV" });
-        return rename(from, to);
-      }) as typeof rename,
-    },
-  });
-  expect(report.method).toBe("copy");
-  expect(report.leftover).toBeNull();
-  expect(existsSync(p.legacy)).toBe(false);
-  expect(
-    readdirSync(join(p.control, "..")).filter((e) => e.includes("migrat")),
-  ).toEqual([]);
-  expect(readFileSync(join(p.control, "pi-sessions/s1.jsonl"), "utf8")).toBe(
-    "line\n".repeat(1000),
-  );
-  expect(existsSync(join(p.control, ".migrating-to"))).toBe(false);
-  for (const entry of tree(p.control))
-    expect(mode(join(p.control, entry)) & 0o077, entry).toBe(0);
-});
-
-const crossDevice = {
-  rename: (async (from: string, to: string) => {
-    if (!String(from).includes(".migrating-"))
-      throw Object.assign(new Error("cross-device"), { code: "EXDEV" });
-    return rename(from, to);
-  }) as typeof rename,
-};
-it("cleans up and keeps the source when a copy fails verification", async () => {
+it("verifies every staged file and cleans up after a mismatch", async () => {
   const p = project();
   p.seed();
   await expect(
     p.migrate({
       move: {
-        ...crossDevice,
-        copyFile: (async (from: string, to: string) => {
-          await copyFile(from, to);
-          if (String(from).endsWith("desired.json"))
-            writeFileSync(to, "tampered");
-        }) as typeof copyFile,
+        afterStageFile: async (path) => {
+          if (path.endsWith("desired.json")) writeFileSync(path, "tampered");
+        },
       },
     }),
   ).rejects.toThrow("Verification failed");
   expect(existsSync(join(p.legacy, "state.json"))).toBe(true);
   expect(existsSync(join(p.legacy, ".migrating-to"))).toBe(false);
   expect(
-    readdirSync(join(p.control, "..")).filter((e) => e.includes("migrating")),
+    readdirSync(join(p.control, "..")).filter((e) => e.includes("staging")),
   ).toEqual([]);
   expect(existsSync(join(p.control, "state.json"))).toBe(false);
 });
@@ -506,36 +786,31 @@ it("cleans up and keeps the source when a copy fails verification", async () => 
 it("finishes retiring the source after a crash between publication and retirement", async () => {
   const p = project();
   p.seed();
-  // Only the migrating process's own lease is "dead" for the rerun.
   const dead: Owner = () => "dead";
   await expect(
     p.migrate({
       owner: dead,
       move: {
-        ...crossDevice,
         afterPublish: async () => {
           throw new Error("simulated crash");
         },
       },
     }),
   ).rejects.toThrow("simulated crash");
-  // Both are populated, exactly the window the journal exists for.
   expect(existsSync(join(p.legacy, ".migrating-to"))).toBe(true);
   expect(existsSync(join(p.control, "state.json"))).toBe(true);
   const rerun = await p.migrate({ owner: dead });
   expect(rerun.status).toBe("migrated");
-  expect(existsSync(p.legacy)).toBe(false);
+  expect(existsSync(join(p.legacy))).toBe(false);
   expect(existsSync(join(p.control, "state.json"))).toBe(true);
   expect(existsSync(join(p.control, ".migrating-to"))).toBe(false);
 
-  // A destination that differs from the journal is never trusted.
   const tampered = project();
   tampered.seed();
   await expect(
     tampered.migrate({
       owner: dead,
       move: {
-        ...crossDevice,
         afterPublish: async () => {
           throw new Error("simulated crash");
         },
@@ -547,6 +822,43 @@ it("finishes retiring the source after a crash between publication and retiremen
     "already has content",
   );
   expect(existsSync(join(tampered.legacy, "state.json"))).toBe(true);
+});
+
+it("moves the watchdog tree and resumes after a crash in its publish window", async () => {
+  const p = project();
+  p.seed();
+  p.write(join(p.store, "watchdog/latest.json"), "{}");
+  const report = await p.migrate();
+  expect(report.watchdog).toBe(true);
+  expect(existsSync(join(p.store, "watchdog"))).toBe(false);
+  expect(mode(join(p.control, "watchdog/latest.json"))).toBe(0o600);
+
+  const crashed = project();
+  crashed.seed();
+  crashed.write(join(crashed.store, "watchdog/latest.json"), "{}");
+  let calls = 0;
+  await expect(
+    crashed.migrate({
+      move: {
+        afterPublish: async () => {
+          if (++calls === 2) throw new Error("simulated crash");
+        },
+      },
+    }),
+  ).rejects.toThrow("simulated crash");
+  expect(existsSync(join(crashed.store, "watchdog/.migrating-to"))).toBe(true);
+  expect(existsSync(join(crashed.control, "watchdog/latest.json"))).toBe(true);
+  const rerun = await crashed.migrate();
+  expect(rerun.watchdog).toBe(true);
+  expect(existsSync(join(crashed.store, "watchdog"))).toBe(false);
+
+  const live = project();
+  live.seed();
+  live.write(
+    join(live.store, "watchdog/lease/owner.json"),
+    JSON.stringify({ version: 1, pid: process.pid, identity: "x" }),
+  );
+  await expect(live.migrate()).rejects.toThrow("watchdog lease");
 });
 
 it("refuses a non-empty destination, a symlinked source and unexpected entry types", async () => {
@@ -575,25 +887,8 @@ it("refuses a non-empty destination, a symlinked source and unexpected entry typ
   expect((await empty.migrate()).status).toBe("migrated");
 });
 
-it("moves the watchdog directory and refuses a live watchdog lease", async () => {
-  const p = project();
-  p.seed();
-  p.write(join(p.store, "watchdog/latest.json"), "{}");
-  const report = await p.migrate();
-  expect(report.watchdog).toBe(true);
-  expect(existsSync(join(p.store, "watchdog"))).toBe(false);
-  expect(existsSync(join(p.control, "watchdog/latest.json"))).toBe(true);
-  expect(mode(join(p.control, "watchdog/latest.json"))).toBe(0o600);
-  const live = project();
-  live.seed();
-  live.write(
-    join(live.store, "watchdog/lease/owner.json"),
-    JSON.stringify({ version: 1, pid: process.pid, identity: "x" }),
-  );
-  await expect(live.migrate()).rejects.toThrow("watchdog lease");
-});
-
 it("fails closed on a legacy layout and routes halting verbs without trusting forged state", () => {
+  const options = { isSupervisor: trusted };
   const none = project();
   expect(resolveControlTarget(none.store, none.control, "status")).toEqual({
     directory: none.control,
@@ -611,17 +906,22 @@ it("fails closed on a legacy layout and routes halting verbs without trusting fo
     "dashboard",
   ])
     expect(() =>
-      resolveControlTarget(dead.store, dead.control, command),
+      resolveControlTarget(dead.store, dead.control, command, options),
     ).toThrow(legacyRefusal);
 
-  // A credibly live old supervisor: legacy primary, control mirrored.
   const old = project();
   old.seed(validState({ running: true, pid: process.pid }));
   for (const command of ["status", "stop", "pause", "cancel"]) {
-    const target = resolveControlTarget(old.store, old.control, command);
+    const target = resolveControlTarget(
+      old.store,
+      old.control,
+      command,
+      options,
+    );
     expect(target.directory).toBe(old.legacy);
     expect(target.also).toEqual([old.control]);
     expect(target.warning).toContain("older-release supervisor");
+    expect(target.warning).toContain("unverified");
   }
   for (const command of [
     "resume",
@@ -632,11 +932,10 @@ it("fails closed on a legacy layout and routes halting verbs without trusting fo
     "start",
     "configure",
   ])
-    expect(() => resolveControlTarget(old.store, old.control, command)).toThrow(
-      legacyRefusal,
-    );
+    expect(() =>
+      resolveControlTarget(old.store, old.control, command, options),
+    ).toThrow(legacyRefusal);
 
-  // Forged legacy state next to a live NEW supervisor must never divert a halt.
   const forgeries: Array<[string, Record<string, unknown>, Owner?]> = [
     ["pid 1 owned by someone else", { running: true, pid: 1 }, foreign(1)],
     [
@@ -659,36 +958,25 @@ it("fails closed on a legacy layout and routes halting verbs without trusting fo
       join(p.control, "state.json"),
       JSON.stringify(validState({ running: true, pid: process.pid })),
     );
-    chmodSync(p.control, 0o700);
+    const o = owner ? { ...options, owner } : options;
     for (const command of ["stop", "pause", "cancel", "status"]) {
-      const target = resolveControlTarget(
-        p.store,
-        p.control,
-        command,
-        owner ? { owner } : {},
-      );
+      const target = resolveControlTarget(p.store, p.control, command, o);
       expect(target.directory, `${label}/${command}`).toBe(p.control);
       expect(target.also, `${label}/${command}`).toBeUndefined();
       expect(target.warning).toContain("ignored");
     }
-    expect(() =>
-      resolveControlTarget(
-        p.store,
-        p.control,
-        "resume",
-        owner ? { owner } : {},
-      ),
-    ).toThrow(legacyRefusal);
+    expect(() => resolveControlTarget(p.store, p.control, "resume", o)).toThrow(
+      legacyRefusal,
+    );
   }
 
-  // No live new supervisor and ambiguous legacy claims: queue in both.
   const ambiguous = project();
   ambiguous.seed(validState({ running: true, pid: 1 }));
   const target = resolveControlTarget(
     ambiguous.store,
     ambiguous.control,
     "stop",
-    { owner: foreign(1) },
+    { ...options, owner: foreign(1) },
   );
   expect(target.directory).toBe(ambiguous.control);
   expect(target.also).toEqual([ambiguous.legacy]);

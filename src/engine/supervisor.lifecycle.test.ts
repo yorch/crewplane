@@ -421,11 +421,15 @@ it(
         join(legacy, "commands", resume),
         JSON.stringify({ action: "resume", all: true, at }),
       );
-      const report = await migrateControl({
+      const base = {
         store: join(f.root, ".crewplane-state"),
         control: f.directory,
         root: f.root,
-        acceptConfig: true,
+      };
+      const reviewed = await migrateControl({ ...base, dryRun: true });
+      const report = await migrateControl({
+        ...base,
+        ...(reviewed.digest ? { acceptConfig: reviewed.digest } : {}),
       });
       expect(report.rearmedCommands).toEqual([
         { id: pause.slice(0, -5), action: "pause" },

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -14,6 +15,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { controlDirectory } from "../src/control.ts";
 import { legacyRefusal } from "../src/migrate.ts";
+import { cacheDirectory } from "../src/update.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -72,6 +74,13 @@ const validState = (extra: object = {}) => ({
   notices: {},
   ...extra,
 });
+/** Make this process a registered supervisor, as an older release's would be. */
+const register = (pid: number) => {
+  const file = join(cacheDirectory(), "supervisors", `${pid}.json`);
+  mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+  writeFileSync(file, JSON.stringify({ version: 1, pid }));
+  return () => rmSync(file, { force: true });
+};
 const seedLegacy = (legacy: string, state: object = validState()) => {
   mkdirSync(join(legacy, "commands"), { recursive: true, mode: 0o700 });
   writeFileSync(join(legacy, "state.json"), JSON.stringify(state));
@@ -111,7 +120,7 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     );
     // Commands that never touch supervisor state keep working.
     expect(p.run(runner, "--version").status).toBe(0);
-    expect(p.run(runner, "--help").stdout).toContain("migrate [--dry-run]");
+    expect(p.run(runner, "--help").stdout).toContain("migrate [--dry-run");
     expect(p.run(runner, "help").status).toBe(0);
     expect(p.run(runner, "init").status).toBe(0);
     // Nothing was created in the control location by the refusals.
@@ -126,7 +135,7 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     expect(dry).toMatchObject({ status: "dry-run", to: p.control });
     expect(existsSync(p.control)).toBe(false);
     const done = JSON.parse(p.run(runner, "migrate").stdout);
-    expect(done).toMatchObject({ status: "migrated", method: "rename" });
+    expect(done).toMatchObject({ status: "migrated", method: "staged-copy" });
     expect(existsSync(p.legacy)).toBe(false);
     const status = JSON.parse(p.run(runner, "status").stdout);
     expect(status.state.marker).toBe("legacy");
@@ -140,19 +149,55 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     const p = project();
     p.run(runner, "init");
     seedLegacy(p.legacy, validState({ running: true, pid: process.pid }));
-    const refused = p.run(runner, "migrate");
-    expect(refused.status).toBe(1);
-    expect(refused.stderr).toContain("Refusing to migrate");
-    expect(existsSync(join(p.legacy, "state.json"))).toBe(true);
-    const stop = p.run(runner, "stop");
-    expect(stop.status).toBe(0);
-    expect(stop.stderr).toContain("older-release supervisor is live");
-    // Narrowing verbs are queued in both candidate directories.
-    expect(readdirSync(join(p.legacy, "commands"))).toHaveLength(1);
-    expect(readdirSync(join(p.control, "commands"))).toHaveLength(1);
-    const resume = p.run(runner, "resume", "--all", "true");
-    expect(resume.status).toBe(1);
-    expect(resume.stderr).toContain(legacyRefusal);
+    const unregister = register(process.pid);
+    try {
+      const refused = p.run(runner, "migrate");
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("Refusing to migrate");
+      expect(existsSync(join(p.legacy, "state.json"))).toBe(true);
+      const stop = p.run(runner, "stop");
+      expect(stop.status).toBe(0);
+      expect(stop.stderr).toContain("older-release supervisor is live");
+      // Narrowing verbs are queued in both candidate directories.
+      expect(readdirSync(join(p.legacy, "commands"))).toHaveLength(1);
+      expect(readdirSync(join(p.control, "commands"))).toHaveLength(1);
+      const resume = p.run(runner, "resume", "--all", "true");
+      expect(resume.status).toBe(1);
+      expect(resume.stderr).toContain(legacyRefusal);
+    } finally {
+      unregister();
+    }
+  });
+
+  it("binds each queued copy to its own directory's supervisor generation", () => {
+    const p = project();
+    p.run(runner, "init");
+    seedLegacy(
+      p.legacy,
+      validState({
+        running: true,
+        pid: process.pid,
+        generation: "OLD-GENERATION",
+      }),
+    );
+    mkdirSync(p.control, { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(p.control, "state.json"),
+      JSON.stringify(validState({ generation: "NEW-GENERATION" })),
+      { mode: 0o600 },
+    );
+    const unregister = register(process.pid);
+    try {
+      const stop = JSON.parse(p.run(runner, "stop").stdout);
+      const read = (directory: string) =>
+        JSON.parse(
+          readFileSync(join(directory, "commands", `${stop.id}.json`), "utf8"),
+        );
+      expect(read(p.legacy).generation).toBe("OLD-GENERATION");
+      expect(read(p.control).generation).toBe("NEW-GENERATION");
+    } finally {
+      unregister();
+    }
   });
 
   it("queues control verbs in the private directory, never in the store", () => {
@@ -184,6 +229,8 @@ describe.each(runners)("%s CLI", (_name, runner) => {
       ["pin", "--confirm", "true"],
       ["migrate"],
       ["migrate", "--dry-run"],
+      ["migrate", "--rebind"],
+      ["migrate", "--discard-legacy"],
       ["update", "--check"],
       ["init"],
       ["pause", "--all", "true"],
@@ -238,23 +285,28 @@ describe.each(runners)("%s CLI", (_name, runner) => {
         lanes: { attacker: { enabled: true } },
       }),
     );
+    const dry = p.run(runner, "migrate", "--dry-run");
+    expect(dry.status).toBe(0);
+    const digest = JSON.parse(dry.stdout).digest as string;
+    expect(JSON.parse(dry.stdout).config.allowedTasks).toEqual(["EVIL-1"]);
+    expect(dry.stderr).toContain("EVIL-1");
+    expect(dry.stderr).toContain(digest);
     const refused = p.run(runner, "migrate");
     expect(refused.status).toBe(1);
     expect(refused.stdout).toBe("");
-    expect(refused.stderr).toContain("--accept-config true");
-    expect(refused.stderr).toContain("EVIL-1");
-    expect(refused.stderr).toContain("attacker");
+    expect(refused.stderr).toContain(`--accept-config ${digest}`);
     expect(existsSync(p.control)).toBe(false);
-    const dry = p.run(runner, "migrate", "--dry-run");
-    expect(dry.status).toBe(0);
-    expect(JSON.parse(dry.stdout).config.allowedTasks).toEqual(["EVIL-1"]);
-    expect(dry.stderr).toContain("EVIL-1");
+    // The old boolean form is not an acceptance.
+    expect(p.run(runner, "migrate", "--accept-config", "true").status).toBe(1);
+    expect(
+      p.run(runner, "migrate", "--accept-config", "0".repeat(64)).status,
+    ).toBe(1);
     const mixed = p.run(
       runner,
       "migrate",
       "--discard-legacy",
       "--accept-config",
-      "true",
+      digest,
     );
     expect(mixed.status).toBe(1);
     const discarded = JSON.parse(
@@ -314,12 +366,28 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     const status = run(other, "status");
     expect(status.status).toBe(0);
     expect(status.stderr).toContain("records prior supervision");
-    // A re-clone at the same path (fresh store) must not inherit the old control state.
+    // A lost store marker (or a re-clone at the same path) must not inherit the
+    // old control state for start or widening verbs, but must not stop an
+    // operator narrowing a running supervisor either.
     rmSync(join(p.store, "control-binding.json"));
-    const reclone = p.run(runner, "pause", "--all", "true");
-    expect(reclone.status).toBe(1);
-    expect(reclone.stderr).toContain("different checkout");
-    expect(p.run(runner, "start").status).toBe(1);
+    expect(p.run(runner, "pause", "--all", "true").status).toBe(0);
+    expect(p.run(runner, "stop").status).toBe(0);
+    expect(p.run(runner, "cancel", "--all", "true").status).toBe(0);
+    for (const args of [
+      ["start"],
+      ["configure", "--file", "x.json"],
+      ["resume", "--all", "true"],
+      ["retry", "--lane", "a"],
+    ]) {
+      const refused = p.run(runner, ...args);
+      expect(refused.status, args.join(" ")).toBe(1);
+      expect(refused.stderr, args.join(" ")).toContain("different checkout");
+    }
+    expect(existsSync(join(p.store, "control-binding.json"))).toBe(false);
+    // The explicit repair rewrites the marker from identity.json.
+    const rebound = JSON.parse(p.run(runner, "migrate", "--rebind").stdout);
+    expect(rebound.status).toBe("rebound");
+    expect(p.run(runner, "resume", "--all", "true").status).toBe(0);
   });
 
   it("does not let a bad CREWPLANE_STATE_DIR break init", () => {

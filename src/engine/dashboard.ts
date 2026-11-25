@@ -142,10 +142,15 @@ export function createDashboard(
         const identity = discoverProject(root);
         const controlDir = controlDirectory(identity.primary);
         await ensureControlDirectory(controlDir);
-        await bindControl(identity.store, controlDir, {
-          primaryRoot: identity.primary,
-          gitCommon: identity.common,
-        });
+        await bindControl(
+          identity.store,
+          controlDir,
+          {
+            primaryRoot: identity.primary,
+            gitCommon: identity.common,
+          },
+          { narrowing: true },
+        );
         const directory = join(controlDir, "commands");
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const id = randomUUID();

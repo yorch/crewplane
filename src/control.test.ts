@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  chownSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -21,6 +22,7 @@ import {
   controlDirectory,
   controlStateBase,
   ensureControlDirectory,
+  rebindControl,
 } from "./control.ts";
 
 const scratch: string[] = [];
@@ -143,13 +145,17 @@ it("refuses control directories that other users could read or traverse", async 
     CREWPLANE_STATE_DIR: join(base, "state"),
   });
   await ensureControlDirectory(directory);
-  chmodSync(directory, 0o755);
-  expect(() => checkControlDirectory(directory)).toThrow("readable by other");
+  for (const bits of [0o755, 0o701, 0o711, 0o704]) {
+    chmodSync(directory, bits);
+    expect(() => checkControlDirectory(directory), bits.toString(8)).toThrow(
+      "accessible by other",
+    );
+  }
   chmodSync(directory, 0o700);
   chmodSync(join(directory, ".."), 0o750);
   expect(() => checkControlDirectory(directory)).not.toThrow();
   chmodSync(join(directory, ".."), 0o705);
-  expect(() => checkControlDirectory(directory)).toThrow("readable by other");
+  expect(() => checkControlDirectory(directory)).toThrow("accessible by other");
   chmodSync(join(directory, ".."), 0o700);
 });
 
@@ -230,4 +236,69 @@ it("fails closed when the repository moved, the environment differs or a re-clon
   expect(() =>
     checkBinding(join(moved, ".crewplane-state"), p.control, p.identity),
   ).toThrow("different checkout");
+});
+
+it("requires an absolute home directory when no override or XDG base exists", () => {
+  expect(() => controlStateBase({}, "relative/home")).toThrow(
+    "HOME must be an absolute path",
+  );
+  expect(controlStateBase({}, "/home/u")).toBe("/home/u/.local/state");
+});
+
+it.runIf(process.getuid?.() === 0)(
+  "refuses a control directory owned by another user",
+  async () => {
+    const base = temp();
+    const project = join(base, "p");
+    mkdirSync(project);
+    const directory = controlDirectory(project, {
+      CREWPLANE_STATE_DIR: join(base, "state"),
+    });
+    await ensureControlDirectory(directory);
+    chownSync(directory, 12345, 12345);
+    expect(() => checkControlDirectory(directory)).toThrow(
+      "not owned by the current user",
+    );
+  },
+);
+
+it("lets narrowing verbs through a lost or rewritten store marker, but not widening ones, and rebinds explicitly", async () => {
+  const p = bound();
+  await ensureControlDirectory(p.control);
+  await bindControl(p.store, p.control, p.identity);
+  const marker = join(p.store, "control-binding.json");
+  // Marker deleted: stop/pause/cancel (and the dashboard's hold/cancel) still work.
+  rmSync(marker);
+  expect(() =>
+    checkBinding(p.store, p.control, p.identity, { narrowing: true }),
+  ).not.toThrow();
+  await bindControl(p.store, p.control, p.identity, { narrowing: true });
+  expect(existsSync(marker)).toBe(false);
+  expect(() => checkBinding(p.store, p.control, p.identity)).toThrow(
+    "different checkout",
+  );
+  // Marker rewritten with another id: same.
+  writeFileSync(marker, JSON.stringify({ version: 1, id: "other" }));
+  expect(() =>
+    checkBinding(p.store, p.control, p.identity, { narrowing: true }),
+  ).not.toThrow();
+  expect(() => checkBinding(p.store, p.control, p.identity)).toThrow(
+    "different checkout",
+  );
+  // A narrowing verb into a directory bound to ANOTHER project is still refused.
+  expect(() =>
+    checkBinding(
+      p.store,
+      p.control,
+      { primaryRoot: "/else" },
+      { narrowing: true },
+    ),
+  ).toThrow("different project identity");
+  // The operator repairs the marker from identity.json.
+  expect(await rebindControl(p.store, p.control, p.identity)).toBe("rebound");
+  expect(() => checkBinding(p.store, p.control, p.identity)).not.toThrow();
+  expect(await rebindControl(p.store, p.control, p.identity)).toBe("unchanged");
+  await expect(
+    rebindControl(p.store, p.control, { primaryRoot: "/else" }),
+  ).rejects.toThrow("different project identity");
 });
