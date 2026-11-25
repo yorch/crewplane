@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
 import {
   access,
@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { sha256Hex } from "./hash.ts";
 import { syncDirectory } from "./io.ts";
 import { embeddedReleaseTrust } from "./release-keys.ts";
 import {
@@ -24,6 +25,7 @@ import {
   signatureRequired,
   verifyReleaseSignature,
 } from "./release-signing.ts";
+import { isProcessAlive } from "./liveness.ts";
 
 /**
  * Root holding one retained binary per release this machine's shared binary has
@@ -321,10 +323,6 @@ export function assetName(tag: string, target: ReleaseTarget): string {
   return `crewplane-${parseTag(tag)}-${target.os}-${target.arch}`;
 }
 
-export function digest(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 /** Parse a published checksum file and require the expected asset name. */
 export function expectedDigest(value: string, asset: string): string {
   for (const line of value.split(/\r?\n/)) {
@@ -343,7 +341,7 @@ export function assertDigest(
   expected: string,
   asset: string,
 ): void {
-  if (digest(bytes) !== expected)
+  if (sha256Hex(bytes) !== expected)
     throw new Error(`Checksum mismatch for ${asset}`);
 }
 
@@ -546,16 +544,6 @@ export function updateTarget(
   if (!releaseMarked || execPath === "") return null;
   if (isRetained(execPath, environment)) return null;
   return execPath;
-}
-
-export function isProcessAlive(pid: number | undefined): boolean {
-  if (pid === undefined || !Number.isSafeInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
 }
 
 export const longRunningCommands = [

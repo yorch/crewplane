@@ -1,4 +1,6 @@
-export type Liveness = "alive" | "dead" | "unknown";
+export type { Liveness } from "../../liveness.ts";
+
+import type { Liveness } from "../../liveness.ts";
 export interface WatchdogInput {
   availableSignals?: string[];
   version: 1;

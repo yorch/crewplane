@@ -1,5 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
@@ -16,6 +16,7 @@ import type {
 } from "../contracts.ts";
 import { bindControl, ensureControlDirectory } from "../control.ts";
 import { gitEnvironment, harnessEnvironment } from "../environment.ts";
+import { sha256Json } from "../hash.ts";
 import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
@@ -57,8 +58,6 @@ import { acquire } from "./watch.ts";
 export type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
 
 type Board = Awaited<ReturnType<typeof snapshot>>;
-const hash = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const taskId = (value: string) => validTaskId(value);
 const git = (root: string, args: string[]) =>
   execFileSync("git", args, {
@@ -223,7 +222,7 @@ async function workdir(work: Work, board: Board, config: Config) {
     ]);
     return live.claim.worktree;
   }
-  const suffix = hash(work.key).slice(0, 8);
+  const suffix = sha256Json(work.key).slice(0, 8);
   const name = `${work.lane}-${work.task}-${suffix}`;
   const path = join(config.root, ".crewplane-local/headless/worktrees", name);
   const branch = `headless/${name}`;
@@ -431,12 +430,12 @@ export async function progress(
     code =
       git(cwd, ["rev-parse", "HEAD"]) +
       git(cwd, ["status", "--porcelain"]) +
-      hash(git(cwd, ["diff", "--no-ext-diff", "--no-textconv"])) +
-      hash(changes);
+      sha256Json(git(cwd, ["diff", "--no-ext-diff", "--no-textconv"])) +
+      sha256Json(changes);
   } catch {
     /* review control may not be a Git checkout */
   }
-  return hash({
+  return sha256Json({
     tasks: board.tasks
       .filter(
         (t) => t.live && (work.lane === coordinator || t.id === work.task),

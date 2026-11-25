@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -8,14 +8,14 @@ import {
   lstatSync,
   openSync,
   readdirSync,
-  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { durableMkdir } from "../../io.ts";
+import { sha256Hex } from "../../hash.ts";
+import { durableMkdir, readPrivateFileSync } from "../../io.ts";
 import { withProcessLock } from "../../process-lock.ts";
 import { validId as validAgentId } from "../../project.ts";
 import {
@@ -38,8 +38,6 @@ const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
 const validId = (value: unknown, prefix: string): value is string =>
   typeof value === "string" &&
   new RegExp(`^${prefix}_[a-f0-9]{32}$`).test(value);
-const hash = (bytes: Uint8Array) =>
-  createHash("sha256").update(bytes).digest("hex");
 const keys = (value: object, allowed: string[]) => {
   if (Object.keys(value).some((k) => !allowed.includes(k))) fail();
 };
@@ -129,12 +127,7 @@ async function privateDir(path: string, root: string) {
 }
 function readPrivate(path: string, max: number) {
   if (safe(path, false).size > max) fail();
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    return readFileSync(fd);
-  } finally {
-    closeSync(fd);
-  }
+  return readPrivateFileSync(path, max, "Evidence rejected");
 }
 function atomic(path: string, bytes: Uint8Array) {
   const temp = join(dirname(path), `.partial-${randomUUID()}`);
@@ -391,7 +384,7 @@ async function openStore(
     const bytes = readPrivate(path, limits.maxArtifactBytes);
     if (
       bytes.length !== a.bytes ||
-      hash(bytes) !== a.sha256 ||
+      sha256Hex(bytes) !== a.sha256 ||
       !mimeValid(a.mime, bytes)
     )
       fail();
@@ -551,7 +544,7 @@ async function openStore(
         runId,
         capturedAt: new Date().toISOString(),
         bytes: contentBytes.length,
-        sha256: hash(contentBytes),
+        sha256: sha256Hex(contentBytes),
       };
       await privateDir(join(runPath(m), a.scenario), absolute);
       await privateDir(join(runPath(m), a.scenario, a.browser), absolute);

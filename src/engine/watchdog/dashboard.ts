@@ -1,7 +1,6 @@
-import { constants } from "node:fs";
-import { open } from "node:fs/promises";
 import { join } from "node:path";
 import { checkControlDirectory } from "../../control.ts";
+import { PRIVATE_STATE_MAX_BYTES, readPrivateFile } from "../../io.ts";
 
 const faults = new Set([
   "supervisor-dead",
@@ -22,24 +21,13 @@ const faults = new Set([
 export async function watchdogHealth(control: string, now = Date.now()) {
   try {
     checkControlDirectory(control);
-    const handle = await open(
-      join(control, "watchdog/latest.json"),
-      constants.O_RDONLY | constants.O_NOFOLLOW,
+    const value: unknown = JSON.parse(
+      await readPrivateFile(
+        join(control, "watchdog/latest.json"),
+        PRIVATE_STATE_MAX_BYTES,
+        "Unavailable",
+      ),
     );
-    let value: unknown;
-    try {
-      const stat = await handle.stat();
-      if (
-        !stat.isFile() ||
-        stat.size > 65536 ||
-        (stat.mode & 0o077) !== 0 ||
-        stat.uid !== process.getuid?.()
-      )
-        throw Error("Unavailable");
-      value = JSON.parse(await handle.readFile("utf8"));
-    } finally {
-      await handle.close();
-    }
     const v = value as {
       checkedAt?: unknown;
       nextCheck?: unknown;

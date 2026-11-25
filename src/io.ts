@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
+import {
   link,
   mkdir,
   open,
@@ -70,5 +77,58 @@ export async function publishJson(
     await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== "ENOENT") throw error;
     });
+  }
+}
+
+/** Size cap for small private state files (watchdog and health records). */
+export const PRIVATE_STATE_MAX_BYTES = 65536;
+
+/**
+ * A private file is a regular file owned by this user with no group or other
+ * permission bits and no more than `maxBytes` bytes.
+ */
+export function isPrivateFile(
+  stat: { isFile(): boolean; size: number; uid: number; mode: number },
+  maxBytes: number,
+): boolean {
+  return (
+    stat.isFile() &&
+    stat.size <= maxBytes &&
+    stat.uid === process.getuid?.() &&
+    (stat.mode & 0o077) === 0
+  );
+}
+
+/**
+ * Read a private file without following a final symlink. Open errors
+ * (ENOENT, ELOOP, ...) propagate unchanged; a file that fails the private-file
+ * check throws Error(`invalid`) before any content is read.
+ */
+export async function readPrivateFile(
+  path: string,
+  maxBytes: number,
+  invalid = "Invalid private file",
+): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!isPrivateFile(await handle.stat(), maxBytes)) throw new Error(invalid);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Synchronous variant of readPrivateFile, returning the raw bytes. */
+export function readPrivateFileSync(
+  path: string,
+  maxBytes: number,
+  invalid = "Invalid private file",
+): Buffer {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!isPrivateFile(fstatSync(fd), maxBytes)) throw new Error(invalid);
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
   }
 }

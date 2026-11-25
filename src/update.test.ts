@@ -22,7 +22,6 @@ import {
   autoUpdateDisabled,
   cacheDirectory,
   compareVersions,
-  digest,
   dispatchTarget,
   downloadRelease,
   expectedDigest,
@@ -50,6 +49,7 @@ import {
   updateTarget,
   writeUpdateCache,
 } from "../src/update.ts";
+import { sha256Hex } from "./hash.ts";
 
 const releaseRun = { runVersion: async () => patch };
 
@@ -190,7 +190,7 @@ describe("release metadata", () => {
     expect(() =>
       expectedDigest(`${hash}  crewplane-x\n`, "crewplane-y"),
     ).toThrow();
-    assert.equal(digest(Buffer.from("x")), sha256(Buffer.from("x")));
+    assert.equal(sha256Hex(Buffer.from("x")), sha256(Buffer.from("x")));
   });
 
   it("recognizes platform executable headers", () => {

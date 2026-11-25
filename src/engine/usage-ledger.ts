@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { probeProcess } from "../liveness.ts";
 
 export type UsageEvent = {
   version: 1;
@@ -400,12 +401,7 @@ export async function openUsageLedger(
       }
       if (!Number.isSafeInteger(pid) || pid <= 0)
         throw new Error("Invalid writer lock");
-      try {
-        process.kill(pid, 0);
-        throw new Error("Usage writer active");
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ESRCH") throw e;
-      }
+      if (probeProcess(pid) !== "dead") throw new Error("Usage writer active");
       await unlink(lockPath);
       lock = await acquire();
     } finally {

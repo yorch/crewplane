@@ -45,6 +45,7 @@ import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
+import { isProcessAlive } from "./liveness.ts";
 import {
   describeAdoption,
   escapeJsonText,
@@ -67,7 +68,6 @@ import {
 import {
   compareVersions,
   dispatchTarget,
-  isProcessAlive,
   isReleaseBuild,
   liveSupervisorRegistrations,
   readUpdateCache,
