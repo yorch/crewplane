@@ -1073,6 +1073,7 @@ it("validates the optional lane passEnv list", () => {
     ["NODE_OPTIONS"],
     ["A=B"],
     "AWS_PROFILE",
+    ["AWS_PROFILE", "AWS_PROFILE"],
     Array.from({ length: 33 }, (_, i) => `V${i}`),
   ])
     expect(() =>

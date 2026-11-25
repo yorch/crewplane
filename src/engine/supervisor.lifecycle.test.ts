@@ -271,6 +271,9 @@ it(
         SYNTHETIC_PASS: "kept",
         OPENAI_API_KEY: "synthetic",
       };
+      const previous = Object.fromEntries(
+        Object.keys(seeded).map((key) => [key, process.env[key]]),
+      );
       Object.assign(process.env, seeded);
       const c = new AbortController();
       const running = serve(f.config, f.directory, c.signal);
@@ -293,10 +296,25 @@ it(
             "CREWPLANE_HEADLESS_LANE",
           ]),
         );
+        const allowed = new Set([
+          "SYNTHETIC_PASS",
+          "CREWPLANE_COORD_DIR",
+          "CREWPLANE_HEADLESS_LANE",
+        ]);
+        // Nothing outside the base, codex provider names and explicit opt-ins.
+        for (const key of keys)
+          expect(
+            allowed.has(key) ||
+              /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i.test(
+                key,
+              ),
+          ).toBe(true);
         expect(keys).not.toContain("GITHUB_TOKEN");
         expect(keys).not.toContain("AWS_SECRET_ACCESS_KEY");
       } finally {
-        for (const key of Object.keys(seeded)) delete process.env[key];
+        for (const [key, value] of Object.entries(previous))
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
         c.abort();
         await running;
         await rm(f.root, { recursive: true, force: true });

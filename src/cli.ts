@@ -530,6 +530,7 @@ async function main() {
             instructions: lane.instructionsPath
               ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
               : "none",
+            passEnv: lane.passEnv ?? [],
             budgets: {
               maxRunsPerHour: lane.maxRunsPerHour ?? null,
               maxRunMinutes: lane.maxRunMinutes ?? null,

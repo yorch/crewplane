@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { maxPassEnv, validPassEnvName } from "../environment.ts";
+import {
+  maxPassEnv,
+  passEnvRefusal,
+  validPassEnvName,
+} from "../environment.ts";
 
 export const harnesses = ["codex", "pi", "claude", "opencode"] as const;
 export type Harness = (typeof harnesses)[number];
@@ -307,10 +311,11 @@ export function validateHarness(config: HarnessConfig, lane: LaneHarness) {
     lane.passEnv !== undefined &&
     (!Array.isArray(lane.passEnv) ||
       lane.passEnv.length > maxPassEnv ||
-      !lane.passEnv.every(validPassEnvName))
+      !lane.passEnv.every(validPassEnvName) ||
+      new Set(lane.passEnv).size !== lane.passEnv.length)
   )
     throw new Error(
-      `Invalid passEnv: up to ${maxPassEnv} variable names (not NODE_OPTIONS, LD_*, CREWPLANE_*)`,
+      `Invalid passEnv: up to ${maxPassEnv} distinct variable names, never ${passEnvRefusal}`,
     );
   if (harness === "pi") {
     rejectForeign(lane, ["piModel", "piPermissions"], "Pi");
