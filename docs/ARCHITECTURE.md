@@ -29,3 +29,9 @@ One writer per agent/workspace; overlap checks across declared scopes; frozen su
 ## Compatibility proof
 
 Bun supports standalone compilation, runtime embedding and static assets: https://bun.sh/docs/compiler/executables . This establishes packaging feasibility, not compatibility of Relay's process lifecycle. Native executable tests must cover signals, process groups, leases, file durability, embedded assets, harness streams and recovery. Start with macOS/Linux; Windows is deferred pending equivalent tests.
+
+## Known leftovers
+
+- `src/engine/scheduling.ts` still hashes its fingerprint with its own `createHash` call (custom key-sorting replacer) instead of `src/hash.ts`.
+- `src/process-lock.ts` keeps its own 8192-byte private-file check rather than the shared `src/io.ts` readers.
+- Engine entry points (`supervisor.ts`, `watch.ts`, `dashboard.ts`) import the `src/board.ts` composition root, an engine-to-root import direction; `tests/import-graph.test.ts` proves it never makes profiles reachable from core.

@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -54,3 +55,18 @@ it("does not follow a final symlink and propagates open errors", async () => {
     { code: "ENOENT" },
   );
 });
+
+it.skipIf(process.platform === "win32")(
+  "rejects a FIFO without blocking on open",
+  async () => {
+    const fifo = join(dir, "pipe.json");
+    execFileSync("mkfifo", ["-m", "600", fifo]);
+    await expect(readPrivateFile(fifo, 10, "not a file")).rejects.toThrow(
+      "not a file",
+    );
+    expect(() => readPrivateFileSync(fifo, 10, "not a file")).toThrow(
+      "not a file",
+    );
+  },
+  5000,
+);

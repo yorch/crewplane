@@ -85,8 +85,19 @@ export const PRIVATE_STATE_MAX_BYTES = 65536;
 
 /**
  * A private file is a regular file owned by this user with no group or other
- * permission bits and no more than `maxBytes` bytes.
+ * permission bits and no more than `maxBytes` bytes. A restored or copied store
+ * owned by another user (including root) is rejected on POSIX by design.
  */
+/** Ownership is POSIX-only: without getuid (Windows) it is not checked. */
+const ownedByCurrentUser = (uid: number) => {
+  const current = process.getuid?.();
+  return current === undefined || uid === current;
+};
+
+/** Never block on open: a FIFO would otherwise hang until a writer appears. */
+const readFlags =
+  constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0);
+
 export function isPrivateFile(
   stat: { isFile(): boolean; size: number; uid: number; mode: number },
   maxBytes: number,
@@ -94,7 +105,7 @@ export function isPrivateFile(
   return (
     stat.isFile() &&
     stat.size <= maxBytes &&
-    stat.uid === process.getuid?.() &&
+    ownedByCurrentUser(stat.uid) &&
     (stat.mode & 0o077) === 0
   );
 }
@@ -109,7 +120,7 @@ export async function readPrivateFile(
   maxBytes: number,
   invalid = "Invalid private file",
 ): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, readFlags);
   try {
     if (!isPrivateFile(await handle.stat(), maxBytes)) throw new Error(invalid);
     return await handle.readFile("utf8");
@@ -124,7 +135,7 @@ export function readPrivateFileSync(
   maxBytes: number,
   invalid = "Invalid private file",
 ): Buffer {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const fd = openSync(path, readFlags);
   try {
     if (!isPrivateFile(fstatSync(fd), maxBytes)) throw new Error(invalid);
     return readFileSync(fd);
