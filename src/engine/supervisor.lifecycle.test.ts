@@ -243,6 +243,91 @@ it(
   15000,
 );
 it(
+  "launches harness children with an allowlisted environment plus the lane's explicit passEnv",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const dump = join(f.root, "child-env.json");
+      const body = await readFile(f.config.binary, "utf8");
+      await writeFile(
+        f.config.binary,
+        body.replace(
+          "const args=",
+          `writeFileSync(${JSON.stringify(dump)},JSON.stringify(Object.keys(process.env)));\nconst args=`,
+        ),
+        { mode: 0o700 },
+      );
+      f.config.lanes.coordinator = {
+        enabled: true,
+        passEnv: ["SYNTHETIC_PASS"],
+      };
+      await writeFile(
+        join(f.directory, "config.json"),
+        JSON.stringify(f.config),
+      );
+      const seeded = {
+        GITHUB_TOKEN: "synthetic",
+        AWS_SECRET_ACCESS_KEY: "synthetic",
+        SYNTHETIC_PASS: "kept",
+        OPENAI_API_KEY: "synthetic",
+      };
+      const previous = Object.fromEntries(
+        Object.keys(seeded).map((key) => [key, process.env[key]]),
+      );
+      Object.assign(process.env, seeded);
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            await access(dump);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        const keys = JSON.parse(await readFile(dump, "utf8")) as string[];
+        expect(keys).toEqual(
+          expect.arrayContaining([
+            "PATH",
+            "SYNTHETIC_PASS",
+            "OPENAI_API_KEY",
+            "CREWPLANE_COORD_DIR",
+            "CREWPLANE_HEADLESS_LANE",
+          ]),
+        );
+        const allowed = new Set([
+          "SYNTHETIC_PASS",
+          "CREWPLANE_COORD_DIR",
+          "CREWPLANE_HEADLESS_LANE",
+        ]);
+        // Nothing outside the base, codex provider names and explicit opt-ins.
+        // The OS and the node shebang may add their own bookkeeping names.
+        const osAdded = /^(?:__CF_.*|_|PWD|OLDPWD|SHLVL)$/;
+        const allowedPattern =
+          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
+        expect(
+          keys.filter(
+            (key) =>
+              !allowed.has(key) &&
+              !osAdded.test(key) &&
+              !allowedPattern.test(key),
+          ),
+        ).toEqual([]);
+        expect(keys).not.toContain("GITHUB_TOKEN");
+        expect(keys).not.toContain("AWS_SECRET_ACCESS_KEY");
+      } finally {
+        for (const [key, value] of Object.entries(previous))
+          if (value === undefined) delete process.env[key];
+          else process.env[key] = value;
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  15000,
+);
+it(
   "releases startup lease on invalid state and pauses interrupted records even without a stored PID",
   () =>
     withEnv(async () => {

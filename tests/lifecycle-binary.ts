@@ -132,7 +132,12 @@ function setup(name: string, mode: string, interval = 1) {
       maxRunMinutes: 1,
       maxRunsPerHour: 10,
       confirmedStoppedAt: new Date().toISOString(),
-      lanes: { captain: { enabled: true } },
+      lanes: {
+        captain: {
+          enabled: true,
+          passEnv: ["CREWPLANE_FIXTURE_MODE", "CREWPLANE_FIXTURE_PID_FILE"],
+        },
+      },
     }),
   );
   cli("configure", "--file", config);
