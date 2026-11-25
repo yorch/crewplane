@@ -916,7 +916,7 @@ async function main() {
       server.listen(port, "127.0.0.1", resolve);
     });
     output(
-      `Crewplane dashboard: http://127.0.0.1:${port}/?token=${session.token}${
+      `Crewplane dashboard: http://127.0.0.1:${port}/#token=${session.token}${
         controls
           ? `\nControls enabled: send x-crewplane-token: ${controls.token} from an exact Origin`
           : ""

@@ -38,71 +38,71 @@ it("generates distinct unguessable session tokens", () => {
   expect(a).toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect(newSessionToken()).not.toBe(a);
 });
-it("refuses every read without the session, including pages, snapshot, runs and evidence", async () => {
+it("serves the public embedded page and scripts but refuses every data route without the session", async () => {
+  for (const path of ["/", "/dashboard.js", "/runs.js", "/dashboard.css"])
+    expect((await get(path)).status, path).toBe(200);
   for (const path of [
-    "/",
-    "/dashboard.js",
     "/api/snapshot",
     "/api/runs",
+    "/api/runs/tr_00000000000000000000000000000000",
     "/api/evidence",
+    "/api/evidence/artifacts/ev_00000000000000000000000000000000",
   ]) {
     const response = await get(path);
     expect(response.status, path).toBe(401);
-    expect(await response.text()).not.toContain("tasks");
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("Session missing or expired");
   }
-  expect((await get("/", { cookie: "crewplane_session=wrong" })).status).toBe(
-    401,
-  );
-  expect((await get("/?token=wrong")).status).toBe(401);
-  expect((await get("/api/snapshot?token=" + token)).status).toBe(401);
-  expect(
-    (await get("/api/snapshot", { "x-crewplane-token": "x" })).status,
-  ).toBe(401);
+  for (const headers of [
+    { "x-crewplane-session": "wrong" },
+    { "x-crewplane-session": "" },
+    { "x-crewplane-token": token },
+    { cookie: `crewplane_session_${port}=${token}` },
+  ])
+    expect((await get("/api/snapshot", headers)).status).toBe(401);
+  // The token in a query string is never an accepted credential.
+  expect((await get(`/api/snapshot?token=${token}`)).status).toBe(401);
+  expect((await get(`/?token=${token}`)).headers.get("set-cookie")).toBeNull();
 });
-it("trades the token for an HttpOnly SameSite=Strict cookie and a clean redirect", async () => {
-  const response = await get(`/?token=${token}`);
-  expect(response.status).toBe(303);
-  expect(response.headers.get("location")).toBe("/");
-  const cookie = response.headers.get("set-cookie") ?? "";
-  expect(cookie).toContain(`crewplane_session_${port}=${token}`);
-  expect(cookie).toContain("HttpOnly");
-  expect(cookie).toContain("SameSite=Strict");
-  expect(cookie).toContain("Path=/");
-  const pair = cookie.split(";")[0] ?? "";
-  const page = await get("/", { cookie: pair });
-  expect(page.status).toBe(200);
-  expect(await page.text()).toContain("<html");
-  const snapshot = await get("/api/snapshot", { cookie: pair });
+it("returns data to a request carrying the session header", async () => {
+  const snapshot = await get("/api/snapshot", {
+    "x-crewplane-session": token,
+  });
   expect(snapshot.status).toBe(200);
   expect(await snapshot.json()).toHaveProperty("tasks");
-});
-it("accepts the token in a header for scripts and keeps the Host and Origin checks first", async () => {
   expect(
-    (await get("/api/snapshot", { "x-crewplane-token": token })).status,
+    (await get("/api/runs", { "x-crewplane-session": token })).status,
   ).toBe(200);
+});
+it("answers odd request targets without hanging and keeps the Host and Origin checks first", async () => {
+  const raw = (path: string, headers: Record<string, string> = {}) =>
+    new Promise<number>((resolve, reject) => {
+      const request = httpRequest(
+        { host: "127.0.0.1", port, path, headers },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        },
+      );
+      request.setTimeout(3000, () => request.destroy(new Error("hung")));
+      request.on("error", reject);
+      request.end();
+    });
+  expect(await raw("//")).toBe(404);
+  expect(await raw("//?token=x")).toBe(404);
+  expect(await raw("/api/%2e%2e/snapshot")).toBe(401);
+  expect(
+    await raw("/api/snapshot", {
+      host: "evil.example",
+      "x-crewplane-session": token,
+    }),
+  ).toBe(403);
   expect(
     (
       await get("/api/snapshot", {
-        "x-crewplane-token": token,
+        "x-crewplane-session": token,
         origin: "http://foreign.invalid",
       })
     ).status,
   ).toBe(403);
-  const status = await new Promise<number>((resolve, reject) => {
-    const request = httpRequest(
-      {
-        host: "127.0.0.1",
-        port,
-        path: "/api/snapshot",
-        headers: { host: "evil.example", "x-crewplane-token": token },
-      },
-      (response) => {
-        response.resume();
-        resolve(response.statusCode ?? 0);
-      },
-    );
-    request.on("error", reject);
-    request.end();
-  });
-  expect(status).toBe(403);
 });

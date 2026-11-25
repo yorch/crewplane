@@ -28,21 +28,14 @@ const tokenMatches = (given: unknown, expected: string) => {
 };
 /** Fresh per-launch secret for dashboard read access. */
 export const newSessionToken = () => randomBytes(32).toString("base64url");
-const cookieValue = (header: string | undefined, name: string) => {
-  for (const part of (header ?? "").split(";")) {
-    const [key, ...rest] = part.trim().split("=");
-    if (key === name) return rest.join("=");
-  }
-  return undefined;
-};
 export function createDashboard(
   root: string,
   options: {
     controls?: { token: string };
     /**
-     * Require a per-launch session for every read. A visitor presents the token
-     * once as `/?token=…`, receives an HttpOnly SameSite=Strict cookie and is
-     * redirected to a clean URL; scripts may send `x-crewplane-token` instead.
+     * Require a per-launch session on every `/api/*` read, presented in the
+     * `x-crewplane-session` header. The dashboard page takes it from the
+     * `#token=…` URL fragment (never sent to a server) into sessionStorage.
      * Omitted for embedding and tests, where the server is not reachable by
      * other local users.
      */
@@ -165,36 +158,23 @@ export function createDashboard(
       return;
     }
     const session = options.session;
-    if (session) {
-      const cookie = `crewplane_session_${address}`;
-      const url = new URL(request.url ?? "/", `http://${expectedHost}`);
-      if (url.pathname === "/" && url.searchParams.has("token")) {
-        if (!tokenMatches(url.searchParams.get("token"), session.token)) {
-          response.writeHead(401).end("Unauthorized");
-          return;
-        }
-        response
-          .writeHead(303, {
-            "Set-Cookie": `${cookie}=${session.token}; HttpOnly; SameSite=Strict; Path=/`,
-            Location: "/",
-          })
-          .end();
-        return;
-      }
-      if (
-        !tokenMatches(
-          cookieValue(request.headers.cookie, cookie),
-          session.token,
-        ) &&
-        !tokenMatches(request.headers["x-crewplane-token"], session.token)
-      ) {
-        response
-          .writeHead(401, { "Content-Type": "text/plain; charset=utf-8" })
-          .end(
-            "Unauthorized. Open the URL printed by `crewplane dashboard` (it includes the session token).",
-          );
-        return;
-      }
+    // Static pages and scripts are public embedded assets; only data routes
+    // need the per-launch session, which the page keeps in sessionStorage
+    // (origin-scoped, unlike a cookie) and sends as a header.
+    if (
+      session &&
+      request.url?.startsWith("/api/") &&
+      !tokenMatches(request.headers["x-crewplane-session"], session.token)
+    ) {
+      response
+        .writeHead(401, { "Content-Type": "application/json; charset=utf-8" })
+        .end(
+          JSON.stringify({
+            error:
+              "Session missing or expired. Reopen the URL printed by crewplane dashboard.",
+          }),
+        );
+      return;
     }
     try {
       if (request.url === "/api/snapshot") {

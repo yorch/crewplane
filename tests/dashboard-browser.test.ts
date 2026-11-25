@@ -20,6 +20,7 @@ const views = [
 ];
 let root = "";
 let base = "";
+let output = "";
 let browser: Browser;
 let child: ChildProcess | undefined;
 let answeredQuestion = "";
@@ -223,6 +224,9 @@ beforeAll(async () => {
   child = spawn(bin, ["--project", root, "dashboard", "--port", String(port)], {
     stdio: "pipe",
   });
+  child.stdout?.on("data", (chunk) => {
+    output += chunk.toString();
+  });
   browser = await chromium.launch({ headless: true, chromiumSandbox: true });
 }, 60000);
 
@@ -248,8 +252,16 @@ async function open(hash = "", width = 1440) {
   });
   const deadline = Date.now() + 10000;
   while (true) {
+    // The printed URL carries the per-launch session as a #token fragment;
+    // sessionStorage then serves later loads of the same page.
+    const token = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1];
     try {
-      await page.goto(`${base}${hash}`);
+      if (!token) throw new Error("dashboard has not printed its URL yet");
+      await page.goto(`${base}#token=${token}`);
+      if (hash) {
+        await page.goto(`${base}${hash}`);
+        await page.reload();
+      }
       break;
     } catch (error) {
       if (Date.now() > deadline) throw error;
@@ -257,6 +269,8 @@ async function open(hash = "", width = 1440) {
     }
   }
   await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  // The session fragment is consumed and never stays in the visible URL.
+  expect(page.url()).not.toContain("token");
   return { page, errors };
 }
 const title = (page: Page, text: string) =>

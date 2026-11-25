@@ -127,7 +127,7 @@
     const id = selected;
     tailing = run;
     try {
-      const response = await fetch(
+      const response = await window.crewplaneFetch(
         `/api/runs/${encodeURIComponent(id)}?after=${cursor}&limit=100`,
         { cache: "no-store", signal: AbortSignal.timeout(10000) },
       );
@@ -254,7 +254,7 @@
       ])
         if (get(id).value) query.set(key, get(id).value);
       if (older && before) query.set("before", before);
-      const response = await fetch(`/api/runs?${query}`, {
+      const response = await window.crewplaneFetch(`/api/runs?${query}`, {
         cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });

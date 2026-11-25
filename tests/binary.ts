@@ -439,17 +439,17 @@ try {
   });
   const dashboard = start("dashboard", "--port", String(port));
   await until(
-    async () => nativeLogs.includes(`http://127.0.0.1:${port}/?token=`),
+    async () => nativeLogs.includes(`http://127.0.0.1:${port}/#token=`),
     "dashboard session URL",
   );
   const token =
-    new RegExp(`http://127.0.0.1:${port}/\\?token=([A-Za-z0-9_-]+)`).exec(
+    new RegExp(`http://127.0.0.1:${port}/#token=([A-Za-z0-9_-]+)`).exec(
       nativeLogs,
     )?.[1] ?? "";
   assert.equal(token.length, 43);
   const dget = (path: string, headers: Record<string, string> = {}) =>
     fetch(`http://127.0.0.1:${port}${path}`, {
-      headers: { "x-crewplane-token": token, ...headers },
+      headers: { "x-crewplane-session": token, ...headers },
       redirect: "manual",
     });
   await until(async () => {
@@ -459,16 +459,12 @@ try {
       return false;
     }
   }, "embedded dashboard");
-  // Reads need the per-launch session; the printed URL trades it for a cookie.
+  // Data routes need the per-launch session header; the page itself is public.
   assert.equal(
     (await fetch(`http://127.0.0.1:${port}/api/snapshot`)).status,
     401,
   );
-  const exchange = await fetch(`http://127.0.0.1:${port}/?token=${token}`, {
-    redirect: "manual",
-  });
-  assert.equal(exchange.status, 303);
-  assert(/HttpOnly/.test(exchange.headers.get("set-cookie") ?? ""));
+  assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
   const html = await (await dget("/")).text();
   assert(html.includes("Crewplane"));
   assert((await (await dget("/dashboard.js")).text()).includes("fetch"));

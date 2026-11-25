@@ -162,6 +162,47 @@ let data;
 let fingerprint;
 let busy = false;
 let lastSuccess = null;
+// Per-launch session: the printed URL carries `#token=…` (a fragment, so no
+// server, log or Referer ever sees it). Keep it in sessionStorage (scoped to
+// this origin, unlike a cookie), strip it from the URL and send it as a header.
+const SESSION_KEY = "crewplane-session";
+let sessionToken = null;
+try {
+  sessionToken = window.sessionStorage.getItem(SESSION_KEY);
+} catch {
+  // Storage may be blocked; the in-memory token below still works for this tab.
+}
+{
+  const fromUrl = /(?:^#|&)token=([A-Za-z0-9_-]{16,128})(?:&|$)/.exec(
+    window.location.hash,
+  );
+  if (fromUrl) {
+    sessionToken = fromUrl[1];
+    try {
+      window.sessionStorage.setItem(SESSION_KEY, sessionToken);
+    } catch {
+      // Memory only.
+    }
+    const rest = window.location.hash
+      .slice(1)
+      .split("&")
+      .filter((part) => !part.startsWith("token="))
+      .join("&");
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
+    );
+  }
+}
+window.crewplaneFetch = (url, options = {}) =>
+  fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      ...(sessionToken ? { "x-crewplane-session": sessionToken } : {}),
+    },
+  });
 let internalNavigation = false;
 let messageLimit = 100;
 const filterMemory = {};
@@ -2059,7 +2100,7 @@ async function refresh() {
   $("refresh").setAttribute("aria-busy", "true");
   let next;
   try {
-    const response = await fetch("/api/snapshot", {
+    const response = await window.crewplaneFetch("/api/snapshot", {
       cache: "no-store",
       signal: AbortSignal.timeout(10000),
     });
