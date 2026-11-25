@@ -26,6 +26,7 @@ import {
   downloadRelease,
   type FetchLike,
   platformTarget,
+  type ReleaseTarget,
   runUpdate,
   updateConfig,
 } from "./update.ts";
@@ -326,47 +327,65 @@ describe("release signatures", () => {
   });
 });
 
-const target = (() => {
+const hostTarget = (() => {
   const t = platformTarget(process.platform, process.arch);
   if (t === null) throw new Error("unsupported host");
   return t;
 })();
 const tag = "v9.9.9";
-const asset = assetName(tag, target);
 const OLD = "#!/bin/sh\necho 0.0.1\n";
-const payload = Buffer.concat([
-  Buffer.from(
-    target.os === "linux" ? [0x7f, 0x45, 0x4c, 0x46] : [0xcf, 0xfa, 0xed, 0xfe],
-  ),
-  Buffer.from("\nsigned release\n"),
-]);
-
-/** In-memory release host; `signature` null means the .sig file is absent. */
-const host = (signature: string | null, bytes: Buffer = payload) => {
-  const requested: string[] = [];
-  const fetchImpl: FetchLike = async (input) => {
-    requested.push(input);
-    const body = (value: string | Uint8Array | null) =>
-      value === null
-        ? new Response("nope", { status: 404 })
-        : new Response(value as BodyInit, { status: 200 });
-    if (input.endsWith("/latest"))
-      return body(JSON.stringify({ tag_name: tag }));
-    if (input.endsWith(`${asset}.sha256`))
-      return body(`${hex(bytes)}  ${asset}\n`);
-    if (input.endsWith(`${asset}.sig`)) return body(signature);
-    if (input.endsWith(asset)) return body(bytes);
-    return body(null);
-  };
-  return { fetchImpl, requested };
-};
+const allTargets = [
+  { os: "linux", arch: "x86_64" },
+  { os: "linux", arch: "arm64" },
+  { os: "macos", arch: "x86_64" },
+  { os: "macos", arch: "arm64" },
+] as const;
 const config = updateConfig({
   CREWPLANE_RELEASE_API: "https://example.test/latest",
   CREWPLANE_RELEASE_BASE: "https://example.test/download",
 });
-const signFor = (priv: KeyObject) => sig(priv, tag, asset, hex(payload));
 
-describe("signed downloads", () => {
+/** A release for one platform, independent of the machine running the tests. */
+const world = (target: ReleaseTarget) => {
+  const asset = assetName(tag, target);
+  const payload = Buffer.concat([
+    Buffer.from(
+      target.os === "linux"
+        ? [0x7f, 0x45, 0x4c, 0x46]
+        : [0xcf, 0xfa, 0xed, 0xfe],
+    ),
+    Buffer.from("\nsigned release\n"),
+  ]);
+  /** In-memory release host; `signature` null means the .sig file is absent. */
+  const host = (signature: string | null, bytes: Buffer = payload) => {
+    const requested: string[] = [];
+    const fetchImpl: FetchLike = async (input) => {
+      requested.push(input);
+      const body = (value: string | Uint8Array | null) =>
+        value === null
+          ? new Response("nope", { status: 404 })
+          : new Response(value as BodyInit, { status: 200 });
+      if (input.endsWith("/latest"))
+        return body(JSON.stringify({ tag_name: tag }));
+      if (input.endsWith(`${asset}.sha256`))
+        return body(`${hex(bytes)}  ${asset}\n`);
+      if (input.endsWith(`${asset}.sig`)) return body(signature);
+      if (input.endsWith(asset)) return body(bytes);
+      return body(null);
+    };
+    return { fetchImpl, requested };
+  };
+  const signFor = (priv: KeyObject) => sig(priv, tag, asset, hex(payload));
+  /** A valid asset name of a platform other than this release's. */
+  const otherAsset =
+    allTargets.map((t) => assetName(tag, t)).find((name) => name !== asset) ??
+    "";
+  return { target, asset, payload, host, signFor, otherAsset };
+};
+const { payload, host, signFor } = world(hostTarget);
+
+describe.each(allTargets)("signed downloads for $os-$arch", (platform) => {
+  const { target, asset, payload, host, signFor, otherAsset } = world(platform);
   it("reports signed integrity and the key when the signature verifies", async () => {
     const a = pair("2026-01");
     const result = await downloadRelease(
@@ -414,12 +433,7 @@ describe("signed downloads", () => {
     const stranger = pair("z");
     const cases = [
       signFor(stranger.priv),
-      sig(
-        a.priv,
-        tag,
-        "crewplane-v9.9.9-other-arm64".replace("other", "macos"),
-        hex(payload),
-      ),
+      sig(a.priv, tag, otherAsset, hex(payload)),
       sig(a.priv, tag, asset, hex(Buffer.from("different"))),
       sig(a.priv, "v9.9.8", assetName("v9.9.8", target), hex(payload)),
     ];

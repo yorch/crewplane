@@ -26,6 +26,11 @@ const patch = "9.9.9";
 const assetOs = process.platform === "darwin" ? "macos" : "linux";
 const assetArch = process.arch === "x64" ? "x86_64" : "arm64";
 const asset = `crewplane-v${patch}-${assetOs}-${assetArch}`;
+// A valid asset name for a platform other than this host's, on any host.
+const otherPlatformAsset =
+  ["linux-x86_64", "linux-arm64", "macos-x86_64", "macos-arm64"]
+    .map((suffix) => `crewplane-v${patch}-${suffix}`)
+    .find((name) => name !== asset) ?? "";
 const payload = `#!/bin/sh\n[ "\${1:-}" = "--version" ] && printf '%s\\n' ${patch}\nexit 0\n`;
 const sha256 = (value: string) =>
   createHash("sha256").update(value).digest("hex");
@@ -313,7 +318,7 @@ describe("install.sh signing", () => {
         ],
         [
           "other asset",
-          signed(trusted.privateKey, tag, "crewplane-v9.9.9-linux-other"),
+          signed(trusted.privateKey, tag, otherPlatformAsset),
           /verification failed/,
         ],
         ["garbage", "!!!!", /verification failed/],
