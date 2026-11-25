@@ -36,6 +36,8 @@ jobs:
       - run: bun run verify
         env:
           TMPDIR: /tmp
+      - name: install.sh keys equal release-keys.json
+        run: bun scripts/sync-install-keys.ts --check
       - name: Embedded dashboard assets are up to date
         run: bun scripts/embed.ts && git diff --exit-code src/engine/assets
       - run: shasum -a 256 dist/crewplane > dist/SHA256SUMS

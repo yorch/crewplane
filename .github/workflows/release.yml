@@ -79,13 +79,33 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           merge-multiple: true
           path: release
+      - name: install.sh keys must equal release-keys.json
+        run: bun scripts/sync-install-keys.ts --check
+      # With keys listed in release-keys.json the secret is mandatory: this step
+      # fails (no unsigned release) when it is missing or does not match a
+      # listed key. With no keys it prints a notice and signs nothing.
+      - name: Sign release assets
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          assets=$(find release -maxdepth 1 -type f -name 'crewplane-*' ! -name '*.sha256' ! -name '*.sig')
+          # shellcheck disable=SC2086
+          bun scripts/sign-release.ts --tag "$TAG" $assets
       - name: Attach binaries to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+        # No --clobber: published assets are immutable (see docs/RELEASING.md).
+        run: gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY"
