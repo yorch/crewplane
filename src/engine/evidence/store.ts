@@ -35,7 +35,7 @@ function fail(): never {
   throw new Error("Evidence rejected");
 }
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
-const validId = (value: unknown, prefix: string): value is string =>
+const validEvidenceId = (value: unknown, prefix: string): value is string =>
   typeof value === "string" &&
   new RegExp(`^${prefix}_[a-f0-9]{32}$`).test(value);
 const keys = (value: object, allowed: string[]) => {
@@ -106,8 +106,8 @@ function captureValid(v: EvidenceCaptureInput) {
   if (
     !Array.isArray(v.findingIds) ||
     v.findingIds.length > 100 ||
-    !v.findingIds.every((x) => validId(x, "finding")) ||
-    (v.recheckOf !== null && !validId(v.recheckOf, "ev"))
+    !v.findingIds.every((x) => validEvidenceId(x, "finding")) ||
+    (v.recheckOf !== null && !validEvidenceId(v.recheckOf, "ev"))
   )
     fail();
 }
@@ -239,7 +239,7 @@ async function openStore(
       const taskPath = join(absolute, task);
       safe(taskPath, true);
       for (const run of readdirSync(taskPath)) {
-        if (!validId(run, "qa")) fail();
+        if (!validEvidenceId(run, "qa")) fail();
         const rp = join(taskPath, run);
         safe(rp, true);
         const commits = readdirSync(rp);
@@ -305,7 +305,7 @@ async function openStore(
             a.task !== task ||
             a.testedCommit !== commit ||
             a.lane !== m.lane ||
-            !validId(a.artifactId, "ev") ||
+            !validEvidenceId(a.artifactId, "ev") ||
             ids.has(a.artifactId) ||
             !dateValid(a.capturedAt) ||
             !Number.isSafeInteger(a.bytes) ||
@@ -344,7 +344,7 @@ async function openStore(
               if (expected.has(child)) continue;
               if (
                 /^\.partial-[a-f0-9-]+$/.test(entry) ||
-                validId(entry, "ev")
+                validEvidenceId(entry, "ev")
               ) {
                 if (recover) rmSync(child);
               } else fail();
@@ -494,7 +494,7 @@ async function openStore(
       return structuredClone(m);
     },
     async append(runId, input, contentBytes) {
-      if (!validId(runId, "qa")) fail();
+      if (!validEvidenceId(runId, "qa")) fail();
       keys(input, captureKeys);
       captureValid(input);
       if (
@@ -555,7 +555,7 @@ async function openStore(
       return structuredClone(a);
     },
     async manifest(runId) {
-      if (!validId(runId, "qa")) fail();
+      if (!validEvidenceId(runId, "qa")) fail();
       const result = load().find((m) => m.runId === runId);
       return structuredClone(result ?? null);
     },
@@ -564,7 +564,7 @@ async function openStore(
       const { task, cursor, limit = 20 } = options;
       if (
         (task !== undefined && !evidenceTaskPattern.test(task)) ||
-        (cursor !== undefined && !validId(cursor, "qa")) ||
+        (cursor !== undefined && !validEvidenceId(cursor, "qa")) ||
         !Number.isInteger(limit) ||
         limit < 1 ||
         limit > 20
@@ -587,7 +587,7 @@ async function openStore(
       };
     },
     async read(artifactId) {
-      if (!validId(artifactId, "ev")) fail();
+      if (!validEvidenceId(artifactId, "ev")) fail();
       for (const m of load()) {
         const a = m.artifacts.find((x) => x.artifactId === artifactId);
         if (a && unavailableRuns.has(m.runId)) fail();

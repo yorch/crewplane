@@ -28,6 +28,17 @@ const tokenMatches = (given: unknown, expected: string) => {
 };
 /** Fresh per-launch secret for dashboard read access. */
 export const newSessionToken = () => randomBytes(32).toString("base64url");
+const storeOf = async (root: string) =>
+  ((await coordination(["init"], root)) as { store: string }).store;
+/** Initialize once on first use; a failed initialization is retried on the next call. */
+function lazyStore<T>(create: () => Promise<T>) {
+  let value: Promise<T> | undefined;
+  return () =>
+    (value ??= create().catch((error) => {
+      value = undefined;
+      throw error;
+    }));
+}
 export function createDashboard(
   root: string,
   options: {
@@ -43,28 +54,12 @@ export function createDashboard(
     session?: { token: string };
   } = {},
 ) {
-  let traces: ReturnType<typeof createTraceStore> | undefined;
-  const getTraces = () =>
-    (traces ??= (async () => {
-      const { store } = (await coordination(["init"], root)) as {
-        store: string;
-      };
-      return createTraceStore(join(store, "operational-traces"));
-    })().catch((error) => {
-      traces = undefined;
-      throw error;
-    }));
-  let evidence: ReturnType<typeof createEvidenceStore> | undefined;
-  const getEvidence = () =>
-    (evidence ??= (async () => {
-      const { store } = (await coordination(["init"], root)) as {
-        store: string;
-      };
-      return createEvidenceStore(join(store, "evidence"));
-    })().catch((error) => {
-      evidence = undefined;
-      throw error;
-    }));
+  const getTraces = lazyStore(async () =>
+    createTraceStore(join(await storeOf(root), "operational-traces")),
+  );
+  const getEvidence = lazyStore(async () =>
+    createEvidenceStore(join(await storeOf(root), "evidence")),
+  );
   return createServer(async (request, response) => {
     const address = response.socket?.localPort;
     const expectedHost = `127.0.0.1:${address}`;

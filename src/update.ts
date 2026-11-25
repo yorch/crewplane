@@ -17,6 +17,7 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { standaloneBinary } from "./environment.ts";
 import { sha256Hex } from "./hash.ts";
 import { syncDirectory } from "./io.ts";
 import { embeddedReleaseTrust } from "./release-keys.ts";
@@ -155,9 +156,9 @@ async function retainRelease(
  * per platform plus a `<asset>.sha256` line. Nothing here touches project
  * state, the supervisor, holds, budgets or queued controls.
  */
-export const releaseRepository = "yorch/crewplane";
-export const defaultReleaseApi = `https://api.github.com/repos/${releaseRepository}/releases/latest`;
-export const defaultReleaseBase = `https://github.com/${releaseRepository}/releases/download`;
+const releaseRepository = "yorch/crewplane";
+const defaultReleaseApi = `https://api.github.com/repos/${releaseRepository}/releases/latest`;
+const defaultReleaseBase = `https://github.com/${releaseRepository}/releases/download`;
 
 export type UpdateEnvironment = Record<string, string | undefined>;
 export type FetchLike = (input: string, init?: RequestInit) => Promise<unknown>;
@@ -336,7 +337,7 @@ export function expectedDigest(value: string, asset: string): string {
   throw new Error(`Missing SHA-256 checksum for ${asset}`);
 }
 
-export function assertDigest(
+function assertDigest(
   bytes: Uint8Array,
   expected: string,
   asset: string,
@@ -528,11 +529,7 @@ export function updateDue(
  * without reading the environment. Local builds keep the runtime lookup.
  */
 export function isReleaseBuild(): boolean {
-  return (
-    process.env.CREWPLANE_RELEASE_BUILD === "1" &&
-    (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
-      ?.isStandaloneExecutable === true
-  );
+  return process.env.CREWPLANE_RELEASE_BUILD === "1" && standaloneBinary();
 }
 
 /** Only a compiled, release-marked binary replaces itself, never a retained copy. */

@@ -1,5 +1,4 @@
 // Frozen v1 coordinator interface. F implements store/capture; A serves IDs only.
-export const EVIDENCE_VERSION = 1 as const;
 export const evidenceRoutes = ["dashboard", "synthetic"] as const;
 export const evidenceScenarios = [
   "initial",

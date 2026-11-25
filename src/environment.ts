@@ -206,3 +206,8 @@ export function harnessEnvironment(
     }),
   );
 }
+
+/** True inside a `bun build --compile` executable. */
+export const standaloneBinary = (): boolean =>
+  (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
+    ?.isStandaloneExecutable === true;

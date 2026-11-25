@@ -1,6 +1,23 @@
 export type { Liveness } from "../../liveness.ts";
 
 import type { Liveness } from "../../liveness.ts";
+/** Codes that denote a fault worth surfacing; shared by delivery and the dashboard. */
+export const faultCodes: ReadonlySet<string> = new Set([
+  "supervisor-dead",
+  "supervisor-stale",
+  "supervisor-unknown",
+  "heartbeat-unknown",
+  "config-mismatch",
+  "steering-stalled",
+  "coordinator-long-turn",
+  "pause-failure",
+  "pause-unknown",
+  "operation-stalled",
+  "orphan-or-unknown-child",
+  "task-failed",
+  "review-stalled",
+  "eligible-stalled",
+]);
 export interface WatchdogInput {
   availableSignals?: string[];
   version: 1;
@@ -94,6 +111,9 @@ const live = (n: unknown): boolean =>
   ["alive", "dead", "unknown"].includes(n as string);
 const text = (n: unknown): boolean =>
   typeof n === "string" && /^[\w.:/-]{1,256}$/.test(n);
+const invalid = (): never => {
+  throw new Error("Invalid watchdog input");
+};
 export function evaluateWatchdog(
   input: WatchdogInput,
   previous: WatchdogState | null,
@@ -114,7 +134,7 @@ export function evaluateWatchdog(
       (settings.recoveryEnabled !== undefined &&
         typeof settings.recoveryEnabled !== "boolean")
     )
-      throw 0;
+      invalid();
     if (
       input.version !== 1 ||
       !validTime(input.now) ||
@@ -128,7 +148,7 @@ export function evaluateWatchdog(
       typeof input.supervisor.draining !== "boolean" ||
       !nullableTime(input.availableCapacity)
     )
-      throw 0;
+      invalid();
     if (
       ![input.config.loaded, input.config.disk].every(
         (v) => v === null || text(v),
@@ -138,7 +158,7 @@ export function evaluateWatchdog(
         input.coordinator.oldestUnhandledAt,
       ].every(nullableTime)
     )
-      throw 0;
+      invalid();
     if (
       !Array.isArray(input.children) ||
       input.children.length > 64 ||
@@ -151,7 +171,7 @@ export function evaluateWatchdog(
           (c.retained !== undefined && typeof c.retained !== "boolean"),
       )
     )
-      throw 0;
+      invalid();
     if (
       !Array.isArray(input.queue) ||
       input.queue.length > 64 ||
@@ -175,7 +195,7 @@ export function evaluateWatchdog(
           !nullableTime(q.lastProgressAt),
       )
     )
-      throw 0;
+      invalid();
     if (
       input.lanePauses &&
       (input.lanePauses.length > 64 ||
@@ -185,7 +205,7 @@ export function evaluateWatchdog(
             !["operator", "failure", "waiting", "unknown"].includes(p.reason),
         ))
     )
-      throw 0;
+      invalid();
     if (
       input.pendingOperations &&
       (input.pendingOperations.length > 64 ||
@@ -197,7 +217,7 @@ export function evaluateWatchdog(
             !validTime(p.requestedAt),
         ))
     )
-      throw 0;
+      invalid();
     if (
       previous &&
       (previous.version !== 1 ||
@@ -216,9 +236,10 @@ export function evaluateWatchdog(
             previous.lastNoticeKey.length <= 256)
         ))
     )
-      throw 0;
+      invalid();
   } catch {
-    throw new Error("Invalid watchdog input");
+    // Malformed shapes (missing objects, wrong types) throw TypeErrors above.
+    invalid();
   }
   // A wall-clock step backwards must not kill the daemon: clamp past timestamps.
   const clamp = (value: number | null) =>

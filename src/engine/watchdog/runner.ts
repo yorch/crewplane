@@ -13,7 +13,12 @@ import {
 } from "../../project.ts";
 import { schedulingFingerprint } from "../scheduling.ts";
 import { type Config, validateConfig } from "../supervisor.ts";
-import type { Liveness, WatchdogInput, WatchdogSettings } from "./policy.ts";
+import {
+  faultCodes,
+  type Liveness,
+  type WatchdogInput,
+  type WatchdogSettings,
+} from "./policy.ts";
 import { checkWatchdog, startWatchdog } from "./service.ts";
 
 async function privateJson(path: string, maxBytes = 2097152): Promise<unknown> {
@@ -405,24 +410,8 @@ export async function deliverNotice(
   control: string,
   notice: { key: string; codes: string[] },
 ) {
-  const faults = new Set([
-    "supervisor-dead",
-    "supervisor-stale",
-    "supervisor-unknown",
-    "heartbeat-unknown",
-    "config-mismatch",
-    "steering-stalled",
-    "coordinator-long-turn",
-    "pause-failure",
-    "pause-unknown",
-    "operation-stalled",
-    "orphan-or-unknown-child",
-    "task-failed",
-    "review-stalled",
-    "eligible-stalled",
-  ]);
   const codes = [
-    ...new Set(notice.codes.filter((code) => faults.has(code))),
+    ...new Set(notice.codes.filter((code) => faultCodes.has(code))),
   ].sort();
   if (!codes.length) return;
   const safeDirectory = async (path: string) => {

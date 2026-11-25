@@ -43,6 +43,7 @@ import {
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
+import { standaloneBinary } from "./environment.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
 import { isProcessAlive } from "./liveness.ts";
@@ -233,9 +234,6 @@ const pinMismatchBypass = new Set([
 ]);
 /** Why the last pin mismatch could not hand off, for the refusal to explain. */
 let dispatchSkip: string | undefined;
-const standaloneBinary = () =>
-  (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
-    ?.isStandaloneExecutable === true;
 /** The retained-release directory, or why it cannot be determined. */
 const safeRoot = () => {
   try {

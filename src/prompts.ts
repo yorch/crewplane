@@ -16,7 +16,7 @@ import {
   validId,
 } from "./project.ts";
 
-export function agentPrompt(
+function agentPrompt(
   agent: string,
   role: "implementation" | "review" | "visual" = "implementation",
   instructionsPath = "AGENTS.md",

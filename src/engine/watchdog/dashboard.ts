@@ -1,23 +1,8 @@
 import { join } from "node:path";
 import { checkControlDirectory } from "../../control.ts";
 import { PRIVATE_STATE_MAX_BYTES, readPrivateFile } from "../../io.ts";
+import { faultCodes as faults } from "./policy.ts";
 
-const faults = new Set([
-  "supervisor-dead",
-  "supervisor-stale",
-  "supervisor-unknown",
-  "heartbeat-unknown",
-  "config-mismatch",
-  "steering-stalled",
-  "coordinator-long-turn",
-  "pause-failure",
-  "pause-unknown",
-  "operation-stalled",
-  "orphan-or-unknown-child",
-  "task-failed",
-  "review-stalled",
-  "eligible-stalled",
-]);
 export async function watchdogHealth(control: string, now = Date.now()) {
   try {
     checkControlDirectory(control);
