@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { probeProcess } from "../liveness.ts";
+import { probeDetail } from "../liveness.ts";
 
 export type UsageEvent = {
   version: 1;
@@ -401,7 +401,10 @@ export async function openUsageLedger(
       }
       if (!Number.isSafeInteger(pid) || pid <= 0)
         throw new Error("Invalid writer lock");
-      if (probeProcess(pid) !== "dead") throw new Error("Usage writer active");
+      const owner = probeDetail(pid);
+      if (owner.state === "alive") throw new Error("Usage writer active");
+      if (owner.state === "unknown")
+        throw new Error(`Usage writer active (${owner.code})`);
       await unlink(lockPath);
       lock = await acquire();
     } finally {

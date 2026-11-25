@@ -16,7 +16,7 @@ import {
   publishJson,
   readPrivateFile,
 } from "../../io.ts";
-import { probeProcess } from "../../liveness.ts";
+import { probeDetail } from "../../liveness.ts";
 import { withProcessLock } from "../../process-lock.ts";
 import type {
   WatchdogInput,
@@ -109,8 +109,11 @@ async function run(
             typeof previous.identity !== "string"
           )
             throw Error("Watchdog lease unavailable");
-          if (probeProcess(previous.pid) !== "dead")
+          const owner = probeDetail(previous.pid);
+          if (owner.state === "alive")
             throw Error("Watchdog lease unavailable");
+          if (owner.state === "unknown")
+            throw Error(`Watchdog lease unavailable (${owner.code})`);
           await unlink(ownerPath);
           await rmdir(lease);
           await mkdir(lease, { mode: 0o700 });

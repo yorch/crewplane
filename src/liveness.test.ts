@@ -1,5 +1,10 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { isProcessAlive, probeProcess, validPid } from "./liveness.ts";
+import {
+  isProcessAlive,
+  probeDetail,
+  probeProcess,
+  validPid,
+} from "./liveness.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -8,12 +13,14 @@ const failWith = (code: string) =>
     throw Object.assign(new Error(code), { code });
   });
 
-it("classifies signal-0 outcomes: ESRCH dead, EPERM alive, others unknown", () => {
+it("classifies signal-0 outcomes: only ESRCH is dead; EPERM and others are unknown", () => {
   failWith("ESRCH");
   expect(probeProcess(4242)).toBe("dead");
   expect(isProcessAlive(4242)).toBe(false);
   failWith("EPERM");
-  expect(probeProcess(4242)).toBe("alive");
+  expect(probeProcess(4242)).toBe("unknown");
+  expect(probeDetail(4242)).toEqual({ state: "unknown", code: "EPERM" });
+  // Conservative callers keep treating an unprovable process as possibly alive.
   expect(isProcessAlive(4242)).toBe(true);
   failWith("EINVAL");
   expect(probeProcess(4242)).toBe("unknown");

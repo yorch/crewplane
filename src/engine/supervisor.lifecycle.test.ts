@@ -1432,7 +1432,7 @@ it("clears a retained process group in the loop once it is gone, then accepts cl
     });
   }));
 
-it("counts EPERM from the group probe as alive until ESRCH", () =>
+it("treats EPERM from the group probe as not proven dead until ESRCH", () =>
   withEnv(async () => {
     const f = await fixture();
     let code: "EPERM" | "ESRCH" = "EPERM";
