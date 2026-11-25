@@ -1,16 +1,19 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   constants,
-  type Dirent,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
 } from "node:fs";
 import {
-  chmod,
   mkdir,
   open,
   readFile,
@@ -24,16 +27,20 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Config } from "./contracts.ts";
 import {
   type BindingIdentity,
-  bindControl,
   checkControlDirectory,
+  completeBinding,
   ensureControlDirectory,
+  identityText,
   legacySupervisorDirectory,
   legacyWatchdogDirectory,
+  storeMarkerId,
 } from "./control.ts";
 import { control, validState } from "./engine/control-policy.ts";
+import { validHarness } from "./engine/harness.ts";
 import { validateConfig } from "./engine/supervisor.ts";
 import { acquire } from "./engine/watch.ts";
 import { syncDirectory } from "./io.ts";
+import { validId, validTaskId } from "./project.ts";
 import { cacheDirectory } from "./update.ts";
 
 /** The one stable refusal for state-touching commands while an older layout exists. */
@@ -47,21 +54,50 @@ const narrowing = new Set(["pause", "stop", "cancel"]);
 const heartbeatFreshMs = 60000;
 const heartbeatSkewMs = 5000;
 const journalName = ".migrating-to";
-const interpreted = new Set(["config.json", "state.json", "desired.json"]);
-const maxInterpretedBytes = 2 * 1024 * 1024;
+/** Bounds on what migration will read from an agent-writable tree. */
+export const limits = {
+  file: 1024 * 1024,
+  command: 64 * 1024,
+  total: 8 * 1024 * 1024,
+  commands: 256,
+  inventory: 512,
+  count: 10000,
+  timeoutMs: 30000,
+};
 
-/** Terminal- and bidi-safe rendering of anything an agent could have written. */
+/** Terminal- and bidi-safe rendering: Cc (incl. C1), Cf, Zl and Zp are escaped. */
 export const visible = (value: string) =>
   value.replace(
     /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,
     (c) => `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`,
   );
+/** Escape format, separator and C1 characters inside JSON text; ordinary JSON whitespace is untouched. */
+export const escapeJsonText = (value: string) =>
+  value.replace(/[\p{Cf}\p{Zl}\p{Zp}\u007f-\u009f]/gu, (c) => {
+    let out = "";
+    for (let i = 0; i < c.length; i++)
+      out += `\\u${c.charCodeAt(i).toString(16).padStart(4, "0")}`;
+    return out;
+  });
 const printable = visible;
+/** Bounded, non-blocking JSON read: a FIFO, symlink or huge file is simply null. */
 const readJson = (path: string): unknown => {
+  let fd: number | undefined;
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    fd = openSync(
+      path,
+      constants.O_RDONLY |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK |
+        constants.O_NOCTTY,
+    );
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > limits.file) return null;
+    return JSON.parse(readFileSync(fd, "utf8"));
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 };
 const object = (value: unknown): Record<string, unknown> | null =>
@@ -70,8 +106,11 @@ const object = (value: unknown): Record<string, unknown> | null =>
     : null;
 const pidOf = (value: unknown) =>
   typeof value === "number" ? value : undefined;
+/** Real child/supervisor identities are never PID 0 or 1. */
 const validPid = (pid: unknown): pid is number =>
-  typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0;
+  typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1;
+const sha = (data: Buffer | string) =>
+  createHash("sha256").update(data).digest("hex");
 
 /** Whether a PID is dead, ours, or someone else's (so it cannot be our supervisor). */
 export type Owner = (pid: number) => "dead" | "ours" | "foreign";
@@ -91,31 +130,105 @@ export const processOwner: Owner = (pid) => {
   }
   return "ours";
 };
-/**
- * A PID is only a credible supervisor if it is in the per-user supervisor
- * registry (older releases register too) or, where /proc exists, its command
- * line is a Crewplane supervisor. Any same-user PID can be named in a lease an
- * agent can edit, so being alive and ours is not enough.
- */
-export const registeredSupervisor = (pid: number): boolean => {
+
+interface ProcessInfo {
+  start: number | null;
+  exe: string | null;
+  argv: string[] | null;
+}
+/** Start time (epoch ms), executable and command line of a process, best effort. */
+export function processInfo(pid: number): ProcessInfo {
   try {
-    const directory = join(cacheDirectory(), "supervisors");
-    if (existsSync(join(directory, `${pid}.json`))) return true;
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const ticks = Number(fields[19]);
+    const btime = Number(
+      /^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1],
+    );
+    let hz = 100;
+    try {
+      hz =
+        Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" })) ||
+        100;
+    } catch {
+      /* default 100 */
+    }
+    let exe: string | null = null;
+    try {
+      exe = realpathSync(readlinkSync(`/proc/${pid}/exe`));
+    } catch {
+      /* not readable */
+    }
+    return {
+      start:
+        Number.isFinite(ticks) && Number.isFinite(btime)
+          ? btime * 1000 + (ticks / hz) * 1000
+          : null,
+      exe,
+      argv: readFileSync(`/proc/${pid}/cmdline`, "utf8")
+        .split("\0")
+        .filter(Boolean),
+    };
   } catch {
-    /* unreadable registry: fall through to the command line */
+    /* no /proc: fall back to ps */
   }
   try {
-    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
-    return (
-      argv.includes("start") &&
-      argv.some(
-        (arg) =>
-          /(^|[\\/])crewplane(\.ts)?$/.test(arg) || arg.endsWith("cli.ts"),
-      )
+    const ps = (field: string) =>
+      execFileSync("ps", ["-o", `${field}=`, "-p", String(pid)], {
+        encoding: "utf8",
+      }).trim();
+    const start = Date.parse(ps("lstart"));
+    return {
+      start: Number.isFinite(start) ? start : null,
+      exe: ps("comm") || null,
+      argv: ps("args").split(/\s+/).filter(Boolean),
+    };
+  } catch {
+    return { start: null, exe: null, argv: null };
+  }
+}
+const describeProcess = (pid: number) => {
+  const info = processInfo(pid);
+  return visible(
+    `${info.exe ?? "unknown executable"}: ${(info.argv ?? []).join(" ")}`.slice(
+      0,
+      300,
+    ),
+  );
+};
+/**
+ * A PID is only a credible supervisor if BOTH hold: the per-user registry has an
+ * entry whose registration time fits this very process (it registered shortly
+ * after this process started, so a recycled PID or a later forgery does not
+ * match) AND the executable is crewplane or bun running a start command that
+ * is not an inline script. Any same-user PID can be named in a lease an agent
+ * can edit.
+ */
+export const registeredSupervisor = (pid: number): boolean => {
+  const info = processInfo(pid);
+  if (info.start === null || info.argv === null) return false;
+  try {
+    const entry = object(
+      readJson(join(cacheDirectory(), "supervisors", `${pid}.json`)),
     );
+    const at = Date.parse(String(entry?.at ?? ""));
+    if (!entry || !Number.isFinite(at)) return false;
+    if (at < info.start - 2000 || at - info.start > 300000) return false;
   } catch {
     return false;
   }
+  const exe = basename(info.exe ?? info.argv[0] ?? "");
+  const inline = info.argv.some((arg) =>
+    ["-e", "--eval", "-p", "--print"].includes(arg),
+  );
+  if (inline || !info.argv.includes("start")) return false;
+  if (exe === "crewplane") return true;
+  return (
+    exe === "bun" &&
+    info.argv.some(
+      (arg) => basename(arg) === "cli.ts" && dirname(arg).endsWith("src"),
+    )
+  );
 };
 
 /**
@@ -136,6 +249,8 @@ export interface LivenessOptions {
   isSupervisor?: (pid: number) => boolean;
   /** Our own migration lease is not evidence of a supervisor. */
   skipLease?: boolean;
+  /** PIDs the operator explicitly declared irrelevant (`--ignore-pid`). */
+  ignorePids?: ReadonlySet<number>;
 }
 export function supervisorLiveness(
   directory: string,
@@ -155,17 +270,19 @@ export function supervisorLiveness(
     label: string,
     supervisor: boolean,
   ) => {
-    if (!validPid(pid)) return;
+    if (!validPid(pid) || options.ignorePids?.has(pid)) return;
     const who = owner(pid);
     if (who === "foreign")
       result.suspicious.push(`${label} PID ${pid} is not owned by you`);
     else if (who === "ours") {
-      if (!supervisor) result.children ??= `${label} PID ${pid} is alive`;
+      const what = describeProcess(pid);
+      if (!supervisor)
+        result.children ??= `${label} PID ${pid} is alive (${what})`;
       else if (isSupervisor(pid))
-        result.credible ??= `${label} PID ${pid} is alive`;
+        result.credible ??= `${label} PID ${pid} is alive (${what})`;
       else
         result.suspicious.push(
-          `${label} PID ${pid} is not a registered Crewplane supervisor`,
+          `${label} PID ${pid} is not a registered Crewplane supervisor (${what})`,
         );
     }
   };
@@ -205,33 +322,24 @@ const evidence = (value: Liveness): string[] =>
     (item): item is string => typeof item === "string",
   );
 
-const watchdogLiveness = (
-  directory: string,
-  owner: Owner,
-  isSupervisor: (pid: number) => boolean,
-): string | null => {
-  const lease = object(readJson(join(directory, "lease", "owner.json")));
-  const pid = pidOf(lease?.pid);
-  return validPid(pid) && owner(pid) === "ours" && isSupervisor(pid)
-    ? `watchdog lease is held by live PID ${pid}`
-    : null;
-};
-
 export interface ControlTarget {
   /** Where the command reads and (first) writes. */
   directory: string;
   /** Narrowing verbs are also queued here, since late application is safe. */
   also?: string[];
   warning?: string;
+  /** Legacy state is never routed to as truth; status shows it as unverified. */
+  unverifiedLegacy?: string;
 }
 /**
  * Resolve which directory(ies) a command operates on. Without a legacy layout
  * it is the control directory. With one, state-touching commands refuse with
  * the stable message; the halting verbs stay usable. A live NEW supervisor
  * always wins (forged legacy state cannot divert a halt); a credibly live OLD
- * supervisor is addressed in the legacy directory (its state is unverified,
- * agent-writable data); ambiguous legacy liveness queues narrowing verbs into
- * both directories.
+ * supervisor is addressed in the legacy directory for narrowing verbs only;
+ * ambiguous legacy liveness queues narrowing verbs into both directories.
+ * `status` always reads the control directory and shows legacy state only as
+ * unverified.
  */
 export function resolveControlTarget(
   store: string,
@@ -246,6 +354,12 @@ export function resolveControlTarget(
     const note = evidence(old).length
       ? ` (legacy claims: ${evidence(old).join("; ")})`
       : "";
+    if (command === "status")
+      return {
+        directory: control,
+        unverifiedLegacy: legacy,
+        warning: `crewplane: a legacy supervisor directory exists in the project store; its state is shown as unverified (agents can write it)${note}. Run \`crewplane migrate\``,
+      };
     if (isLive(supervisorLiveness(control, options)))
       return {
         directory: control,
@@ -274,48 +388,7 @@ function isSymlink(path: string) {
   }
 }
 
-interface Entry {
-  path: string;
-  kind: "file" | "directory";
-  size: number;
-}
-/** Regular files and directories only; anything else is refused by name. */
-function scan(root: string, skip: ReadonlySet<string> = new Set()): Entry[] {
-  const result: Entry[] = [];
-  const visit = (relative: string) => {
-    for (const item of readdirSync(join(root, relative), {
-      withFileTypes: true,
-    }) as Dirent[]) {
-      const path = join(relative, item.name);
-      if (path === journalName || skip.has(path)) continue;
-      const info = lstatSync(join(root, path));
-      if (info.isDirectory()) {
-        result.push({ path, kind: "directory", size: 0 });
-        visit(path);
-      } else if (info.isFile())
-        result.push({ path, kind: "file", size: info.size });
-      else
-        throw new Error(
-          `Cannot migrate ${printable(path)}: only regular files and directories are moved`,
-        );
-    }
-  };
-  visit("");
-  return result;
-}
-const sha = (data: Buffer | string) =>
-  createHash("sha256").update(data).digest("hex");
-async function treeDigest(root: string) {
-  const hash = createHash("sha256");
-  for (const entry of scan(root).sort((a, b) => a.path.localeCompare(b.path)))
-    hash.update(
-      `${entry.kind}\0${entry.path}\0${entry.size}\0${
-        entry.kind === "file" ? sha(await readFile(join(root, entry.path))) : ""
-      }\n`,
-    );
-  return hash.digest("hex");
-}
-/** Sorted-key JSON so equal configurations print and hash identically. */
+/** Sorted-key JSON so equal values print and hash identically. */
 const canonical = (value: unknown): unknown =>
   Array.isArray(value)
     ? value.map(canonical)
@@ -332,7 +405,7 @@ const canonicalText = (value: unknown) =>
 export interface MoveOptions {
   /** Test hook: runs after each fresh staged file is written, before verification. */
   afterStageFile?: (path: string) => Promise<void>;
-  /** Test hook: runs after the snapshot was staged, before it is validated. */
+  /** Test hook: runs after the snapshot was read, before it is interpreted. */
   afterSnapshot?: () => Promise<void>;
   /** Runs after the staged tree was published and before the source is retired. */
   afterPublish?: () => Promise<void>;
@@ -350,98 +423,225 @@ const readJournal = (from: string): Journal | null => {
     ? (value as unknown as Journal)
     : null;
 };
+async function treeDigest(root: string) {
+  const hash = createHash("sha256");
+  const visit = async (relative: string) => {
+    for (const name of readdirSync(join(root, relative)).sort()) {
+      const path = join(relative, name);
+      const info = lstatSync(join(root, path));
+      if (info.isDirectory()) {
+        hash.update(`d\0${path}\n`);
+        await visit(path);
+      } else if (info.isFile())
+        hash.update(`f\0${path}\0${sha(await readFile(join(root, path)))}\n`);
+      else hash.update(`x\0${path}\n`);
+    }
+  };
+  await visit("");
+  return hash.digest("hex");
+}
 /** A previous run published its staged copy but did not retire the source. */
 async function resumable(from: string, to: string): Promise<boolean> {
   const journal = readJournal(from);
   if (!journal || journal.destination !== to || !existsSync(to)) return false;
   return (await treeDigest(to)) === journal.digest;
 }
-/** Retire the legacy tree: delete it, or keep it inert when it holds late files. */
-async function retire(from: string, keep: boolean) {
+/** Retire a legacy tree: renamed aside and KEPT, never deleted, for inspection. */
+async function retire(from: string) {
   const retired = join(
     dirname(from),
     `${basename(from)}.migrated-${randomUUID().slice(0, 8)}`,
   );
   await rename(from, retired);
   await syncDirectory(dirname(from));
-  if (keep) return retired;
-  try {
-    await rm(retired, { recursive: true });
-    return null;
-  } catch {
-    return retired;
-  }
+  return retired;
 }
 
-interface Staged {
-  entries: Array<{
-    path: string;
-    kind: "file" | "directory";
-    size: number;
-    mtimeMs: number;
-  }>;
-  texts: Map<string, Buffer>;
-  hardlinked: string[];
-}
-async function readRegular(path: string) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+type Read = { data: Buffer } | { left: string };
+/**
+ * Bounded read of one named file from an agent-writable tree: opened without
+ * following symlinks, without blocking on FIFOs and without becoming a
+ * controlling terminal; size is checked on the descriptor BEFORE reading.
+ */
+async function boundedRead(path: string, cap: number): Promise<Read> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(
+      path,
+      constants.O_RDONLY |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK |
+        constants.O_NOCTTY,
+    );
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { left: "absent" };
+    return { left: `not openable (${code ?? "error"})` };
+  }
   try {
     const info = await handle.stat();
-    if (!info.isFile())
-      throw new Error(`Cannot migrate ${printable(path)}: not a regular file`);
-    return { data: await handle.readFile(), info };
+    if (!info.isFile()) return { left: "not a regular file" };
+    if (info.size > cap) return { left: `larger than ${cap} bytes` };
+    const buffer = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < info.size) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        offset,
+        info.size - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return { data: buffer.subarray(0, offset) };
   } finally {
     await handle.close();
   }
 }
+
+export interface LeftBehind {
+  name: string;
+  class: string;
+  files: number;
+}
+const classOf = (name: string): string =>
+  /^(watcher\.lock|recovery\.lock|lease|lease-acquire\.lock)$/.test(name)
+    ? "lease or lock"
+    : name === "identity.json" || /binding/.test(name)
+      ? "identity or binding"
+      : name === "pi-sessions"
+        ? "native session files"
+        : name === "runs"
+          ? "run logs"
+          : name === "result-schema.json"
+            ? "regenerated result schema"
+            : name === "quarantined-commands"
+              ? "earlier quarantine"
+              : name === journalName
+                ? "migration journal"
+                : name === "commands"
+                  ? "pending commands beyond the cap"
+                  : "unknown";
+const countFiles = (path: string, budget = { left: limits.count }): number => {
+  let total = 0;
+  try {
+    const info = lstatSync(path);
+    if (!info.isDirectory()) return 1;
+    for (const name of readdirSync(path)) {
+      if (budget.left-- <= 0) return total;
+      total += countFiles(join(path, name), budget);
+    }
+  } catch {
+    /* unreadable: counted as nothing */
+  }
+  return total;
+};
+
+interface Snapshot {
+  texts: Map<string, Buffer>;
+  /** Commands that could not be read at all (listed, never published). */
+  unreadable: Array<{ name: string; reason: string }>;
+  commandNames: string[];
+  commandsBeyondCap: number;
+  leftBehind: LeftBehind[];
+}
+const adoptableNames = new Set(["config.json", "state.json", "desired.json"]);
 /**
- * Snapshot a legacy tree into FRESH private files. Nothing is renamed or
- * hard-linked, so a hard link, an open descriptor or a working directory an
- * agent holds inside the old tree can never reach the new files. When `stage`
- * is null (dry run) the same reads happen without writing anything.
+ * Read only what can be adopted: the three known files and a flat commands/
+ * directory. Everything else is merely inventoried. Directory identity is
+ * re-checked afterwards, so a swap cannot make the reads leave the tree.
  */
 async function snapshot(
-  from: string,
-  stage: string | null,
-  skip: ReadonlySet<string>,
-  hooks: MoveOptions,
-): Promise<Staged> {
-  const result: Staged = { entries: [], texts: new Map(), hardlinked: [] };
-  if (stage) await mkdir(stage, { mode: 0o700 });
-  for (const entry of scan(from, skip)) {
-    if (entry.kind === "directory") {
-      if (stage) await mkdir(join(stage, entry.path), { mode: 0o700 });
-      const info = lstatSync(join(from, entry.path));
-      result.entries.push({ ...entry, mtimeMs: info.mtimeMs });
+  legacy: string,
+  ours: ReadonlySet<string>,
+  deadline: () => void,
+): Promise<Snapshot> {
+  const result: Snapshot = {
+    texts: new Map(),
+    unreadable: [],
+    commandNames: [],
+    commandsBeyondCap: 0,
+    leftBehind: [],
+  };
+  const identity = (path: string) => {
+    const info = lstatSync(path);
+    return `${info.dev}:${info.ino}:${info.isDirectory() ? "d" : "x"}`;
+  };
+  const rootId = identity(legacy);
+  let total = 0;
+  const names = readdirSync(legacy);
+  if (names.length > limits.inventory)
+    throw new Error(
+      `Legacy directory has more than ${limits.inventory} entries; set it aside with \`crewplane migrate --discard-legacy\``,
+    );
+  for (const name of names.sort()) {
+    deadline();
+    if (ours.has(name)) continue;
+    if (adoptableNames.has(name)) {
+      const read = await boundedRead(join(legacy, name), limits.file);
+      if ("data" in read) {
+        total += read.data.length;
+        result.texts.set(name, read.data);
+      } else
+        result.leftBehind.push({
+          name,
+          class: `not adopted: ${read.left}`,
+          files: 1,
+        });
       continue;
     }
-    const { data, info } = await readRegular(join(from, entry.path));
-    if (info.nlink > 1) result.hardlinked.push(entry.path);
-    const digest = sha(data);
-    result.entries.push({ ...entry, size: data.length, mtimeMs: info.mtimeMs });
-    const name = entry.path;
-    if (
-      (interpreted.has(name) || dirname(name) === "commands") &&
-      data.length <= maxInterpretedBytes
-    )
-      result.texts.set(name, data);
-    if (stage) {
-      const target = join(stage, entry.path);
-      const handle = await open(target, "wx", 0o600);
-      try {
-        await handle.writeFile(data);
-        await handle.sync();
-      } finally {
-        await handle.close();
+    if (name === "commands") {
+      const commands = join(legacy, "commands");
+      const before = identity(commands);
+      const listed = before.endsWith(":d") ? readdirSync(commands).sort() : [];
+      if (!before.endsWith(":d"))
+        result.leftBehind.push({
+          name,
+          class: "commands is not a plain directory",
+          files: 1,
+        });
+      result.commandsBeyondCap = Math.max(0, listed.length - limits.commands);
+      for (const file of listed.slice(0, limits.commands)) {
+        deadline();
+        result.commandNames.push(file);
+        if (!/^[a-f0-9-]{36}\.json$/.test(file)) {
+          result.unreadable.push({
+            name: file,
+            reason: "not a command file name",
+          });
+          continue;
+        }
+        const read = await boundedRead(join(commands, file), limits.command);
+        if ("data" in read) {
+          total += read.data.length;
+          if (total > limits.total)
+            throw new Error(
+              `Legacy files exceed ${limits.total} bytes; set it aside with \`crewplane migrate --discard-legacy\``,
+            );
+          result.texts.set(`commands/${file}`, read.data);
+        } else result.unreadable.push({ name: file, reason: read.left });
       }
-      await hooks.afterStageFile?.(target);
-      if (sha(await readFile(target)) !== digest)
+      if (before.endsWith(":d") && identity(commands) !== before)
         throw new Error(
-          `Verification failed for ${printable(entry.path)}; nothing was removed`,
+          "The legacy commands directory changed while it was read; nothing was published",
         );
+      continue;
     }
+    result.leftBehind.push({
+      name,
+      class: classOf(name),
+      files: countFiles(join(legacy, name)),
+    });
   }
-  if (stage) await syncDirectory(stage);
+  if (total > limits.total)
+    throw new Error(
+      `Legacy files exceed ${limits.total} bytes; set it aside with \`crewplane migrate --discard-legacy\``,
+    );
+  if (identity(legacy) !== rootId)
+    throw new Error(
+      "The legacy directory was replaced while it was read; nothing was published",
+    );
   return result;
 }
 
@@ -453,47 +653,44 @@ export interface MigrateOptions {
   identity?: BindingIdentity;
   dryRun?: boolean;
   discardLegacy?: boolean;
-  /** SHA-256 digest of the reviewed staged snapshot (from `migrate --dry-run`). */
+  /** PIDs the operator declared irrelevant to `--discard-legacy`. */
+  ignorePids?: readonly number[];
+  /** SHA-256 digest of the reviewed adopted files (from `migrate --dry-run`). */
   acceptConfig?: string | undefined;
   move?: MoveOptions;
   owner?: Owner;
   isSupervisor?: (pid: number) => boolean;
   now?: number;
+  timeoutMs?: number;
   /** Test hook: runs after preflight, before leases and the snapshot. */
   afterPreflight?: () => Promise<void>;
 }
 export interface PendingCommand {
   id: string;
   action: string;
-}
-export interface AdoptedProcess {
-  record: string;
-  pid: number | null;
-  processGroupId: number | null;
-  alive: boolean;
+  reason?: string;
 }
 export interface MigrateReport {
   version: 1;
   status: "migrated" | "dry-run" | "nothing-to-migrate" | "discarded";
   from: string | null;
   to: string;
-  method: "staged-copy" | null;
-  files: number;
-  bytes: number;
-  watchdog: boolean;
+  /** Canonical text of every file that will be published (besides identity.json). */
+  files: Record<string, string>;
+  /** SHA-256 over the sorted (path, sha256) pairs of `files`; what `--accept-config` binds. */
+  digest: string | null;
+  /** The validated configuration, canonical, every key. */
+  config: Config | null;
+  configAccepted: boolean;
   rearmedCommands: PendingCommand[];
   quarantinedCommands: PendingCommand[];
-  /** The complete validated configuration, canonical, every key. */
-  config: Config | null;
-  /** SHA-256 of the staged snapshot's interpreted content; pass to --accept-config. */
-  digest: string | null;
-  configAccepted: boolean;
-  adoptedProcesses: AdoptedProcess[];
-  hardlinkedSources: string[];
-  lateFilesLeftBehind: string[];
+  leftBehind: LeftBehind[];
   ignoredLivenessClaims: string[];
+  ignoredPids: number[];
   discardedTo: string | null;
+  /** The retired legacy directory, kept for inspection. */
   leftover: string | null;
+  watchdogSetAside: string | null;
 }
 
 function legacyProblem(path: string): string | null {
@@ -513,34 +710,58 @@ const isEmptyDirectory = (path: string) => {
     throw error;
   }
 };
-const inside = (path: string, directory: string) => {
-  const resolvedPath = (() => {
+
+export interface PathProbe {
+  realpath?: (path: string) => string;
+  caseInsensitive?: boolean;
+}
+const probeCase = (directory: string): boolean => {
+  try {
+    const name = basename(directory);
+    const flipped =
+      name === name.toLowerCase() ? name.toUpperCase() : name.toLowerCase();
+    if (flipped === name) return false;
+    const a = statSync(directory);
+    const b = statSync(join(dirname(directory), flipped));
+    return a.ino === b.ino && a.dev === b.dev;
+  } catch {
+    return false;
+  }
+};
+/** Whether `path` (symlinks resolved, case folded on insensitive volumes) lies under `directory`. */
+export const insideDirectory = (
+  path: string,
+  directory: string,
+  probe: PathProbe = {},
+) => {
+  const real = probe.realpath ?? ((p: string) => realpathSync.native(p));
+  const settle = (p: string) => {
+    const absolute = isAbsolute(p) ? p : join(directory, p);
     try {
-      return realpathSync(isAbsolute(path) ? path : join(directory, path));
+      return real(absolute);
     } catch {
-      return resolve(isAbsolute(path) ? path : join(directory, path));
+      return resolve(absolute);
     }
-  })();
-  const base = (() => {
-    try {
-      return realpathSync(directory);
-    } catch {
-      return resolve(directory);
-    }
-  })();
-  return resolvedPath === base || resolvedPath.startsWith(`${base}${sep}`);
+  };
+  const fold = probe.caseInsensitive ?? probeCase(settle(directory));
+  const norm = (p: string) => (fold ? p.toLowerCase() : p);
+  const target = norm(settle(path));
+  const base = norm(settle(directory));
+  return target === base || target.startsWith(`${base}${sep}`);
 };
 /**
- * Review text for the operator: every effective binary, a marker on anything an
- * agent could edit, then the complete canonical configuration. Nothing an agent
- * wrote is rendered raw.
+ * Review text for the operator: the effective binary for every agent exactly
+ * as the supervisor resolves it (only codex falls back to the top-level
+ * `binary`), a marker on anything inside the project, then the complete
+ * canonical configuration. Nothing an agent wrote is rendered raw.
  */
 export function describeConfig(
   config: Config,
-  where: { root: string; store: string },
+  where: { root: string; store: string } & PathProbe,
 ): string {
   const flag = (path: string) =>
-    inside(path, where.root) || inside(path, where.store)
+    insideDirectory(path, where.root, where) ||
+    insideDirectory(path, where.store, where)
       ? "  [WARNING: inside the project; agents can modify it]"
       : "";
   const lines = ["Effective binary per agent:"];
@@ -548,9 +769,13 @@ export function describeConfig(
     const harness = lane.harness ?? "codex";
     const binary =
       (config.binaries as Record<string, string> | undefined)?.[harness] ??
-      config.binary;
+      (harness === "codex" ? config.binary : undefined);
     lines.push(
-      `  ${id} (${harness}, ${lane.enabled ? "enabled" : "disabled"}): ${binary}${flag(binary)}`,
+      `  ${id} (${harness}, ${lane.enabled ? "enabled" : "disabled"}): ${
+        binary === undefined
+          ? "NONE CONFIGURED (the harness would not start)"
+          : `${binary}${flag(binary)}`
+      }`,
     );
   }
   const guidance = Object.entries(config.lanes).filter(
@@ -565,64 +790,64 @@ export function describeConfig(
   lines.push(...canonicalText(config).trimEnd().split("\n"));
   return lines.map(visible).join("\n");
 }
-
-/** Decode and normalize one pending command; only narrowing ones are re-armed. */
-function classifyCommand(
-  data: Buffer | undefined,
-  now: string,
-): { action: string; rearm?: unknown } {
-  if (!data) return { action: "invalid" };
-  try {
-    const value = control(JSON.parse(data.toString("utf8")));
-    if (
-      !narrowing.has(value.action) ||
-      (value as { cancelActive?: unknown }).cancelActive === true
-    )
-      return { action: value.action };
-    // Re-arm only the action and its selector; forged issuer, generation and
-    // timestamps are dropped.
-    const pick = (key: string) =>
-      (value as unknown as Record<string, unknown>)[key] === undefined
-        ? {}
-        : { [key]: (value as unknown as Record<string, unknown>)[key] };
-    const normalized = control({
-      v: 2,
-      action: value.action,
-      ...pick("lane"),
-      ...pick("all"),
-      ...pick("run"),
-      issuer: "migrate",
-      at: now,
-    });
-    return normalized.action === "invalid"
-      ? { action: "invalid" }
-      : { action: value.action, rearm: normalized };
-  } catch {
-    return { action: "invalid" };
-  }
+/** Everything the operator must read before accepting a digest. */
+export function describeAdoption(
+  report: MigrateReport,
+  where: { root: string; store: string } & PathProbe,
+): string {
+  const lines: string[] = [];
+  if (report.config) lines.push(describeConfig(report.config, where));
+  for (const [path, text] of Object.entries(report.files))
+    if (path !== "config.json")
+      lines.push(
+        `--- ${path} (canonical, adopted exactly as shown) ---`,
+        text.trimEnd(),
+      );
+  for (const command of report.rearmedCommands)
+    lines.push(`re-armed: ${command.action} ${command.id}`);
+  for (const command of report.quarantinedCommands)
+    lines.push(
+      `NOT armed: ${command.action} ${command.id}${command.reason ? ` (${command.reason})` : ""}`,
+    );
+  for (const item of report.leftBehind)
+    lines.push(
+      `left behind (not adopted): ${item.name} - ${item.class}, ${item.files} file(s)`,
+    );
+  return lines.map(visible).join("\n");
 }
+
+/** Record fields adopted into state, and nothing prompt-bearing or free text. */
+const recordStatus = new Set(["running", "idle", "paused"]);
+const pauseKinds = new Set(["failure", "operator", "decision", "no-progress"]);
+const shortReason = (value: unknown) =>
+  typeof value === "string"
+    ? visible(value.replace(/\s+/g, " ").slice(0, 200))
+    : "";
+const counter = (n: unknown) =>
+  typeof n === "number" && Number.isSafeInteger(n) && n >= 0 ? n : 0;
 
 interface Interpretation {
   config: Config | null;
-  configText: string | null;
-  stateText: string | null;
-  rearm: Array<PendingCommand & { name: string; value: unknown }>;
-  quarantine: Array<PendingCommand & { name: string }>;
-  adopted: AdoptedProcess[];
-  digest: string;
+  files: Map<string, string>;
+  rearm: PendingCommand[];
+  quarantine: PendingCommand[];
 }
-/** Validate and classify ONLY the staged snapshot; the legacy tree is never consulted. */
+/**
+ * Validate the snapshot and build the canonical bytes that will be published.
+ * Nothing is copied raw: every adopted file is re-serialized from validated
+ * values, and the digest covers exactly those bytes.
+ */
 function interpret(
-  staged: Staged,
-  options: { root: string; owner: Owner; now: string },
+  snap: Snapshot,
+  options: { root: string; owner: Owner },
 ): Interpretation {
   const discard =
     "inspect it or set the directory aside with `crewplane migrate --discard-legacy`";
+  const files = new Map<string, string>();
   let config: Config | null = null;
-  const rawConfig = staged.texts.get("config.json");
-  if (staged.entries.some((e) => e.path === "config.json")) {
+  const rawConfig = snap.texts.get("config.json");
+  if (rawConfig) {
     try {
-      if (!rawConfig) throw new Error("unreadable or too large");
       config = validateConfig(JSON.parse(rawConfig.toString("utf8")));
     } catch (error) {
       throw new Error(
@@ -633,14 +858,41 @@ function interpret(
       throw new Error(
         `Legacy config.json belongs to another project root (${printable(config.root)}); refusing to adopt it`,
       );
+    files.set("config.json", canonicalText(config));
   }
-  let state: Record<string, unknown> | null = null;
-  const adopted: AdoptedProcess[] = [];
-  if (staged.entries.some((e) => e.path === "state.json")) {
-    const raw = staged.texts.get("state.json");
-    let parsed: unknown = null;
+  const rawDesired = snap.texts.get("desired.json");
+  if (rawDesired) {
+    let parsed: unknown;
     try {
-      parsed = raw ? JSON.parse(raw.toString("utf8")) : null;
+      parsed = JSON.parse(rawDesired.toString("utf8"));
+    } catch {
+      parsed = null;
+    }
+    const desired = object(parsed);
+    if (!desired || typeof desired.desiredRunning !== "boolean")
+      throw new Error(
+        `Legacy desired.json failed structural validation; ${discard}`,
+      );
+    files.set(
+      "desired.json",
+      canonicalText({
+        version: 1,
+        desiredRunning: desired.desiredRunning,
+        reason: shortReason(desired.reason),
+        at: new Date(
+          typeof desired.at === "string" &&
+            Number.isFinite(Date.parse(desired.at))
+            ? Date.parse(desired.at)
+            : 0,
+        ).toISOString(),
+      }),
+    );
+  }
+  const rawState = snap.texts.get("state.json");
+  if (rawState) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawState.toString("utf8"));
     } catch {
       parsed = null;
     }
@@ -648,119 +900,190 @@ function interpret(
       throw new Error(
         `Legacy state.json failed structural validation; ${discard}`,
       );
-    state = parsed as unknown as Record<string, unknown>;
-    if (state.pid !== undefined && !validPid(state.pid))
-      throw new Error(
-        `Legacy state.json records an invalid supervisor pid; ${discard}`,
-      );
-    for (const [key, record] of Object.entries(object(state.records) ?? {})) {
-      const entry = object(record) ?? {};
-      for (const field of ["pid", "processGroupId"])
-        if (entry[field] !== undefined && !validPid(entry[field]))
-          throw new Error(
-            `Legacy state.json record ${printable(key)} has an invalid ${field}; ${discard}`,
-          );
+    const state = parsed as unknown as Record<string, unknown>;
+    const records: Record<string, unknown> = {};
+    for (const [key, raw] of Object.entries(object(state.records) ?? {})) {
+      const entry = object(raw) ?? {};
+      const identity: Record<string, number> = {};
       if (entry.pid !== undefined || entry.processGroupId !== undefined) {
-        const pid = (entry.pid as number | undefined) ?? null;
-        const group = (entry.processGroupId as number | undefined) ?? null;
-        adopted.push({
-          record: key,
-          pid,
-          processGroupId: group,
-          alive:
-            (pid !== null && options.owner(pid) !== "dead") ||
-            (group !== null && options.owner(group) !== "dead"),
-        });
+        const pid = entry.pid as number | undefined;
+        const group = entry.processGroupId as number | undefined;
+        for (const candidate of [pid, group])
+          if (candidate !== undefined && options.owner(candidate) !== "dead")
+            throw new Error(
+              `Legacy record ${printable(key)} carries live process ${candidate}; stop that process (the old supervisor and its children must be gone) and rerun`,
+            );
+        if (pid !== undefined) identity.pid = pid;
+        if (group !== undefined) identity.processGroupId = group;
       }
+      records[key] = {
+        key,
+        lane: entry.lane,
+        task:
+          typeof entry.task === "string" && validTaskId(entry.task)
+            ? entry.task
+            : null,
+        cwd:
+          typeof entry.cwd === "string" && isAbsolute(entry.cwd)
+            ? entry.cwd.slice(0, 4096)
+            : options.root,
+        status: recordStatus.has(String(entry.status)) ? entry.status : "idle",
+        reason: shortReason(entry.reason),
+        ...(pauseKinds.has(String(entry.pauseKind))
+          ? { pauseKind: entry.pauseKind }
+          : {}),
+        ...(typeof entry.pauseId === "string" &&
+        /^[a-f0-9-]{36}$/.test(entry.pauseId)
+          ? { pauseId: entry.pauseId }
+          : {}),
+        ...(entry.cleanupUnverified === true
+          ? { cleanupUnverified: true }
+          : {}),
+        ...(validHarness(entry.harness) ? { harness: entry.harness } : {}),
+        seen: [],
+        runs: Array.isArray(entry.runs)
+          ? entry.runs.map(counter).slice(-120)
+          : [],
+        noProgress: counter(entry.noProgress),
+        inputTokens: counter(entry.inputTokens),
+        outputTokens: counter(entry.outputTokens),
+        ...identity,
+      };
     }
+    const lanes = (value: unknown) =>
+      Array.isArray(value) ? value.filter((l) => validId(l)).slice(0, 64) : [];
+    const laneRev = Object.fromEntries(
+      Object.entries(object(state.laneRev) ?? {})
+        .filter(([lane]) => validId(lane))
+        .map(([lane, n]) => [lane, counter(n)]),
+    );
+    const retiredRuns = Object.fromEntries(
+      Object.entries(object(state.retiredRuns) ?? {})
+        .filter(([lane]) => validId(lane))
+        .map(([lane, runs]) => [
+          lane,
+          Array.isArray(runs) ? runs.map(counter).slice(-60) : [],
+        ]),
+    );
+    files.set(
+      "state.json",
+      canonicalText({
+        version: 2,
+        running: state.running === true,
+        checkedAt: new Date(
+          Number.isFinite(Date.parse(String(state.checkedAt)))
+            ? Date.parse(String(state.checkedAt))
+            : 0,
+        ).toISOString(),
+        pid: 0,
+        draining: false,
+        held: lanes(state.held),
+        ...(state.instanceHeld === true ? { instanceHeld: true } : {}),
+        laneRev,
+        controlSeq: counter(state.controlSeq),
+        retiredRuns,
+        commands: [],
+        notices: {},
+        records,
+      }),
+    );
   }
-  let desired: unknown = null;
-  if (staged.entries.some((e) => e.path === "desired.json")) {
+  // Pending commands: only decoded narrowing controls naming a configured
+  // lane are re-armed, reduced to action and selector, without a timestamp.
+  const rearm: PendingCommand[] = [];
+  const quarantine: PendingCommand[] = [];
+  for (const file of snap.commandNames) {
+    const id = file.endsWith(".json") ? file.slice(0, -5) : file;
+    const data = snap.texts.get(`commands/${file}`);
+    const unreadable = snap.unreadable.find((u) => u.name === file);
+    const refuse = (action: string, reason: string) =>
+      quarantine.push({ id, action, reason });
+    if (unreadable || !data) {
+      refuse("invalid", unreadable?.reason ?? "unreadable");
+      continue;
+    }
+    let value: ReturnType<typeof control>;
     try {
-      desired = JSON.parse(
-        staged.texts.get("desired.json")?.toString("utf8") ?? "",
-      );
+      value = control(JSON.parse(data.toString("utf8")));
     } catch {
-      desired = null;
+      refuse("invalid", "undecodable");
+      continue;
+    }
+    if (value.action === "invalid") {
+      refuse("invalid", "not a valid control");
+      continue;
     }
     if (
-      !object(desired) ||
-      typeof object(desired)?.desiredRunning !== "boolean"
-    )
-      throw new Error(
-        `Legacy desired.json failed structural validation; ${discard}`,
-      );
+      !narrowing.has(value.action) ||
+      (value as { cancelActive?: unknown }).cancelActive === true
+    ) {
+      refuse(value.action, "widening or cancelling control");
+      continue;
+    }
+    const fields = value as unknown as Record<string, unknown>;
+    if (
+      typeof fields.lane === "string" &&
+      !(config && Object.hasOwn(config.lanes, fields.lane))
+    ) {
+      refuse(value.action, "names an agent the adopted configuration lacks");
+      continue;
+    }
+    const pick = (key: string) =>
+      fields[key] === undefined ? {} : { [key]: fields[key] };
+    const normalized = control({
+      v: 2,
+      action: value.action,
+      ...pick("lane"),
+      ...pick("all"),
+      ...pick("run"),
+      issuer: "migrate",
+    });
+    if (normalized.action === "invalid") {
+      refuse(value.action, "selector did not validate");
+      continue;
+    }
+    files.set(`commands/${id}.json`, canonicalText(normalized));
+    rearm.push({ id, action: value.action });
   }
-  const rearm: Interpretation["rearm"] = [];
-  const quarantine: Interpretation["quarantine"] = [];
-  const commandNames = staged.entries.filter(
-    (e) => dirname(e.path) === "commands" || e.path === "commands",
+  return { config, files, rearm, quarantine };
+}
+const digestOf = (files: Map<string, string>) =>
+  sha(
+    JSON.stringify(
+      [...files.entries()]
+        .map(([path, text]) => [path, sha(text)])
+        .sort((a, b) => (a[0] as string).localeCompare(b[0] as string)),
+    ),
   );
-  for (const entry of commandNames) {
-    if (entry.path === "commands") continue;
-    const name = basename(entry.path);
-    const id = name.endsWith(".json") ? name.slice(0, -5) : name;
-    const valid =
-      entry.kind === "file" &&
-      /^[a-f0-9-]{36}\.json$/.test(name) &&
-      entry.size <= 65536;
-    const result = valid
-      ? classifyCommand(staged.texts.get(entry.path), options.now)
-      : { action: "invalid" };
-    if ("rearm" in result && result.rearm)
-      rearm.push({ id, action: result.action, name, value: result.rearm });
-    else quarantine.push({ id, action: result.action, name });
+
+async function writeFresh(
+  path: string,
+  text: string,
+  hook?: (path: string) => Promise<void>,
+) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(text);
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
-  const rearmed = new Set(rearm.flatMap((r) => [r.name, r.id]));
-  let stateText: string | null = null;
-  if (state) {
-    const commands = Array.isArray(state.commands) ? state.commands : [];
-    state = {
-      ...state,
-      commands: commands.filter(
-        (c) => !(typeof c === "string" && rearmed.has(c)),
-      ),
-    };
-    stateText = canonicalText(state);
-  }
-  const digest = sha(
-    JSON.stringify({
-      config: config ? canonicalText(config) : null,
-      state: stateText,
-      desired: desired === null ? null : canonicalText(desired),
-      rearm: rearm
-        .map((r) => {
-          // The re-arm timestamp is not part of what the operator reviews.
-          const { at: _at, ...stable } = r.value as Record<string, unknown>;
-          return [r.id, canonicalText(stable)];
-        })
-        .sort(),
-      quarantine: quarantine
-        .map((q) => [
-          q.id,
-          q.action,
-          sha(staged.texts.get(`commands/${q.name}`) ?? ""),
-        ])
-        .sort(),
-    }),
-  );
-  return {
-    config,
-    configText: config ? canonicalText(config) : null,
-    stateText,
-    rearm,
-    quarantine,
-    adopted,
-    digest,
-  };
+  await hook?.(path);
+  if (sha(await readFile(path)) !== sha(text))
+    throw new Error(
+      `Verification failed for ${printable(path)}; nothing was removed`,
+    );
 }
 
 /**
  * Relocate pre-relocation control state into the private control directory.
- * The legacy tree is agent-writable, so nothing in it is moved: it is read once
- * into a private staging directory as fresh 0600 files, validated and
- * classified only there, shown to the operator with a digest and published
- * exactly as staged. Anything that arrives after the snapshot stays behind.
+ * The legacy tree is agent-writable, so only an allowlist is adopted and every
+ * adopted file is re-serialized from validated values: config.json,
+ * desired.json, a minimal subset of state.json and re-armable narrowing
+ * commands. Leases, identity, native sessions, run logs, the watchdog tree and
+ * anything unknown stay behind in the retired legacy directory. The digest
+ * covers exactly the bytes published.
  */
 export async function migrateControl(
   options: MigrateOptions,
@@ -777,127 +1100,141 @@ export async function migrateControl(
     status: options.dryRun ? "dry-run" : "migrated",
     from: hasSupervisor ? legacy : null,
     to: options.control,
-    method: null,
-    files: 0,
-    bytes: 0,
-    watchdog: false,
+    files: {},
+    digest: null,
+    config: null,
+    configAccepted: false,
     rearmedCommands: [],
     quarantinedCommands: [],
-    config: null,
-    digest: null,
-    configAccepted: false,
-    adoptedProcesses: [],
-    hardlinkedSources: [],
-    lateFilesLeftBehind: [],
+    leftBehind: [],
     ignoredLivenessClaims: [],
+    ignoredPids: [...(options.ignorePids ?? [])],
     discardedTo: null,
     leftover: null,
+    watchdogSetAside: null,
   };
   if (!hasSupervisor && !hasWatchdog)
     return { ...report, status: "nothing-to-migrate", from: null };
 
+  const ignore = new Set(options.ignorePids ?? []);
   const liveness = (skipLease = false) =>
     supervisorLiveness(legacy, {
       owner,
       isSupervisor,
       skipLease,
+      ignorePids: ignore,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
+  const setAside = async (path: string, stamp: string) => {
+    const target = `${path}.discarded-${stamp}`;
+    await rename(path, target);
+    await syncDirectory(dirname(path));
+    return target;
+  };
 
   if (options.discardLegacy) {
-    if (!hasSupervisor) return { ...report, status: "nothing-to-migrate" };
-    const found = liveness();
-    report.ignoredLivenessClaims = evidence({ ...found, credible: null });
-    if (found.credible)
-      throw new Error(
-        `Refusing to discard: ${found.credible}. Stop that supervisor first`,
-      );
-    const target = `${legacy}.discarded-${new Date().toISOString().replace(/[^0-9A-Za-z]/g, "")}`;
+    const stamp = new Date().toISOString().replace(/[^0-9A-Za-z]/g, "");
+    if (hasSupervisor) {
+      const found = liveness();
+      report.ignoredLivenessClaims = evidence({ ...found, credible: null });
+      if (found.credible)
+        throw new Error(
+          `Refusing to discard: ${found.credible}. Stop that supervisor, or pass \`--ignore-pid PID\` if you have verified that PID is not a supervisor`,
+        );
+      report.discardedTo = `${legacy}.discarded-${stamp}`;
+    }
+    if (hasWatchdog)
+      report.watchdogSetAside = `${legacyDog}.discarded-${stamp}`;
     report.status = options.dryRun ? "dry-run" : "discarded";
-    report.discardedTo = target;
     if (!options.dryRun) {
-      await rename(legacy, target);
-      await syncDirectory(dirname(legacy));
+      if (hasSupervisor) await setAside(legacy, stamp);
+      if (hasWatchdog) await setAside(legacyDog, stamp);
     }
     return report;
   }
 
-  // Preconditions: nothing is changed until every one holds.
-  if (hasSupervisor) {
-    const bad = legacyProblem(legacy);
-    if (bad)
-      throw new Error(
-        `Legacy supervisor directory ${bad}; inspect it manually`,
-      );
+  // The watchdog tree is never adopted: its state is regenerated and its lease
+  // belongs to a process that no longer exists in this layout.
+  const asideWatchdog = async () => {
+    if (hasWatchdog && existsSync(legacyDog))
+      report.watchdogSetAside = await retire(legacyDog);
+  };
+  if (!hasSupervisor) {
+    if (!options.dryRun) await asideWatchdog();
+    else if (hasWatchdog)
+      report.watchdogSetAside = `${legacyDog}.migrated-<id>`;
+    return report;
   }
-  const resuming = hasSupervisor && (await resumable(legacy, options.control));
+
+  // Preconditions: nothing is changed until every one holds.
+  const bad = legacyProblem(legacy);
+  if (bad)
+    throw new Error(`Legacy supervisor directory ${bad}; inspect it manually`);
+  const resuming = await resumable(legacy, options.control);
   const blocking = (skipLease = false): string | null => {
-    if (!hasSupervisor) return null;
     const found = liveness(skipLease);
     report.ignoredLivenessClaims = found.suspicious;
     return found.credible ?? found.heartbeat ?? found.children;
   };
-  if (hasSupervisor) {
-    const blocked = blocking();
-    if (blocked)
-      throw new Error(
-        `Refusing to migrate: ${blocked}. Stop it first, or wait a minute if it only crashed${
-          report.ignoredLivenessClaims.length
-            ? ` (ignored claims: ${report.ignoredLivenessClaims.map(visible).join("; ")})`
-            : ""
-        }. A forged directory can be set aside with \`crewplane migrate --discard-legacy\``,
-      );
-    scan(legacy); // refuse special files up front
-  }
-  const dogResuming =
-    hasWatchdog &&
-    (await resumable(legacyDog, join(options.control, "watchdog")));
-  if (hasWatchdog) {
-    const bad = legacyProblem(legacyDog);
-    if (bad)
-      throw new Error(`Legacy watchdog directory ${bad}; inspect it manually`);
-    const live = watchdogLiveness(legacyDog, owner, isSupervisor);
-    if (live) throw new Error(`Refusing to migrate: ${live}. Stop it first`);
-    scan(legacyDog);
-  }
-  const destinationBusy = () => {
-    if (!checkControlDirectory(options.control)) return false;
-    if (hasSupervisor && !resuming) return !isEmptyDirectory(options.control);
-    return hasWatchdog && !dogResuming
-      ? existsSync(join(options.control, "watchdog"))
-      : false;
-  };
+  const blocked = blocking();
+  if (blocked)
+    throw new Error(
+      `Refusing to migrate: ${blocked}. Stop it first, or wait a minute if it only crashed${
+        report.ignoredLivenessClaims.length
+          ? ` (ignored claims: ${report.ignoredLivenessClaims.map(visible).join("; ")})`
+          : ""
+      }. A forged directory can be set aside with \`crewplane migrate --discard-legacy\``,
+    );
+  const destinationBusy = () =>
+    !resuming &&
+    checkControlDirectory(options.control) &&
+    !isEmptyDirectory(options.control);
   const busyMessage = () =>
-    `Refusing to migrate: ${printable(options.control)} already has content. Inspect both locations; remove or rename the legacy ${printable(hasSupervisor ? legacy : legacyDog)} once it is confirmed stale`;
+    `Refusing to migrate: ${printable(options.control)} already has content. Inspect both locations; remove or rename the legacy ${printable(legacy)} once it is confirmed stale`;
   if (destinationBusy()) throw new Error(busyMessage());
 
-  const now = new Date(options.now ?? Date.now()).toISOString();
-  const apply = (s: Staged, read: Interpretation | null) => {
-    report.files += s.entries.filter((e) => e.kind === "file").length;
-    report.bytes += s.entries.reduce((n, e) => n + e.size, 0);
-    report.hardlinkedSources.push(...s.hardlinked);
-    if (read) {
-      report.config = read.config;
-      report.digest = read.digest;
-      report.adoptedProcesses = read.adopted;
-      report.rearmedCommands = read.rearm.map(({ id, action }) => ({
-        id,
-        action,
-      }));
-      report.quarantinedCommands = read.quarantine.map(({ id, action }) => ({
-        id,
-        action,
-      }));
-    }
-  };
-  const ours = new Set<string>();
-  const reviewConfig = (read: Interpretation) => {
-    report.configAccepted = false;
-    if (!read.config) return;
-    if (options.dryRun) return;
-    if (options.acceptConfig !== read.digest)
+  const timeout = options.timeoutMs ?? limits.timeoutMs;
+  const started = Date.now();
+  const deadline = () => {
+    if (Date.now() - started > timeout)
       throw new Error(
-        `Legacy config.json was writable by agents and must be reviewed before it is adopted. The staged snapshot has digest ${read.digest}; review it with \`crewplane migrate --dry-run\` and rerun with \`--accept-config ${read.digest}\` only if it matches what you reviewed${
+        `Migration timed out after ${timeout} ms; nothing was published and its locks were released`,
+      );
+  };
+  const identity = options.identity ?? { primaryRoot: options.root };
+  const ours = new Set<string>();
+
+  const review = async () => {
+    const snap = await snapshot(legacy, ours, deadline);
+    await moves.afterSnapshot?.();
+    deadline();
+    const read = interpret(snap, { root: options.root, owner });
+    report.config = read.config;
+    report.files = Object.fromEntries(read.files);
+    report.digest = digestOf(read.files);
+    report.rearmedCommands = read.rearm;
+    report.quarantinedCommands = read.quarantine;
+    report.leftBehind = [
+      ...snap.leftBehind,
+      ...(snap.commandsBeyondCap
+        ? [
+            {
+              name: "commands",
+              class: `entries beyond the first ${limits.commands}`,
+              files: snap.commandsBeyondCap,
+            },
+          ]
+        : []),
+    ];
+    return read;
+  };
+  const needsReview = (read: Interpretation) => read.files.size > 0;
+  const requireDigest = (read: Interpretation) => {
+    report.configAccepted = false;
+    if (!needsReview(read)) return;
+    if (options.acceptConfig !== report.digest)
+      throw new Error(
+        `The legacy state was writable by agents and must be reviewed before anything is adopted. The adopted files have digest ${report.digest}; review them with \`crewplane migrate --dry-run\` and rerun with \`--accept-config ${report.digest}\` only if they match what you reviewed${
           options.acceptConfig
             ? " (the digest you supplied does not match)"
             : ""
@@ -907,108 +1244,106 @@ export async function migrateControl(
   };
 
   if (options.dryRun) {
-    if (hasSupervisor && !resuming) {
-      const staged = await snapshot(legacy, null, ours, moves);
-      const read = interpret(staged, { root: options.root, owner, now });
-      apply(staged, read);
-    }
-    if (hasWatchdog && !dogResuming) {
-      const staged = await snapshot(legacyDog, null, ours, moves);
-      apply(staged, null);
-    }
-    report.watchdog = hasWatchdog;
-    report.method = "staged-copy";
+    if (!resuming) await review();
+    if (hasWatchdog) report.watchdogSetAside = `${legacyDog}.migrated-<id>`;
     return report;
   }
 
   await options.afterPreflight?.();
   // Hold both guards older releases honour for the whole critical section:
   // the supervisor lease (unless a lease file is already there, which is never
-  // replaced) and recovery.lock, which stops an old start's stale-owner
-  // recovery interleaving with the snapshot. Both are OUR files only.
+  // replaced) and recovery.lock (so an old start's stale-owner recovery cannot
+  // interleave). Both are OUR files; only our own are ever removed.
   let release: (() => Promise<void>) | null = null;
-  let recovery = false;
+  let recoveryOwned = false;
   const recoveryPath = join(legacy, "recovery.lock");
-  if (hasSupervisor && !resuming) {
-    if (!existsSync(join(legacy, "watcher.lock"))) {
-      release = await acquire(legacy);
-      ours.add("watcher.lock");
-    }
-    try {
-      await writeFile(recoveryPath, String(process.pid), {
-        flag: "wx",
-        mode: 0o600,
-      });
-      recovery = true;
-      ours.add("recovery.lock");
-    } catch (error) {
-      await release?.().catch(() => {});
-      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+  const recoveryToken = JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    token: randomUUID(),
+  });
+  const takeRecovery = async () => {
+    for (let attempt = 0; attempt < 2; attempt++)
+      try {
+        await writeFile(recoveryPath, recoveryToken, {
+          flag: "wx",
+          mode: 0o600,
+        });
+        recoveryOwned = true;
+        ours.add("recovery.lock");
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        // A recovery lock whose owner is dead is stale and safe to replace.
+        const text = await readFile(recoveryPath, "utf8").catch(() => "");
+        let pid: number | undefined;
+        try {
+          const parsed = JSON.parse(text) as unknown;
+          pid =
+            typeof parsed === "number" ? parsed : pidOf(object(parsed)?.pid);
+        } catch {
+          pid = undefined;
+        }
+        if (attempt === 0 && pid !== undefined && owner(pid) === "dead") {
+          await unlink(recoveryPath).catch(() => {});
+          continue;
+        }
         throw new Error(
-          "Refusing to migrate: recovery.lock exists in the legacy directory (an older release may be recovering its lease); inspect it",
+          "Refusing to migrate: recovery.lock exists in the legacy directory (an older release may be recovering its lease, or a crashed migration left it); inspect it and remove it by hand once its owner is gone",
         );
-      throw error;
+      }
+  };
+  const dropLocks = async () => {
+    if (recoveryOwned) {
+      recoveryOwned = false;
+      const text = await readFile(recoveryPath, "utf8").catch(() => null);
+      if (text === recoveryToken) await unlink(recoveryPath).catch(() => {});
     }
-  }
+    const held = release;
+    release = null;
+    await held?.().catch(() => {});
+  };
   const staging = `${options.control}.staging-${process.pid}-${randomUUID().slice(0, 8)}`;
-  const dogStaging = `${staging}-watchdog`;
-  // Once a staged copy is published its journal must survive a crash, so a
-  // rerun can finish retiring the source.
   let published = false;
-  let dogPublished = false;
   let createdLeaf = false;
   try {
-    if (hasSupervisor && !resuming) {
-      const blocked = blocking(release !== null);
-      if (blocked)
+    if (!resuming) {
+      if (!existsSync(join(legacy, "watcher.lock"))) {
+        release = await acquire(legacy);
+        ours.add("watcher.lock");
+      }
+      await takeRecovery();
+      const again = blocking(release !== null);
+      if (again)
         throw new Error(
-          `Refusing to migrate: ${blocked} (appeared during migration)`,
+          `Refusing to migrate: ${again} (appeared during migration)`,
         );
+      if (destinationBusy()) throw new Error(busyMessage());
     }
-    if (hasWatchdog && !dogResuming) {
-      const live = watchdogLiveness(legacyDog, owner, isSupervisor);
-      if (live) throw new Error(`Refusing to migrate: ${live}. Stop it first`);
-    }
-    if (destinationBusy()) throw new Error(busyMessage());
+    deadline();
     createdLeaf = !existsSync(options.control);
     await ensureControlDirectory(options.control);
 
-    let supervisorSnapshot: Staged | null = null;
-    if (hasSupervisor && !resuming) {
-      supervisorSnapshot = await snapshot(legacy, staging, ours, moves);
-      await moves.afterSnapshot?.();
-      // From here on only the staged copy is consulted.
-      const read = interpret(supervisorSnapshot, {
-        root: options.root,
-        owner,
-        now,
-      });
-      apply(supervisorSnapshot, read);
-      reviewConfig(read);
-      if (read.configText)
-        await writeFile(join(staging, "config.json"), read.configText, {
-          mode: 0o600,
-          flush: true,
-        });
-      if (read.stateText)
-        await writeFile(join(staging, "state.json"), read.stateText, {
-          mode: 0o600,
-          flush: true,
-        });
-      const quarantineDirectory = join(staging, "quarantined-commands");
-      for (const item of read.quarantine) {
-        await mkdir(quarantineDirectory, { recursive: true, mode: 0o700 });
-        let target = join(quarantineDirectory, item.name);
-        for (let n = 1; existsSync(target); n++)
-          target = join(quarantineDirectory, `${item.name}.dup${n}`);
-        await rename(join(staging, "commands", item.name), target);
-      }
-      for (const item of read.rearm)
-        await writeFile(
-          join(staging, "commands", `${item.id}.json`),
-          canonicalText(item.value),
-          { mode: 0o600, flush: true },
-        );
+    if (!resuming) {
+      const read = await review();
+      requireDigest(read);
+      deadline();
+      await mkdir(staging, { mode: 0o700 });
+      for (const [path, text] of read.files)
+        await writeFresh(join(staging, path), text, moves.afterStageFile);
+      // identity.json comes from the current project, never from the legacy
+      // tree, and is checked against the store marker BEFORE anything is
+      // published.
+      const bindingId = storeMarkerId(options.store) ?? randomUUID();
+      await writeFresh(
+        join(staging, "identity.json"),
+        identityText(bindingId, identity),
+      );
+      if (
+        storeMarkerId(options.store) !== null &&
+        storeMarkerId(options.store) !== bindingId
+      )
+        throw new Error("The store marker changed during migration");
       await writeFile(
         join(legacy, journalName),
         JSON.stringify({
@@ -1018,87 +1353,29 @@ export async function migrateControl(
         }),
         { mode: 0o600, flush: true },
       );
+      deadline();
       await rename(staging, options.control);
       published = true;
       await syncDirectory(dirname(options.control));
       await moves.afterPublish?.();
-      report.method = "staged-copy";
-      // Whatever appeared or changed after the snapshot was not published.
-      const known = new Map(
-        supervisorSnapshot.entries.map((e) => [e.path, e] as const),
-      );
-      for (const entry of scan(legacy, ours)) {
-        const seen = known.get(entry.path);
-        const info = lstatSync(join(legacy, entry.path));
-        if (
-          !seen ||
-          seen.size !== entry.size ||
-          (entry.kind === "file" && seen.mtimeMs !== info.mtimeMs)
-        )
-          report.lateFilesLeftBehind.push(entry.path);
-      }
-      report.leftover = await retire(
-        legacy,
-        report.lateFilesLeftBehind.length > 0,
-      );
-    } else if (hasSupervisor) {
-      // A published copy awaiting retirement; keep the source inert.
-      report.method = "staged-copy";
-      report.leftover = await retire(legacy, true);
     }
-    if (hasWatchdog) {
-      const destination = join(options.control, "watchdog");
-      if (dogResuming) report.leftover ??= await retire(legacyDog, true);
-      else {
-        const staged = await snapshot(legacyDog, dogStaging, new Set(), moves);
-        apply(staged, null);
-        await writeFile(
-          join(legacyDog, journalName),
-          JSON.stringify({
-            version: 1,
-            destination,
-            digest: await treeDigest(dogStaging),
-          }),
-          { mode: 0o600, flush: true },
-        );
-        await rename(dogStaging, destination);
-        dogPublished = true;
-        await syncDirectory(options.control);
-        await moves.afterPublish?.();
-        const known = new Set(staged.entries.map((e) => e.path));
-        const late = scan(legacyDog)
-          .map((e) => e.path)
-          .filter((path) => !known.has(path));
-        report.lateFilesLeftBehind.push(...late.map((p) => `watchdog/${p}`));
-        report.leftover ??= await retire(legacyDog, late.length > 0);
-      }
-      report.watchdog = true;
-      report.method ??= "staged-copy";
-    }
-    // Fresh files are already private; assert the invariant for the whole tree.
-    await chmod(options.control, 0o700);
-    if (options.identity)
-      await bindControl(options.store, options.control, options.identity);
+    // Bind (write the missing store marker, verify both sides) and only then
+    // retire the legacy tree.
+    await completeBinding(options.store, options.control, identity);
     checkControlDirectory(options.control);
+    // Our own guards go first; the inert directory then carries no live lock.
+    await dropLocks();
+    report.leftover = await retire(legacy);
+    await asideWatchdog();
+    if (resuming) report.configAccepted = true;
   } catch (error) {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
-    await rm(dogStaging, { recursive: true, force: true }).catch(() => {});
-    // An empty leaf this run created is not left behind by a refusal.
-    if (createdLeaf && !published && !dogPublished)
-      await rmdir(options.control).catch(() => {});
+    if (createdLeaf && !published) await rmdir(options.control).catch(() => {});
     if (!published)
       await rm(join(legacy, journalName), { force: true }).catch(() => {});
-    if (!dogPublished)
-      await rm(join(legacyDog, journalName), { force: true }).catch(() => {});
     throw error;
   } finally {
-    if (recovery) {
-      // Only our own lock file is ever removed.
-      const text = await readFile(recoveryPath, "utf8").catch(() => null);
-      if (text === String(process.pid))
-        await unlink(recoveryPath).catch(() => {});
-    }
-    await release?.().catch(() => {});
+    await dropLocks();
   }
   return report;
 }

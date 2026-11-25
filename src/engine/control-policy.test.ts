@@ -202,3 +202,43 @@ it("accepts instance holds, run cancellation and hard stop only with a target", 
   ])
     expect(control(bad).action).toBe("invalid");
 });
+
+it("rejects process identities that could address every process", () => {
+  const record = (extra: Record<string, unknown>) => ({
+    version: 2,
+    running: true,
+    checkedAt: "2000-01-01T00:00:00.000Z",
+    pid: 5,
+    draining: false,
+    held: [],
+    commands: [],
+    notices: {},
+    records: {
+      a: {
+        key: "a",
+        lane: "builder",
+        task: null,
+        cwd: "/",
+        status: "running",
+        reason: "",
+        seen: [],
+        runs: [],
+        noProgress: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        ...extra,
+      },
+    },
+  });
+  expect(validState(record({ pid: 4000, processGroupId: 4000 }))).toBe(true);
+  expect(validState(record({ pid: 4000 }))).toBe(true);
+  for (const bad of [
+    { pid: 4000, processGroupId: 1 },
+    { pid: 1 },
+    { processGroupId: 0 },
+    { processGroupId: -1 },
+    { pid: 4000, processGroupId: 4001 },
+    { pid: 1.5 },
+  ])
+    expect(validState(record(bad)), JSON.stringify(bad)).toBe(false);
+});

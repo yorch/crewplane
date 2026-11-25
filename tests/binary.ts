@@ -1019,7 +1019,7 @@ try {
       records: {},
     }),
   );
-  const refusedLegacy = legacyRun("status");
+  const refusedLegacy = legacyRun("pause", "--all", "true");
   assert.equal(refusedLegacy.status, 1);
   assert.equal(refusedLegacy.stdout, "");
   assert.match(refusedLegacy.stderr, /run `crewplane migrate`/);
@@ -1027,7 +1027,15 @@ try {
   const dry = JSON.parse(legacyRun("migrate", "--dry-run").stdout);
   assert.equal(dry.status, "dry-run");
   assert(existsSync(join(legacyDirectory, "state.json")));
-  const migrated = JSON.parse(legacyRun("migrate").stdout);
+  assert.equal(legacyRun("migrate").status, 1); // a digest is required
+  assert.match(dry.digest, /^[a-f0-9]{64}$/);
+  writeFileSync(join(legacyDirectory, "planted-after-review.bin"), "OPAQUE");
+  const migrated = JSON.parse(
+    legacyRun("migrate", "--accept-config", dry.digest).stdout,
+  );
+  assert(
+    !existsSync(join(controlOf(legacyProject), "planted-after-review.bin")),
+  );
   assert.equal(migrated.status, "migrated");
   assert.equal(migrated.to, controlOf(legacyProject));
   assert(!existsSync(legacyDirectory));

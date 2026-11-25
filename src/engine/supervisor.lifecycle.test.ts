@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   access,
   mkdir,
@@ -398,7 +399,7 @@ const args=`,
   20000,
 );
 it(
-  "keeps a re-armed legacy pause holding after migrate and start, and never applies a quarantined resume",
+  "keeps a re-armed legacy pause holding after migrate and start, ignores planted leases and never applies a quarantined resume",
   () =>
     withEnv(async () => {
       const f = await fixture();
@@ -410,6 +411,12 @@ it(
         join(legacy, "state.json"),
         JSON.stringify({ ...initialState(), running: false }),
       );
+      // Planted by an agent: none of this may survive migration.
+      await writeFile(
+        join(legacy, "watcher.lock"),
+        JSON.stringify({ pid: 1, token: "forged" }),
+      );
+      await writeFile(join(legacy, "identity.json"), '{"primaryRoot":"/x"}');
       const at = new Date().toISOString();
       const pause = "00000000-0000-4000-8000-0000000000a1.json";
       const resume = "00000000-0000-4000-8000-0000000000a2.json";
@@ -434,9 +441,10 @@ it(
       expect(report.rearmedCommands).toEqual([
         { id: pause.slice(0, -5), action: "pause" },
       ]);
-      expect(report.quarantinedCommands).toEqual([
-        { id: resume.slice(0, -5), action: "resume" },
+      expect(report.quarantinedCommands.map((c) => c.id)).toEqual([
+        resume.slice(0, -5),
       ]);
+      expect(existsSync(join(f.directory, "watcher.lock"))).toBe(false);
       const c = new AbortController();
       const running = serve(f.config, f.directory, c.signal);
       try {
@@ -449,10 +457,50 @@ it(
         });
         await new Promise((r) => setTimeout(r, 1500));
         expect((await f.load()).instanceHeld).toBe(true);
-        await access(join(f.directory, "quarantined-commands", resume));
+        expect(existsSync(join(f.directory, "commands", resume))).toBe(false);
       } finally {
         c.abort();
         await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
+  "refuses to start on recorded process groups that could address every process",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const state = initialState();
+      state.records.B = {
+        key: "B",
+        lane: "B",
+        task: null,
+        cwd: f.root,
+        status: "running",
+        reason: "",
+        seen: [],
+        runs: [],
+        noProgress: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        pid: 4194000,
+        processGroupId: 1,
+      };
+      await writeFile(join(f.directory, "state.json"), JSON.stringify(state));
+      const kill = process.kill;
+      const probes: number[] = [];
+      process.kill = ((pid: number, signal?: string | number) => {
+        probes.push(pid);
+        return kill.call(process, pid, signal as never);
+      }) as typeof process.kill;
+      try {
+        await expect(
+          serve(f.config, f.directory, new AbortController().signal),
+        ).rejects.toThrow("Invalid supervisor state");
+        expect(probes.some((pid) => pid === -1 || pid === 1)).toBe(false);
+      } finally {
+        process.kill = kill;
         await rm(f.root, { recursive: true, force: true });
       }
     }),

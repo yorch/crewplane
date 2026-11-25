@@ -241,6 +241,21 @@ export function validState(value: unknown): value is State {
       ))
   )
     return false;
+  // Process identities are only ever real children: never PID 0/1, and the
+  // process group is the child's own pid, so kill(-pgid) can never address
+  // "every process" or init's group.
+  const identity = (n: unknown) =>
+    n === undefined || (Number.isSafeInteger(n) && (n as number) > 1);
+  for (const r of Object.values(s.records))
+    if (
+      r &&
+      (!identity(r.pid) ||
+        !identity(r.processGroupId) ||
+        (r.pid !== undefined &&
+          r.processGroupId !== undefined &&
+          r.pid !== r.processGroupId))
+    )
+      return false;
   for (const [key, r] of Object.entries(s.records))
     if (
       !r ||

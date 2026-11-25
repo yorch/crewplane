@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -74,12 +74,39 @@ const validState = (extra: object = {}) => ({
   notices: {},
   ...extra,
 });
-/** Make this process a registered supervisor, as an older release's would be. */
-const register = (pid: number) => {
+/**
+ * A process that is credibly a supervisor to the liveness check: bun running a
+ * `src/cli.ts start` script, registered right after it started.
+ */
+async function fakeSupervisor(directory: string) {
+  const script = join(directory, "src", "cli.ts");
+  mkdirSync(join(script, ".."), { recursive: true });
+  writeFileSync(script, "setInterval(() => {}, 1e9);\n");
+  const child = spawn("bun", [script, "start"], { stdio: "ignore" });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const pid = child.pid as number;
   const file = join(cacheDirectory(), "supervisors", `${pid}.json`);
   mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ version: 1, pid }));
-  return () => rmSync(file, { force: true });
+  writeFileSync(
+    file,
+    JSON.stringify({ version: 1, pid, at: new Date().toISOString() }),
+  );
+  return {
+    pid,
+    stop: () => {
+      rmSync(file, { force: true });
+      child.kill();
+    },
+  };
+}
+/** Dry-run, then adopt exactly the digest that was printed. */
+const migrateReviewed = (
+  p: ReturnType<typeof project>,
+  runner: string[],
+  ...extra: string[]
+) => {
+  const dry = JSON.parse(p.run(runner, "migrate", "--dry-run").stdout);
+  return p.run(runner, "migrate", "--accept-config", dry.digest, ...extra);
 };
 const seedLegacy = (legacy: string, state: object = validState()) => {
   mkdirSync(join(legacy, "commands"), { recursive: true, mode: 0o700 });
@@ -92,7 +119,6 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     expect(p.run(runner, "init").status).toBe(0);
     seedLegacy(p.legacy);
     for (const args of [
-      ["status"],
       ["configure", "--file", "x.json"],
       ["pause", "--all", "true"],
       ["resume", "--all", "true"],
@@ -112,6 +138,14 @@ describe.each(runners)("%s CLI", (_name, runner) => {
         `crewplane: ${legacyRefusal}`,
       );
     }
+    // status never routes to legacy state as truth: it shows it as unverified.
+    const status = p.run(runner, "status");
+    expect(status.status).toBe(0);
+    expect(status.stderr).toContain("unverified");
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      state: null,
+      unverifiedLegacy: { unverified: true },
+    });
     // doctor is read-only, exempt from the gate, and reports the layout.
     const doctor = p.run(runner, "doctor");
     expect(doctor.status).toBe(0);
@@ -134,22 +168,28 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     const dry = JSON.parse(p.run(runner, "migrate", "--dry-run").stdout);
     expect(dry).toMatchObject({ status: "dry-run", to: p.control });
     expect(existsSync(p.control)).toBe(false);
-    const done = JSON.parse(p.run(runner, "migrate").stdout);
-    expect(done).toMatchObject({ status: "migrated", method: "staged-copy" });
+    // Nothing is adopted without the reviewed digest, even without a config.
+    const unreviewed = p.run(runner, "migrate");
+    expect(unreviewed.status).toBe(1);
+    expect(unreviewed.stderr).toContain(`--accept-config ${dry.digest}`);
+    const done = JSON.parse(migrateReviewed(p, runner).stdout);
+    expect(done).toMatchObject({ status: "migrated" });
     expect(existsSync(p.legacy)).toBe(false);
     const status = JSON.parse(p.run(runner, "status").stdout);
-    expect(status.state.marker).toBe("legacy");
+    expect(status.state.version).toBe(2);
+    expect(status.state.marker).toBeUndefined();
     expect(JSON.parse(p.run(runner, "migrate").stdout).status).toBe(
       "nothing-to-migrate",
     );
     expect(p.run(runner, "migrate", "--bogus").status).toBe(1);
   });
 
-  it("refuses to migrate under a live legacy supervisor and keeps halting it possible", () => {
+  it("refuses to migrate under a live legacy supervisor and keeps halting it possible", async () => {
     const p = project();
     p.run(runner, "init");
-    seedLegacy(p.legacy, validState({ running: true, pid: process.pid }));
-    const unregister = register(process.pid);
+    const sup = await fakeSupervisor(p.base);
+    seedLegacy(p.legacy, validState({ running: true, pid: sup.pid }));
+    const unregister = sup.stop;
     try {
       const refused = p.run(runner, "migrate");
       expect(refused.status).toBe(1);
@@ -169,16 +209,13 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     }
   });
 
-  it("binds each queued copy to its own directory's supervisor generation", () => {
+  it("binds each queued copy to its own directory's supervisor generation", async () => {
     const p = project();
     p.run(runner, "init");
+    const sup = await fakeSupervisor(p.base);
     seedLegacy(
       p.legacy,
-      validState({
-        running: true,
-        pid: process.pid,
-        generation: "OLD-GENERATION",
-      }),
+      validState({ running: true, pid: sup.pid, generation: "OLD-GENERATION" }),
     );
     mkdirSync(p.control, { recursive: true, mode: 0o700 });
     writeFileSync(
@@ -186,7 +223,7 @@ describe.each(runners)("%s CLI", (_name, runner) => {
       JSON.stringify(validState({ generation: "NEW-GENERATION" })),
       { mode: 0o600 },
     );
-    const unregister = register(process.pid);
+    const unregister = sup.stop;
     try {
       const stop = JSON.parse(p.run(runner, "stop").stdout);
       const read = (directory: string) =>
@@ -197,6 +234,66 @@ describe.each(runners)("%s CLI", (_name, runner) => {
       expect(read(p.control).generation).toBe("NEW-GENERATION");
     } finally {
       unregister();
+    }
+  });
+
+  it("escapes bidi and zero-width characters in everything it prints", () => {
+    const p = project();
+    p.run(runner, "init");
+    seedLegacy(p.legacy);
+    const harness = join(p.base, "harn\u202ess\u200b");
+    writeFileSync(harness, "#!/bin/sh\n", { mode: 0o700 });
+    writeFileSync(
+      join(p.legacy, "config.json"),
+      JSON.stringify({
+        version: 1,
+        root: p.root,
+        binary: harness,
+        allowedTasks: ["T-1"],
+        maxParallel: 1,
+        intervalSeconds: 5,
+        maxRunMinutes: 5,
+        maxRunsPerHour: 5,
+        confirmedStoppedAt: new Date().toISOString(),
+        lanes: { builder: { enabled: true } },
+      }),
+    );
+    const dry = p.run(runner, "migrate", "--dry-run");
+    expect(dry.status).toBe(0);
+    for (const raw of ["\u202e", "\u200b"]) {
+      expect(dry.stdout).not.toContain(raw);
+      expect(dry.stderr).not.toContain(raw);
+    }
+    expect(JSON.parse(dry.stdout).config.binary).toBe(harness);
+    expect(dry.stderr).toContain("\\u{202e}");
+  });
+
+  it("sets aside a forged directory with an explicit --ignore-pid override", async () => {
+    const p = project();
+    p.run(runner, "init");
+    const sup = await fakeSupervisor(p.base);
+    try {
+      seedLegacy(p.legacy, validState({ running: true, pid: sup.pid }));
+      const refused = p.run(runner, "migrate", "--discard-legacy");
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("--ignore-pid");
+      expect(p.run(runner, "migrate", "--ignore-pid", "5").status).toBe(1); // only valid with --discard-legacy
+      const done = p.run(
+        runner,
+        "migrate",
+        "--discard-legacy",
+        "--ignore-pid",
+        String(sup.pid),
+      );
+      expect(done.status).toBe(0);
+      expect(done.stderr).toContain(`PID ${sup.pid}`);
+      expect(JSON.parse(done.stdout)).toMatchObject({
+        status: "discarded",
+        ignoredPids: [sup.pid],
+      });
+      expect(existsSync(p.legacy)).toBe(false);
+    } finally {
+      sup.stop();
     }
   });
 
@@ -331,7 +428,7 @@ describe.each(runners)("%s CLI", (_name, runner) => {
         at: new Date().toISOString(),
       }),
     );
-    const report = JSON.parse(p.run(runner, "migrate").stdout);
+    const report = JSON.parse(migrateReviewed(p, runner).stdout);
     expect(report.rearmedCommands).toEqual([{ id, action: "pause" }]);
     expect(readdirSync(join(p.control, "commands"))).toEqual([`${id}.json`]);
     const status = JSON.parse(p.run(runner, "status").stdout);

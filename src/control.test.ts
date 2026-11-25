@@ -302,3 +302,12 @@ it("lets narrowing verbs through a lost or rewritten store marker, but not widen
     rebindControl(p.store, p.control, { primaryRoot: "/else" }),
   ).rejects.toThrow("different project identity");
 });
+
+it.runIf(process.getuid?.() !== 0)(
+  "refuses a directory owned by someone else when not running as root",
+  () => {
+    expect(() => checkControlDirectory("/")).toThrow(
+      /not owned by the current user|accessible by other users|group or world/,
+    );
+  },
+);

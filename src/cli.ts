@@ -46,7 +46,8 @@ import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
 import {
-  describeConfig,
+  describeAdoption,
+  escapeJsonText,
   isLive,
   migrateControl,
   resolveControlTarget,
@@ -77,9 +78,16 @@ import {
   updateTarget,
 } from "./update.ts";
 
+/**
+ * Agent-controlled text can reach reports; JSON output never carries raw
+ * bidirectional, zero-width, line-separator or C1 characters that could spoof
+ * a terminal.
+ */
 const output = (value: unknown) =>
   console.log(
-    typeof value === "string" ? value : JSON.stringify(value, null, 2),
+    typeof value === "string"
+      ? value
+      : escapeJsonText(JSON.stringify(value, null, 2)),
   );
 const optional = async (path: string) => {
   try {
@@ -438,12 +446,14 @@ async function main() {
   const halting = ["status", "stop", "pause", "cancel"].includes(command);
   let directory = controlDir;
   let also: string[] = [];
+  let unverifiedLegacyDirectory: string | undefined;
   // Exempt: they never touch supervisor state, or they report/repair the layout.
   if (!["init", "migrate", "pin", "doctor"].includes(command)) {
     // Fails closed while an older in-store layout exists (halting verbs excepted).
     const target = resolveControlTarget(ctx.store, controlDir, command);
     directory = target.directory;
     also = target.also ?? [];
+    unverifiedLegacyDirectory = target.unverifiedLegacy;
     if (target.warning) console.error(target.warning);
     if (directory === controlDir) {
       checkControlDirectory(directory);
@@ -527,6 +537,7 @@ async function main() {
       discardLegacy = false,
       rebind = false,
       acceptConfig: string | undefined;
+    const ignorePids: number[] = [];
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i];
       if (arg === "--dry-run" && !dryRun) dryRun = true;
@@ -534,6 +545,13 @@ async function main() {
         discardLegacy = true;
       else if (arg === "--rebind" && !rebind) rebind = true;
       else if (
+        arg === "--ignore-pid" &&
+        /^[1-9]\d{0,9}$/.test(rest[i + 1] ?? "") &&
+        Number(rest[i + 1]) > 1
+      ) {
+        ignorePids.push(Number(rest[i + 1]));
+        i++;
+      } else if (
         arg === "--accept-config" &&
         /^[a-f0-9]{64}$/.test(rest[i + 1] ?? "") &&
         acceptConfig === undefined
@@ -552,6 +570,12 @@ async function main() {
       throw new Error(
         "--discard-legacy, --rebind and --accept-config are mutually exclusive",
       );
+    if (ignorePids.length && !discardLegacy)
+      throw new Error("--ignore-pid only applies to --discard-legacy");
+    for (const pid of ignorePids)
+      console.error(
+        `crewplane: treating PID ${pid} as not a supervisor (--ignore-pid)`,
+      );
     if (rebind) {
       if (dryRun) throw new Error("--rebind has no dry run");
       return output({
@@ -567,14 +591,20 @@ async function main() {
       identity,
       dryRun,
       discardLegacy,
+      ignorePids,
       acceptConfig,
     });
     for (const claim of report.ignoredLivenessClaims)
       console.error(`crewplane: ignoring legacy liveness claim: ${claim}`);
-    if (report.config && dryRun)
+    if (dryRun && !discardLegacy && report.from) {
       console.error(
-        `crewplane: legacy configuration to review:\n${describeConfig(report.config, { root, store: ctx.store })}\ncrewplane: staged snapshot digest ${report.digest}; adopt exactly this with \`crewplane migrate --accept-config ${report.digest}\``,
+        `crewplane: review everything below; only these canonical files are adopted:\n${describeAdoption(report, { root, store: ctx.store })}`,
       );
+      if (Object.keys(report.files).length)
+        console.error(
+          `crewplane: digest ${report.digest}; adopt exactly this with \`crewplane migrate --accept-config ${report.digest}\``,
+        );
+    }
     return output(report);
   }
   if (command === "init") {
@@ -933,7 +963,21 @@ async function main() {
         recentControls: (state.controlLog ?? []).slice(-10),
       };
     }
-    return output({ desired, state, view });
+    let unverifiedLegacy: unknown;
+    if (unverifiedLegacyDirectory)
+      unverifiedLegacy = {
+        unverified: true,
+        note: "agent-writable legacy state; not used by this release",
+        state: await optional(
+          join(unverifiedLegacyDirectory, "state.json"),
+        ).catch(() => "unreadable"),
+      };
+    return output({
+      desired,
+      state,
+      view,
+      ...(unverifiedLegacy === undefined ? {} : { unverifiedLegacy }),
+    });
   }
   if (
     [

@@ -264,3 +264,50 @@ export async function rebindControl(
   });
   return "rebound";
 }
+
+/** The store marker's id, when the store has one. */
+export const storeMarkerId = (store: string): string | null => {
+  const marker = readBinding(markerPath(store));
+  return typeof marker?.id === "string" ? marker.id : null;
+};
+/** identity.json content for a project, bound to a store marker id. */
+export const identityText = (bindingId: string, identity: BindingIdentity) =>
+  `${JSON.stringify(
+    {
+      version: 1,
+      bindingId,
+      primaryRoot: identity.primaryRoot,
+      ...(identity.gitCommon === undefined
+        ? {}
+        : { gitCommon: identity.gitCommon }),
+    },
+    null,
+    2,
+  )}\n`;
+/**
+ * Finish a binding whose identity.json was published first: write the missing
+ * store marker from it, then verify both sides agree.
+ */
+export async function completeBinding(
+  store: string,
+  control: string,
+  identity: BindingIdentity,
+): Promise<void> {
+  const ident = readBinding(identityPath(control));
+  if (!ident)
+    throw new Error("The published control directory has no identity.json");
+  if (!readBinding(markerPath(store)))
+    await publishJson(
+      markerPath(store),
+      {
+        version: 1,
+        id: ident.bindingId,
+        key: basename(control),
+        controlDirectory: control,
+      },
+      { exclusive: true },
+    ).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
+  checkBinding(store, control, identity);
+}
