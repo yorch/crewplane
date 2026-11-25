@@ -88,7 +88,7 @@ const stateLabels = {
   working: "In progress",
   blocked: "Blocked",
   review: "Awaiting review",
-  completed: "Accepted",
+  completed: "Completed",
 };
 const stateTones = {
   todo: "neutral",
@@ -107,7 +107,7 @@ const BOARD_COLUMNS = [
   ["Assigned", ["assigned"]],
   ["In progress", ["working", "blocked"]],
   ["Awaiting review", ["review"]],
-  ["Accepted", ["completed"]],
+  ["Completed", ["completed"]],
 ];
 const processLabels = {
   running: "Running",
@@ -345,18 +345,18 @@ function relative(value) {
   if (hours < 48) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
 }
-function timeEl(value) {
+// The exact time is part of the text; inside links it is hidden from assistive
+// technology so link names stay short (the detail pane repeats it in full).
+function timeEl(value, inLink = false) {
   if (!validTime(value)) return el("span", "not reported", "is-unknown");
   const node = el("time", undefined, "time");
   node.dateTime = new Date(value).toISOString();
-  node.title = date(value);
   node.dataset.at = String(new Date(value).getTime());
   // The exact time is real text (not only a tooltip) so keyboard, touch and
   // screen-reader users can read it; touch devices also show it visibly.
-  node.append(
-    el("span", relative(value), "time-relative"),
-    el("span", ` (${date(value)})`, "time-exact"),
-  );
+  const exact = el("span", ` (${date(value)})`, "time-exact");
+  if (inLink) exact.setAttribute("aria-hidden", "true");
+  node.append(el("span", relative(value), "time-relative"), exact);
   return node;
 }
 function refreshRelativeTimes() {
@@ -716,7 +716,7 @@ function renderMetrics() {
       ],
       [
         states("completed"),
-        "Accepted",
+        "Completed",
         hrefFor("tasks", { state: "completed" }),
       ],
       [
@@ -1517,7 +1517,7 @@ function messageRow(message, open, index) {
   head.append(
     badge(message.kind, open ? "warning" : "neutral"),
     el("span", `${message.from} → ${message.to}`, "message-route"),
-    timeEl(message.at),
+    timeEl(message.at, true),
   );
   const replies = (index.children.get(message.id) ?? []).length;
   const meta = el("span", undefined, "message-row-meta");

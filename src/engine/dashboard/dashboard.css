@@ -112,6 +112,7 @@ h2:focus {
   font-size: 0.93em;
 }
 html {
+  --topbar-height: 60px;
   scroll-padding-top: 16px;
 }
 .sr-only,
@@ -387,6 +388,8 @@ html {
   white-space: nowrap;
 }
 .field-help {
+  color: var(--muted);
+  font-size: 11px;
   font-weight: 400;
 }
 .badge {
@@ -1267,7 +1270,7 @@ details.info p {
 @media (max-width: 860px) {
   html {
     /* The sticky top bar must not cover focused or scrolled-to elements. */
-    scroll-padding-top: 76px;
+    scroll-padding-top: calc(var(--topbar-height) + 12px);
   }
   .app {
     display: block;
@@ -1431,7 +1434,10 @@ details.info p {
     outline: 3px solid Highlight;
     outline-offset: -3px;
   }
-  .stack-segment {
+  .stack .stack-segment,
+  .stack .stack-segment + .stack-segment,
+  .stack .stack-segment.tone-neutral + .stack-segment,
+  .stack .stack-segment + .stack-segment.tone-neutral {
     border: 1px solid CanvasText;
     forced-color-adjust: none;
   }
@@ -1449,6 +1455,16 @@ details.info p {
   }
   button {
     min-width: 44px;
+  }
+  .icon-button {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .skip-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
   }
   .check {
     min-height: 44px;
@@ -1501,8 +1517,11 @@ details.info p {
   .sidebar {
     height: 100dvh;
   }
-  .detail-pane {
-    max-height: calc(100dvh - 32px);
+  /* Only the sticky side pane is height-capped; below 1100px it is static. */
+  @media (min-width: 1101px) {
+    .detail-pane {
+      max-height: calc(100dvh - 32px);
+    }
   }
   @media (max-width: 860px) {
     .sidebar {

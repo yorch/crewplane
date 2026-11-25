@@ -109,7 +109,7 @@
                   <option value="working">In progress</option>
                   <option value="blocked">Blocked</option>
                   <option value="review">Awaiting review</option>
-                  <option value="completed">Accepted</option>
+                  <option value="completed">Completed</option>
                 </select>
               </label>
               <div class="toolbar-actions">
@@ -176,7 +176,7 @@
                 <button id="messages-all" type="button" aria-pressed="false">All <span id="message-count" class="segmented-count"></span></button>
               </fieldset>
               <label class="field field-grow">Search<input id="message-search" type="search" placeholder="Message, task or agent…" autocomplete="off" /></label>
-              <label class="field">Agent <span class="field-help">(also shows messages to everyone)</span><select id="message-agent"><option value="">All agents</option></select></label>
+              <label class="field">Agent<select id="message-agent" aria-describedby="message-agent-help"><option value="">All agents</option></select><span id="message-agent-help" class="field-help" aria-hidden="true">Also shows messages sent to everyone</span></label>
               <label class="field">Phase<select id="message-phase"><option value="">All phases</option></select></label>
               <div class="toolbar-actions">
                 <button id="messages-clear" class="text-button" type="button" hidden>Clear filters</button>

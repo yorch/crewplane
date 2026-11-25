@@ -642,6 +642,13 @@ it("pages retained runs beyond two pages and keeps incremental events unique dur
   expect(await page.locator("#run-events").textContent()).toContain(
     "Synthetic run completed",
   );
+  // Timeline times come from the shared formatter and carry a machine value.
+  const shared = (await page.evaluate(
+    "window.crewplane.formatTime('2026-11-08T00:00:01Z')",
+  )) as string;
+  const stamp = page.locator("#run-events time").first();
+  expect(await stamp.textContent()).toBe(shared);
+  expect(await stamp.getAttribute("datetime")).toBe("2026-11-08T00:00:01.000Z");
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
@@ -686,7 +693,7 @@ it("uses plain status labels with stable filter values and readable exact times"
     );
   expect(options).toContainEqual(["attention", "Blocked or awaiting review"]);
   expect(options).toContainEqual(["review", "Awaiting review"]);
-  expect(options).toContainEqual(["completed", "Accepted"]);
+  expect(options).toContainEqual(["completed", "Completed"]);
   expect(JSON.stringify(options)).not.toMatch(/Needs decision|disposition/);
   await page.goto(`${base}#/overview`);
   await title(page, "Overview");
@@ -708,14 +715,64 @@ it("uses plain status labels with stable filter values and readable exact times"
   await page.close();
 }, 30000);
 
-it("reports an unknown run id and states broadcast filtering", async () => {
+it("reports an unknown run id and describes broadcast filtering without renaming the control", async () => {
   const { page, errors } = await open("#/runs?run=not-a-run");
   await page.locator('#run-events:has-text("Unknown run id")').waitFor();
   await page.goto(`${base}#/messages`);
   await title(page, "Messages");
+  // The accessible name stays "Agent"; the broadcast note is a description.
   expect(
-    await page.locator("label:has(#message-agent)").textContent(),
-  ).toContain("also shows messages to everyone");
+    await page.getByRole("combobox", { name: "Agent", exact: true }).count(),
+  ).toBeGreaterThan(0);
+  const described = await page.locator("#message-agent").evaluate((select) => {
+    const id = select.getAttribute("aria-describedby") ?? "";
+    return document.getElementById(id)?.textContent ?? "";
+  });
+  expect(described).toContain("Also shows messages sent to everyone");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("resets the older-messages limit when message filters change", async () => {
+  const { page, errors } = await open("#/messages?filter=all");
+  await page.route("**/api/snapshot", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const template = body.messages[0];
+    for (let index = 0; index < 250; index++)
+      body.messages.push({
+        ...template,
+        id: `bulk-${index}`,
+        text: `bulkmessage ${index}`,
+        task: null,
+      });
+    await route.fulfill({ response, json: body });
+  });
+  await page.locator("#refresh").click();
+  const rows = () => page.locator("#messages .message-row").count();
+  await until(async () => (await rows()) === 100, "first 100 rows");
+  await page.getByRole("button", { name: "Show older messages" }).click();
+  await until(async () => (await rows()) === 200, "200 rows after show more");
+  await page.locator("#message-search").fill("bulkmessage");
+  await until(async () => (await rows()) === 100, "limit reset to 100");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("does not turn the detail pane into a nested scroll box below 1100px", async () => {
+  const { page, errors } = await open("#/tasks?task=WEB-2", 1000);
+  await page.locator("#task-detail").waitFor({ state: "visible" });
+  const pane = await page.locator("#task-detail").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      maxHeight: style.maxHeight,
+      position: style.position,
+      overflows: node.scrollHeight > node.clientHeight + 1,
+    };
+  });
+  expect(pane.maxHeight).toBe("none");
+  expect(pane.position).toBe("static");
+  expect(pane.overflows).toBe(false);
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
@@ -735,27 +792,52 @@ it("keeps selected state visible in forced colors and meets coarse-pointer targe
     isMobile: true,
   });
   const touch = await context.newPage();
-  await touch.goto(`${base}#/tasks?layout=list`);
-  await touch.locator("#view-title").filter({ hasText: "Tasks" }).waitFor();
-  const small = await touch
-    .locator("#view-tasks button:visible, #view-tasks select:visible")
-    .evaluateAll((nodes) =>
+  const touchErrors: string[] = [];
+  touch.on("pageerror", (error) => touchErrors.push(error.message));
+  touch.on("console", (message) => {
+    if (message.type() === "error" && /Content Security/.test(message.text()))
+      touchErrors.push(message.text());
+  });
+  const titles: Record<string, string> = {
+    overview: "Overview",
+    tasks: "Tasks",
+    agents: "Agents",
+    messages: "Messages",
+    runs: "Runs",
+    relationships: "Relationships",
+    system: "System",
+  };
+  const targets =
+    "button, select, input:not([type=checkbox]), a.shortcut, .skip-link, .primary-nav a, .close-link, .panel-link, .legend-link";
+  const smallTargets = () =>
+    touch.locator(targets).evaluateAll((nodes) =>
       nodes
-        .map((node) => node.getBoundingClientRect().height)
-        .filter((height) => height < 43.5),
+        .map((node) => ({
+          name: node.id || node.className || node.tagName,
+          box: node.getBoundingClientRect(),
+        }))
+        .filter(({ box }) => box.width > 0 && box.height > 0)
+        .filter(({ box }) => box.height < 43.5)
+        .map(({ name }) => String(name)),
     );
-  expect(small).toEqual([]);
-  expect(await noOverflow(touch)).toBe(true);
-  // Touch also shows exact times inline: no view may overflow at any width.
   for (const width of [320, 390, 1024, 1440]) {
     await touch.setViewportSize({ width, height: 900 });
     for (const view of views) {
       await touch.goto(`${base}#/${view}`);
-      await touch.locator("#view-title").filter({ hasText: /./ }).waitFor();
-      await touch.waitForTimeout(150);
+      await touch
+        .locator("#view-title")
+        .filter({ hasText: titles[view] ?? view })
+        .waitFor();
+      await touch.locator(`#view-${view}:not([hidden])`).waitFor();
       expect(await noOverflow(touch), `${view} at ${width}`).toBe(true);
+      if (width === 390) {
+        if (await touch.locator("#nav-toggle").isVisible())
+          await touch.locator("#nav-toggle").click();
+        expect(await smallTargets(), `small targets in ${view}`).toEqual([]);
+      }
     }
   }
+  expect(touchErrors).toEqual([]);
   await context.close();
   expect(errors).toEqual([]);
-}, 30000);
+}, 60000);

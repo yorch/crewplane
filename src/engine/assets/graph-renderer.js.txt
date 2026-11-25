@@ -417,9 +417,11 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     const missing = edges.filter(
       (edge) => !known.has(edge.from) || !known.has(edge.to),
     ).length;
-    summary.textContent = `${visible.length} nodes, ${edges.length} relationships`;
-    detail.textContent = `Archived/hidden upstream: ${next.hidden.nodes} nodes, ${next.hidden.edges} edges. Truncated: ${(next.truncated?.nodes ?? 0) + Math.max(0, next.nodes.length - 50)} nodes, ${(next.truncated?.edges ?? 0) + Math.max(0, next.edges.length - 100)} edges. Filtered/view hidden: ${suppliedNodes.length - visible.length} nodes, ${suppliedEdges.length - edges.length} edges. Missing-reference relationships: ${missing}.`;
-    if (visible.length === 0) summary.textContent += ". No matching nodes";
+    const summaryText = `${visible.length} nodes, ${edges.length} relationships${visible.length === 0 ? ". No matching nodes" : ""}`;
+    const detailText = `Archived/hidden upstream: ${next.hidden.nodes} nodes, ${next.hidden.edges} edges. Truncated: ${(next.truncated?.nodes ?? 0) + Math.max(0, next.nodes.length - 50)} nodes, ${(next.truncated?.edges ?? 0) + Math.max(0, next.edges.length - 100)} edges. Filtered/view hidden: ${suppliedNodes.length - visible.length} nodes, ${suppliedEdges.length - edges.length} edges. Missing-reference relationships: ${missing}.`;
+    // Assign only on change so polling never re-announces the live region.
+    if (summary.textContent !== summaryText) summary.textContent = summaryText;
+    if (detail.textContent !== detailText) detail.textContent = detailText;
     drawn = { nodes: visible, edges, view: next.view };
     draw();
     if (activeControl?.isConnected && root.contains(activeControl)) {

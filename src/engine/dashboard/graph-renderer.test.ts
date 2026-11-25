@@ -107,6 +107,14 @@ test("synthetic graph: bounded fanout, cycles, hostile text, missing references,
       page.locator(".relay-graph-detail"),
       "Missing-reference relationships: 1",
     );
+    // The filter input is linked to the static detail, which is not a live region.
+    const describedBy = await page
+      .locator(".relay-graph input")
+      .getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(
+      await page.locator(`[id="${describedBy}"]`).getAttribute("class"),
+    ).toBe("relay-graph-detail");
     const first = page.locator(".relay-graph-nodes button").first();
     await first.focus();
     await page.keyboard.press("Enter");
