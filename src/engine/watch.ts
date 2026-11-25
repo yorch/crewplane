@@ -138,8 +138,10 @@ async function json<T>(path: string): Promise<T | null> {
 const atomic = (path: string, data: unknown) => publishJson(path, data);
 // A torn or empty lock file is never guessed at; the operator must inspect it.
 async function lockJson<T>(path: string): Promise<T | null> {
-  // An empty lock is the transient state of another starter's publication;
-  // wait briefly for it to fill before declaring it corrupt.
+  // A young lock that does not parse yet (empty, or half written) is the
+  // transient state of another starter's publication; wait briefly for it to
+  // complete before declaring it corrupt. Old unparseable locks are never
+  // guessed at.
   const deadline = Date.now() + 3000;
   for (;;) {
     try {
@@ -149,7 +151,7 @@ async function lockJson<T>(path: string): Promise<T | null> {
       const info = await stat(path).catch(() => null);
       if (info === null) return null;
       const young = Date.now() - info.mtimeMs < 2000;
-      if (info.size === 0 && young && Date.now() < deadline) {
+      if (young && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 25));
         continue;
       }
