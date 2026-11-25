@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -26,9 +26,22 @@ const tokenMatches = (given: unknown, expected: string) => {
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 };
+/** Fresh per-launch secret for dashboard read access. */
+export const newSessionToken = () => randomBytes(32).toString("base64url");
 export function createDashboard(
   root: string,
-  options: { controls?: { token: string } } = {},
+  options: {
+    controls?: { token: string };
+    /**
+     * Require a per-launch session on every `/api/*` read, presented in the
+     * `x-crewplane-session` header. The dashboard page takes it from the
+     * `#token=…` URL fragment (never sent to a server) into sessionStorage.
+     * Omitting it disables read auth entirely, which is only appropriate for
+     * in-process tests: any listener on 127.0.0.1 is reachable by other local
+     * users.
+     */
+    session?: { token: string };
+  } = {},
 ) {
   let traces: ReturnType<typeof createTraceStore> | undefined;
   const getTraces = () =>
@@ -57,6 +70,7 @@ export function createDashboard(
     const expectedHost = `127.0.0.1:${address}`;
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
@@ -142,6 +156,25 @@ export function createDashboard(
     }
     if (request.method !== "GET") {
       response.writeHead(405, { Allow: "GET" }).end();
+      return;
+    }
+    const session = options.session;
+    // Static pages and scripts are public embedded assets; only data routes
+    // need the per-launch session, which the page keeps in sessionStorage
+    // (origin-scoped, unlike a cookie) and sends as a header.
+    if (
+      session &&
+      request.url?.startsWith("/api/") &&
+      !tokenMatches(request.headers["x-crewplane-session"], session.token)
+    ) {
+      response
+        .writeHead(401, { "Content-Type": "application/json; charset=utf-8" })
+        .end(
+          JSON.stringify({
+            error:
+              "Session missing or expired. Reopen the URL printed by crewplane dashboard.",
+          }),
+        );
       return;
     }
     try {

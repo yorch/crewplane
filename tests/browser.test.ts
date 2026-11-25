@@ -70,13 +70,20 @@ it("renders the embedded dashboard with custom agents, narrow layouts and safe r
       ["--project", root, "dashboard", "--port", String(port)],
       { stdio: "pipe" },
     );
+    let output = "";
+    child.stdout?.on("data", (chunk) => {
+      output += chunk.toString();
+    });
     const page = await browser.newPage();
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const deadline = Date.now() + 10000;
     while (true) {
+      // The printed URL carries the per-launch session as a #token fragment.
+      const token = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1];
       try {
-        await page.goto(`http://127.0.0.1:${port}/`);
+        if (!token) throw new Error("dashboard has not printed its URL yet");
+        await page.goto(`http://127.0.0.1:${port}/#token=${token}`);
         break;
       } catch (error) {
         if (Date.now() > deadline) throw error;

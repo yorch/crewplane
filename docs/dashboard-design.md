@@ -1,6 +1,6 @@
 # Dashboard design
 
-The dashboard is a read-only operations cockpit for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged, and all displayed data comes from the existing `/api/snapshot` and `/api/runs` responses.
+The dashboard is a read-only operations cockpit for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged (later hardening only adds a per-launch session header on `/api/*`; see docs/USAGE.md), and all displayed data comes from the existing `/api/snapshot` and `/api/runs` responses.
 
 ## Information architecture
 

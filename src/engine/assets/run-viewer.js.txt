@@ -1,6 +1,8 @@
 (() => {
   const get = (id) => document.getElementById(id);
   const MAX_EVENTS = 500;
+  const SESSION_MESSAGE =
+    "Session missing or expired. Reopen the URL printed by crewplane dashboard.";
   const RUN_ID =
     /^\d{13}-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
   const statusTones = {
@@ -127,10 +129,11 @@
     const id = selected;
     tailing = run;
     try {
-      const response = await fetch(
+      const response = await window.crewplaneFetch(
         `/api/runs/${encodeURIComponent(id)}?after=${cursor}&limit=100`,
         { cache: "no-store", signal: AbortSignal.timeout(10000) },
       );
+      if (response.status === 401) throw Error(SESSION_MESSAGE);
       if (!response.ok)
         throw Error("Selected run unavailable or no longer retained");
       const value = await response.json();
@@ -254,10 +257,11 @@
       ])
         if (get(id).value) query.set(key, get(id).value);
       if (older && before) query.set("before", before);
-      const response = await fetch(`/api/runs?${query}`, {
+      const response = await window.crewplaneFetch(`/api/runs?${query}`, {
         cache: "no-store",
         signal: AbortSignal.timeout(10000),
       });
+      if (response.status === 401) throw Error(SESSION_MESSAGE);
       if (!response.ok) throw Error("Run history unavailable; check filters");
       const value = await response.json();
       if (startKey !== filterKey) return;

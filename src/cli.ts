@@ -12,7 +12,7 @@ import pkg from "../package.json" with { type: "json" };
 import type { Config, State } from "./contracts.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
-import { createDashboard } from "./engine/dashboard.ts";
+import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
 import type {
   EvidenceCaptureInput,
   EvidenceRunInput,
@@ -906,13 +906,17 @@ async function main() {
       throw new Error("Invalid port");
     const controls =
       opts["--controls"] === "true" ? { token: randomUUID() } : undefined;
-    const server = createDashboard(root, { ...(controls ? { controls } : {}) });
+    const session = { token: newSessionToken() };
+    const server = createDashboard(root, {
+      session,
+      ...(controls ? { controls } : {}),
+    });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, "127.0.0.1", resolve);
     });
     output(
-      `Crewplane dashboard: http://127.0.0.1:${port}${
+      `Crewplane dashboard: http://127.0.0.1:${port}/#token=${session.token}${
         controls
           ? `\nControls enabled: send x-crewplane-token: ${controls.token} from an exact Origin`
           : ""

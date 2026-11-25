@@ -370,9 +370,17 @@ mkdirSync(join(OUT, "shots"), { recursive: true });
 const dash = spawn(
   join(tools, "crewplane"),
   ["--project", root, "dashboard", "--port", "4399"],
-  { env, stdio: "ignore" },
+  { env, stdio: ["ignore", "pipe", "ignore"] },
 );
-await Bun.sleep(1500);
+// The dashboard prints its URL with a per-launch session in the fragment.
+let dashOutput = "";
+dash.stdout?.on("data", (chunk) => {
+  dashOutput += chunk.toString();
+});
+for (let i = 0; i < 100 && !/#token=/.test(dashOutput); i++)
+  await Bun.sleep(100);
+const dashToken = /#token=([A-Za-z0-9_-]+)/.exec(dashOutput)?.[1];
+if (!dashToken) throw new Error("dashboard did not print a session URL");
 const browser = await chromium.launch();
 try {
   for (const [scheme, suffix] of [["light", ""]] as const) {
@@ -383,6 +391,7 @@ try {
         colorScheme: scheme,
       })
     ).newPage();
+    await page.goto(`http://127.0.0.1:4399/#token=${dashToken}`);
     for (const view of ["overview", "tasks", "agents", "messages"]) {
       await page.goto(`http://127.0.0.1:4399/#/${view}`);
       await page.waitForTimeout(1200);

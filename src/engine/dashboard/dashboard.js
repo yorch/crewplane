@@ -162,6 +162,47 @@ let data;
 let fingerprint;
 let busy = false;
 let lastSuccess = null;
+// Per-launch session: the printed URL carries `#token=…` (a fragment, so no
+// server, log or Referer ever sees it). Keep it in sessionStorage (scoped to
+// this origin, unlike a cookie), strip it from the URL and send it as a header.
+const SESSION_KEY = "crewplane-session";
+let sessionToken = null;
+try {
+  sessionToken = window.sessionStorage.getItem(SESSION_KEY);
+} catch {
+  // Storage may be blocked; the in-memory token below still works for this tab.
+}
+// Adopts a `token=` fragment parameter (`#token=T`, `#token=T&/tasks`,
+// `#/tasks&token=T`, `#/tasks?q=x&token=T`), removes it from the URL and keeps
+// the rest of the route. Returns true when a token was adopted.
+function adoptFragmentToken() {
+  const hash = window.location.hash;
+  const match = /(^#|[?&])token=([A-Za-z0-9_-]{16,128})(?=&|$)/.exec(hash);
+  if (!match) return false;
+  sessionToken = match[2];
+  try {
+    window.sessionStorage.setItem(SESSION_KEY, sessionToken);
+  } catch {
+    // Memory only.
+  }
+  const rest = hash
+    .slice(1)
+    .replace(/(^|[?&])token=[A-Za-z0-9_-]{16,128}(&|$)/, (_all, pre, post) =>
+      pre === "" ? "" : pre === "?" ? (post ? "?" : "") : post ? "&" : "",
+    );
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
+  );
+  return true;
+}
+adoptFragmentToken();
+window.crewplaneFetch = (url, options = {}) => {
+  const headers = new Headers(options.headers);
+  if (sessionToken) headers.set("x-crewplane-session", sessionToken);
+  return fetch(url, { ...options, headers });
+};
 let internalNavigation = false;
 let messageLimit = 100;
 const filterMemory = {};
@@ -1961,6 +2002,8 @@ function highlightTarget(previous) {
     ?.scrollIntoView({ block: "nearest" });
 }
 function onRouteChange() {
+  // Reopening the printed URL in this tab is only a hash change.
+  const adopted = adoptFragmentToken();
   const previous = route;
   const traversal = !internalNavigation;
   internalNavigation = false;
@@ -1978,6 +2021,7 @@ function onRouteChange() {
   placeScroll(previous, traversal);
   placeFocus(previous, !traversal);
   highlightTarget(previous);
+  if (adopted) refresh();
 }
 
 // ---- Snapshot polling ------------------------------------------------------
@@ -2059,7 +2103,7 @@ async function refresh() {
   $("refresh").setAttribute("aria-busy", "true");
   let next;
   try {
-    const response = await fetch("/api/snapshot", {
+    const response = await window.crewplaneFetch("/api/snapshot", {
       cache: "no-store",
       signal: AbortSignal.timeout(10000),
     });
