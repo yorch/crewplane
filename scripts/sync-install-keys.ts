@@ -2,19 +2,23 @@
 //
 //   bun scripts/sync-install-keys.ts          rewrite the block
 //   bun scripts/sync-install-keys.ts --check  exit 1 if it differs
+//   options: --keys FILE (default release-keys.json), --install FILE
 import { readFileSync, writeFileSync } from "node:fs";
-import { parseReleaseKeys } from "../src/release-signing.ts";
+import { parseReleaseTrust } from "../src/release-signing.ts";
 
 const begin =
   "# BEGIN RELEASE KEYS (generated from release-keys.json; do not edit)";
 const end = "# END RELEASE KEYS";
 const root = new URL("../", import.meta.url);
-const installPath = new URL("install.sh", root).pathname;
+const option = (name: string, fallback: string) => {
+  const index = process.argv.indexOf(name);
+  return index === -1 ? fallback : (process.argv[index + 1] ?? fallback);
+};
+const keysPath = option("--keys", new URL("release-keys.json", root).pathname);
+const installPath = option("--install", new URL("install.sh", root).pathname);
 
-const keys = parseReleaseKeys(
-  JSON.parse(readFileSync(new URL("release-keys.json", root), "utf8")),
-);
-const block = `${begin}\nrelease_keys='${keys.map((key) => `\n${key.id} ${key.publicKey}`).join("")}\n'\n${end}`;
+const trust = parseReleaseTrust(JSON.parse(readFileSync(keysPath, "utf8")));
+const block = `${begin}\nrelease_signed_since='${trust.signedSince ?? ""}'\nrelease_keys='${trust.keys.map((key) => `\n${key.id} ${key.publicKey}`).join("")}\n'\n${end}`;
 const script = readFileSync(installPath, "utf8");
 const from = script.indexOf(begin);
 const to = script.indexOf(end);

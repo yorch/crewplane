@@ -3,7 +3,9 @@
 //   RELEASE_SIGNING_KEY=... bun scripts/sign-release.ts --tag vX.Y.Z FILE...
 //   bun scripts/sign-release.ts --verify --tag vX.Y.Z FILE...
 //
-// Signing writes `<FILE>.sig`. If release-keys.json lists no keys, signing is
+// Signing writes `<FILE>.sig`, one signature per line. RELEASE_SIGNING_KEY is
+// the current key; the optional RELEASE_SIGNING_KEY_PREVIOUS adds a second line
+// signed by the previous key (dual signing for rotation, see docs/RELEASING.md). If release-keys.json lists no keys, signing is
 // skipped with a notice. If it lists keys, a missing secret is an error, and
 // every signature is verified against the listed keys before this exits, so a
 // secret that does not match a published public key fails the release.
@@ -12,7 +14,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import {
   parsePrivateKey,
-  parseReleaseKeys,
+  parseReleaseTrust,
   signRelease,
   verifyReleaseSignature,
 } from "../src/release-signing.ts";
@@ -40,7 +42,7 @@ for (let i = 0; i < args.length; i++) {
 
 if (!/^v\d+\.\d+\.\d+/.test(tag)) fail("--tag vX.Y.Z is required");
 if (files.length === 0) fail("no asset files given");
-const keys = parseReleaseKeys(JSON.parse(readFileSync(keysPath, "utf8")));
+const keys = parseReleaseTrust(JSON.parse(readFileSync(keysPath, "utf8"))).keys;
 const sha256 = (file: string) =>
   createHash("sha256").update(readFileSync(file)).digest("hex");
 
@@ -80,29 +82,46 @@ if (secret.trim() === "")
   fail(
     "release-keys.json lists keys but RELEASE_SIGNING_KEY is not set; refusing to publish unsigned assets",
   );
-let privateKey: KeyObject;
-try {
-  privateKey = parsePrivateKey(secret);
-} catch (error) {
-  fail(reason(error));
-}
+const parseSecret = (value: string): KeyObject => {
+  try {
+    return parsePrivateKey(value);
+  } catch (error) {
+    return fail(reason(error));
+  }
+};
+const privateKeys: KeyObject[] = [parseSecret(secret)];
+const previous = process.env.RELEASE_SIGNING_KEY_PREVIOUS ?? "";
+if (previous.trim() !== "") privateKeys.push(parseSecret(previous));
 for (const file of files) {
   const asset = basename(file);
-  writeFileSync(
-    `${file}.sig`,
+  const lines = privateKeys.map((privateKey) =>
     signRelease({
       privateKey,
       tag,
       asset,
       sha256: sha256(file),
-      ...(keyId === undefined ? {} : { keyId }),
+      ...(keyId === undefined || privateKeys.length > 1 ? {} : { keyId }),
     }),
   );
-  try {
-    console.log(`signed ${asset} (verified with key ${check(file)})`);
-  } catch (error) {
-    fail(
-      `${asset}: signing key does not match any key in release-keys.json (${reason(error)})`,
-    );
+  // Every line must verify on its own against a listed key.
+  const used: string[] = [];
+  for (const line of lines) {
+    try {
+      used.push(
+        verifyReleaseSignature({
+          keys,
+          tag,
+          asset,
+          sha256: sha256(file),
+          signatureText: line,
+        }).keyId,
+      );
+    } catch (error) {
+      fail(
+        `${asset}: a signing key does not match any key in release-keys.json (${reason(error)})`,
+      );
+    }
   }
+  writeFileSync(`${file}.sig`, lines.join(""));
+  console.log(`signed ${asset} (verified with key ${used.join(", ")})`);
 }

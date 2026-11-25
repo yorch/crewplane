@@ -77,6 +77,62 @@ describe("scripts/sign-release.ts", () => {
     }
   });
 
+  it("dual-signs with RELEASE_SIGNING_KEY_PREVIOUS and verifies each line", () => {
+    const current = pair();
+    const previous = pair();
+    const w = workspace([
+      { id: "old", publicKey: previous.publicKey },
+      { id: "new", publicKey: current.publicKey },
+    ]);
+    const signed = cli(["--keys", w.keysFile, "--tag", "v1.0.0", w.file], {
+      RELEASE_SIGNING_KEY: current.secret,
+      RELEASE_SIGNING_KEY_PREVIOUS: previous.pem,
+    });
+    assert.equal(signed.status, 0, signed.err);
+    const lines = readFileSync(`${w.file}.sig`, "utf8").trim().split("\n");
+    assert.equal(lines.length, 2);
+    // Each key alone accepts the file.
+    for (const [id, key] of [
+      ["old", previous],
+      ["new", current],
+    ] as const) {
+      const only = join(w.dir, `${id}.json`);
+      writeFileSync(
+        only,
+        JSON.stringify({ keys: [{ id, publicKey: key.publicKey }] }),
+      );
+      const ok = cli(["--verify", "--keys", only, "--tag", "v1.0.0", w.file]);
+      assert.equal(ok.status, 0, ok.err);
+    }
+    // A previous key that is not listed fails the job: its line would be useless.
+    const unlisted = cli(["--keys", w.keysFile, "--tag", "v1.0.0", w.file], {
+      RELEASE_SIGNING_KEY: current.secret,
+      RELEASE_SIGNING_KEY_PREVIOUS: pair().secret,
+    });
+    assert.notEqual(unlisted.status, 0);
+    assert.match(unlisted.err, /does not match any key/);
+  });
+
+  it("refuses a malformed tag or asset name", () => {
+    const a = pair();
+    const w = workspace([{ id: "k", publicKey: a.publicKey }]);
+    const odd = join(w.dir, "renamed-binary");
+    writeFileSync(odd, "x");
+    const env = { RELEASE_SIGNING_KEY: a.secret };
+    assert.notEqual(
+      cli(["--keys", w.keysFile, "--tag", "v1.0.0", odd], env).status,
+      0,
+    );
+    assert.notEqual(
+      cli(["--keys", w.keysFile, "--tag", "1.0.0", w.file], env).status,
+      0,
+    );
+    assert.notEqual(
+      cli(["--keys", w.keysFile, "--tag", "v1.0.1", w.file], env).status,
+      0,
+    );
+  });
+
   it("skips with a notice when no keys are configured", () => {
     const w = workspace([]);
     const result = cli(["--keys", w.keysFile, "--tag", "v1.0.0", w.file]);

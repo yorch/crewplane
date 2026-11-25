@@ -651,6 +651,66 @@ try {
     assert.equal(signedOutcome.signingKey, "acceptance");
     assert.equal(readFileSync(signedBin).equals(releaseBytes), true);
     releaseSignature = null;
+
+    // A real release build must ignore the test key override. Build it to a
+    // temp file (dist/crewplane is shared), point the override at a key and
+    // serve no signature: it must still update on the checksum alone.
+    const releaseBinary = join(temp, "release-build", "crewplane");
+    mkdirSync(join(temp, "release-build"), { recursive: true });
+    const buildScript = (
+      JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
+        scripts: Record<string, string>;
+      }
+    ).scripts["build:release"];
+    if (
+      buildScript === undefined ||
+      !buildScript.includes("--outfile dist/crewplane")
+    )
+      throw new Error("build:release script changed shape");
+    const built = spawnSync(
+      "sh",
+      [
+        "-c",
+        buildScript.replace(
+          "--outfile dist/crewplane",
+          `--outfile '${releaseBinary}'`,
+        ),
+      ],
+      { encoding: "utf8", timeout: 240000 },
+    );
+    assert.equal(built.status, 0, built.stderr);
+    const releaseText = readFileSync(releaseBinary).toString("latin1");
+    const readName = "process.env.CREWPLANE_TEST_RELEASE_KEYS";
+    for (
+      let at = releaseText.indexOf(readName);
+      at !== -1;
+      at = releaseText.indexOf(readName, at + 1)
+    )
+      assert.equal(
+        releaseText.startsWith("=undefined", at + readName.length),
+        true,
+        "release bundle must not read CREWPLANE_TEST_RELEASE_KEYS",
+      );
+    const overrideRelease = join(updateDirectory, "releasebuild", "crewplane");
+    mkdirSync(join(updateDirectory, "releasebuild"), { recursive: true });
+    copyFileSync(releaseBinary, overrideRelease);
+    releaseSignature = null;
+    const ignored = await update(["update"], {
+      bin: overrideRelease,
+      env: {
+        ...signedEnv,
+        CREWPLANE_CACHE_DIR: join(temp, "rb-cache"),
+        CREWPLANE_RELEASES_DIR: join(temp, "rb-releases"),
+      },
+    });
+    assert.equal(ignored.status, 0, ignored.stderr);
+    assert.doesNotMatch(ignored.stderr, /signature/);
+    const ignoredOutcome = JSON.parse(ignored.stdout) as {
+      status: string;
+      integrity: string;
+    };
+    assert.equal(ignoredOutcome.status, "updated");
+    assert.equal(ignoredOutcome.integrity, "sha256");
     const checked = await update(["update", "--check"]);
     assert.equal(checked.status, 0, checked.stderr);
     const available = JSON.parse(checked.stdout) as {

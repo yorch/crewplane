@@ -1,5 +1,5 @@
 import releaseKeyFile from "../release-keys.json" with { type: "json" };
-import { parseReleaseKeys, type ReleaseKey } from "./release-signing.ts";
+import { parseReleaseTrust, type ReleaseTrust } from "./release-signing.ts";
 
 /**
  * Trusted release keys, bundled from `release-keys.json` at build time. An
@@ -10,9 +10,9 @@ import { parseReleaseKeys, type ReleaseKey } from "./release-signing.ts";
  * branch from the shipped binary, so no environment can swap the trusted keys
  * of a real release.
  */
-export function embeddedReleaseKeys(): ReleaseKey[] {
+export function embeddedReleaseTrust(): ReleaseTrust {
   const override = process.env.CREWPLANE_TEST_RELEASE_KEYS;
   if (override !== undefined && override !== "")
-    return parseReleaseKeys(JSON.parse(override));
-  return parseReleaseKeys(releaseKeyFile);
+    return parseReleaseTrust(JSON.parse(override));
+  return parseReleaseTrust(releaseKeyFile);
 }
