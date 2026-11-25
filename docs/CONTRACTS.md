@@ -46,9 +46,30 @@ order is (tasks and messages are sorted, lanes follow configuration order).
 **Exit codes.** `0` success, including a queued control without `--wait` and an
 `applied` or `noop` `--wait` outcome; `1` operational failure, invalid local
 input, unconfigured project or release-pin mismatch; `2` a supervisor
-`refused` or `invalid` outcome under `--wait`; `3` a `stale` outcome under
+`refused` or `invalid` outcome under `--wait`, or, for `doctor`, a diagnosed
+problem (the JSON report is still printed to stdout); `3` a `stale` outcome under
 `--wait`; `124` a `--wait` timeout, where the command remains queued and may
 still apply.
+
+**Doctor.** `doctor` never aborts on a failed check: each failure becomes an
+entry in `problems` (`{code, lane?, message}`), `ok` is `problems.length === 0`,
+and the exit code is `0` when `ok` and `2` otherwise, with the report on stdout
+either way. `code` is a closed set: `CONFIG_MISSING` (not configured),
+`CONFIG_INVALID` (unreadable or invalid configuration, or a lane that cannot be
+described), `BINARY_MISSING` (no binary configured, or the path does not
+exist), `BINARY_INVALID` (relative path, or not a regular file),
+`BINARY_NOT_EXECUTABLE`, `INSTRUCTIONS_INVALID` (a lane's, or without `lane`
+the global, instruction file), `RELEASES_ROOT_INVALID` (relative
+`CREWPLANE_RELEASES_DIR`/`XDG_DATA_HOME`) and `GIT_UNAVAILABLE`. Binary problems
+carry the `lane`. Each lane's effective binary is the harness's `binaries` entry,
+or the top-level `binary` for Codex; it is probed (absolute, regular file,
+executable by the current user) and never executed. Lane `binary` is
+`{path, ok, problem?}`; top-level `defaultBinary` is the same shape or `null`.
+`config` is `valid`, `invalid` or `not-configured`; `runtime` is `compiled` for
+a standalone executable and `bun` otherwise; `git` is `null` when git cannot
+run. Credentials and provider operation are not probed. Pin mismatches and
+unsafe stores are still refused before `doctor` runs, as for any project
+command.
 
 **Errors.** Errors go to stderr, never stdout. The first line is
 `crewplane: MESSAGE`; continuation lines are indented and carry recovery
