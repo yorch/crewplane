@@ -172,37 +172,37 @@ try {
 } catch {
   // Storage may be blocked; the in-memory token below still works for this tab.
 }
-{
-  const fromUrl = /(?:^#|&)token=([A-Za-z0-9_-]{16,128})(?:&|$)/.exec(
-    window.location.hash,
-  );
-  if (fromUrl) {
-    sessionToken = fromUrl[1];
-    try {
-      window.sessionStorage.setItem(SESSION_KEY, sessionToken);
-    } catch {
-      // Memory only.
-    }
-    const rest = window.location.hash
-      .slice(1)
-      .split("&")
-      .filter((part) => !part.startsWith("token="))
-      .join("&");
-    window.history.replaceState(
-      null,
-      "",
-      `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
-    );
+// Adopts a `token=` fragment parameter (`#token=T`, `#token=T&/tasks`,
+// `#/tasks&token=T`, `#/tasks?q=x&token=T`), removes it from the URL and keeps
+// the rest of the route. Returns true when a token was adopted.
+function adoptFragmentToken() {
+  const hash = window.location.hash;
+  const match = /(^#|[?&])token=([A-Za-z0-9_-]{16,128})(?=&|$)/.exec(hash);
+  if (!match) return false;
+  sessionToken = match[2];
+  try {
+    window.sessionStorage.setItem(SESSION_KEY, sessionToken);
+  } catch {
+    // Memory only.
   }
+  const rest = hash
+    .slice(1)
+    .replace(/(^|[?&])token=[A-Za-z0-9_-]{16,128}(&|$)/, (_all, pre, post) =>
+      pre === "" ? "" : pre === "?" ? (post ? "?" : "") : post ? "&" : "",
+    );
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
+  );
+  return true;
 }
-window.crewplaneFetch = (url, options = {}) =>
-  fetch(url, {
-    ...options,
-    headers: {
-      ...options.headers,
-      ...(sessionToken ? { "x-crewplane-session": sessionToken } : {}),
-    },
-  });
+adoptFragmentToken();
+window.crewplaneFetch = (url, options = {}) => {
+  const headers = new Headers(options.headers);
+  if (sessionToken) headers.set("x-crewplane-session", sessionToken);
+  return fetch(url, { ...options, headers });
+};
 let internalNavigation = false;
 let messageLimit = 100;
 const filterMemory = {};
@@ -2002,6 +2002,8 @@ function highlightTarget(previous) {
     ?.scrollIntoView({ block: "nearest" });
 }
 function onRouteChange() {
+  // Reopening the printed URL in this tab is only a hash change.
+  const adopted = adoptFragmentToken();
   const previous = route;
   const traversal = !internalNavigation;
   internalNavigation = false;
@@ -2019,6 +2021,7 @@ function onRouteChange() {
   placeScroll(previous, traversal);
   placeFocus(previous, !traversal);
   highlightTarget(previous);
+  if (adopted) refresh();
 }
 
 // ---- Snapshot polling ------------------------------------------------------

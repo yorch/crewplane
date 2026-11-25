@@ -36,8 +36,9 @@ export function createDashboard(
      * Require a per-launch session on every `/api/*` read, presented in the
      * `x-crewplane-session` header. The dashboard page takes it from the
      * `#token=…` URL fragment (never sent to a server) into sessionStorage.
-     * Omitted for embedding and tests, where the server is not reachable by
-     * other local users.
+     * Omitting it disables read auth entirely, which is only appropriate for
+     * in-process tests: any listener on 127.0.0.1 is reachable by other local
+     * users.
      */
     session?: { token: string };
   } = {},

@@ -643,3 +643,30 @@ it("pages retained runs beyond two pages and keeps incremental events unique dur
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
+
+it("adopts a fresh session fragment in the same tab, in every accepted form, without leaving it in the URL", async () => {
+  const { page } = await open();
+  const token = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1] ?? "";
+  for (const fragment of [
+    `#token=${token}`,
+    `#/tasks&token=${token}`,
+    `#/tasks?q=x&token=${token}`,
+    `#/tasks?token=${token}`,
+  ]) {
+    // A stale session first: polls fail until the printed URL is reopened.
+    await page.evaluate(() =>
+      window.sessionStorage.setItem("crewplane-session", "x".repeat(43)),
+    );
+    await page.reload();
+    await page
+      .locator("#error")
+      .filter({ hasText: "Session missing or expired" })
+      .waitFor();
+    // Hash-only navigation: no reload happens, the token must still be adopted.
+    await page.goto(`${base}${fragment}`);
+    await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+    expect(page.url()).not.toContain("token");
+    if (fragment.includes("tasks")) expect(page.url()).toContain("#/tasks");
+  }
+  await page.close();
+});

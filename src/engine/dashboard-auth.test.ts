@@ -88,6 +88,10 @@ it("answers odd request targets without hanging and keeps the Host and Origin ch
       request.on("error", reject);
       request.end();
     });
+  for (const path of ["/api", "/API/snapshot", "/api?x=1"])
+    expect(await raw(path), path).toBe(404);
+  expect(await raw("http://127.0.0.1/api/snapshot")).toBe(404);
+  expect(await raw("/api/runs/../snapshot")).toBe(401);
   expect(await raw("//")).toBe(404);
   expect(await raw("//?token=x")).toBe(404);
   expect(await raw("/api/%2e%2e/snapshot")).toBe(401);
