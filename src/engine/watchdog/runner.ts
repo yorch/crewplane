@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { checkControlDirectory } from "../../control.ts";
+import { checkControlDirectory, controlDirectory } from "../../control.ts";
 import { durableMkdir, publishJson } from "../../io.ts";
 import {
   coordinatorOf,
@@ -491,7 +491,8 @@ export async function watchdogMain(
   if (!["start", "once", "status"].includes(action ?? ""))
     throw Error("Use start|once|status");
   // Control state lives outside the project store; see src/control.ts.
-  const control = where?.control ?? discoverProject(process.cwd()).control;
+  const control =
+    where?.control ?? controlDirectory(discoverProject(process.cwd()).primary);
   if (!isAbsolute(control)) throw Error("Control directory must be absolute");
   checkControlDirectory(control);
   const directory = join(control, "watchdog");

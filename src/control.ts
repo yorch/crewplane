@@ -1,9 +1,15 @@
-import { createHash } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { syncDirectory } from "./io.ts";
+import { publishJson, syncDirectory } from "./io.ts";
 
 /**
  * The control plane (supervisor commands, configuration, state, leases, run
@@ -75,9 +81,13 @@ function problem(path: string): string | "absent" | null {
   if (info.isSymbolicLink()) return "is a symbolic link";
   if (!info.isDirectory()) return "is not a directory";
   const uid = process.getuid?.();
-  if (uid !== undefined && info.uid !== uid)
-    return "is not owned by the current user";
+  if (uid === undefined)
+    throw new Error(
+      "The private control directory is unsupported on this platform (no POSIX ownership checks)",
+    );
+  if (info.uid !== uid) return "is not owned by the current user";
   if ((info.mode & 0o022) !== 0) return "is group or world writable";
+  if ((info.mode & 0o004) !== 0) return "is readable by other users";
   return null;
 }
 
@@ -116,4 +126,92 @@ export async function ensureControlDirectory(path: string): Promise<void> {
         `Unsafe control directory: ${printable(entry)} ${found === "absent" ? "could not be created" : found}`,
       );
   }
+}
+
+/**
+ * Binding between a project store and its control directory. The store keeps a
+ * marker with a random id and the control key; the control directory keeps the
+ * same id and the project identity. A mismatch means the repository moved, the
+ * environment selecting the base differs, or a different checkout would inherit
+ * an old configuration; every one of those fails closed rather than starting
+ * fresh or adopting foreign state.
+ */
+export interface BindingIdentity {
+  primaryRoot: string;
+  gitCommon?: string | undefined;
+}
+const markerPath = (store: string) => join(store, "control-binding.json");
+const identityPath = (control: string) => join(control, "identity.json");
+function readBinding(path: string): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("not an object");
+    return value as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error(`Invalid ${printable(path)}; inspect it before continuing`);
+  }
+}
+export function checkBinding(
+  store: string,
+  control: string,
+  identity: BindingIdentity,
+): void {
+  const marker = readBinding(markerPath(store));
+  const present = existsSync(control);
+  const ident = present ? readBinding(identityPath(control)) : null;
+  const populated =
+    present && readdirSync(control).some((name) => name !== "identity.json");
+  if (ident) {
+    if (
+      ident.primaryRoot !== identity.primaryRoot ||
+      (identity.gitCommon !== undefined &&
+        ident.gitCommon !== undefined &&
+        ident.gitCommon !== identity.gitCommon)
+    )
+      throw new Error(
+        `Control directory ${printable(control)} is bound to a different project identity (${printable(String(ident.primaryRoot))}); the repository was moved or its identity changed`,
+      );
+    if (!marker || marker.id !== ident.bindingId)
+      throw new Error(
+        `Control directory ${printable(control)} belongs to a different checkout of this path (the project store has no matching control-binding.json); refusing to inherit its configuration. If this is intended, move that directory aside`,
+      );
+  } else if (marker && !populated)
+    throw new Error(
+      `The project store records prior supervision (control directory ${printable(String(marker.controlDirectory ?? "unknown"))}) but ${printable(control)} has no matching state. The repository may have moved, or HOME, XDG_STATE_HOME or CREWPLANE_STATE_DIR differ from the original start. Restore the environment or the directory; to start fresh deliberately, remove ${printable(markerPath(store))}`,
+    );
+}
+/** Verify, then record the binding on both sides if it is not yet recorded. */
+export async function bindControl(
+  store: string,
+  control: string,
+  identity: BindingIdentity,
+): Promise<void> {
+  checkBinding(store, control, identity);
+  let marker = readBinding(markerPath(store));
+  if (!marker) {
+    marker = {
+      version: 1,
+      id: randomUUID(),
+      key: basename(control),
+      controlDirectory: control,
+    };
+    await publishJson(markerPath(store), marker, { exclusive: true }).catch(
+      (error) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      },
+    );
+    marker = readBinding(markerPath(store));
+  }
+  if (!readBinding(identityPath(control)))
+    await publishJson(identityPath(control), {
+      version: 1,
+      bindingId: marker?.id,
+      primaryRoot: identity.primaryRoot,
+      ...(identity.gitCommon === undefined
+        ? {}
+        : { gitCommon: identity.gitCommon }),
+    });
+  checkBinding(store, control, identity);
 }

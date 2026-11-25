@@ -1007,7 +1007,17 @@ try {
   mkdirSync(legacyDirectory, { recursive: true, mode: 0o700 });
   writeFileSync(
     join(legacyDirectory, "state.json"),
-    JSON.stringify({ version: 2, running: false, records: {} }),
+    JSON.stringify({
+      version: 2,
+      running: false,
+      checkedAt: "2000-01-01T00:00:00.000Z",
+      pid: 4207337,
+      draining: false,
+      held: [],
+      commands: [],
+      notices: {},
+      records: {},
+    }),
   );
   const refusedLegacy = legacyRun("status");
   assert.equal(refusedLegacy.status, 1);

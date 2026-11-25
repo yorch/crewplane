@@ -1,6 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import pkg from "../../package.json" with { type: "json" };
@@ -13,7 +13,7 @@ import type {
   State,
   Work,
 } from "../contracts.ts";
-import { ensureControlDirectory } from "../control.ts";
+import { bindControl, ensureControlDirectory } from "../control.ts";
 import { gitEnvironment, harnessEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
@@ -470,6 +470,7 @@ export async function serve(
   signal: AbortSignal,
   options: {
     store?: string;
+    gitCommon?: string;
     readBoard?: typeof snapshot;
     writeState?: typeof publishJson;
     runTimeoutMs?: number;
@@ -484,9 +485,18 @@ export async function serve(
   const store =
     options.store ??
     (process.env.CREWPLANE_COORD_DIR || join(config.root, ".crewplane-state"));
+  // Refuse a control directory that belongs to another checkout or a moved
+  // repository before taking its lease or reading its state.
+  await bindControl(store, directory, {
+    primaryRoot: realpathSync(config.root),
+    gitCommon: options.gitCommon,
+  });
   const release = await acquire(directory);
   // Announce supervision so the per-user updater never replaces this binary.
-  const unregister = await registerSupervisor();
+  const unregister = await registerSupervisor(process.env, {
+    store,
+    control: directory,
+  });
   const statePath = join(directory, "state.json");
   let state: State;
   try {

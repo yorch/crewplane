@@ -95,7 +95,8 @@ const baseNames = new Set([
   // board location (CREWPLANE_COORD_DIR) is set by the supervisor; the control
   // directory is never passed. CREWPLANE_STATE_DIR is only the operator's base
   // override, so `crewplane agents` can derive the same directory to READ run
-  // state (the CLI never writes there from a child). Read-only intent is
+  // state. Under CREWPLANE_HEADLESS_LANE the CLI refuses configure, start,
+  // control verbs, migrate and pin, so a child only reads there. Read-only intent is
   // enforced by a sandbox, not by Crewplane.
   "CREWPLANE_STATE_DIR",
   "CREWPLANE_EXECUTABLE",

@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -13,6 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import {
+  bindControl,
+  checkBinding,
   checkControlDirectory,
   controlDirectory,
   controlStateBase,
@@ -129,4 +133,101 @@ it("refuses symlinked, group-writable, world-writable and non-directory control 
   rmSync(directory);
   writeFileSync(directory, "not a directory");
   expect(() => checkControlDirectory(directory)).toThrow("not a directory");
+});
+
+it("refuses control directories that other users could read or traverse", async () => {
+  const base = temp();
+  const project = join(base, "p");
+  mkdirSync(project);
+  const directory = controlDirectory(project, {
+    CREWPLANE_STATE_DIR: join(base, "state"),
+  });
+  await ensureControlDirectory(directory);
+  chmodSync(directory, 0o755);
+  expect(() => checkControlDirectory(directory)).toThrow("readable by other");
+  chmodSync(directory, 0o700);
+  chmodSync(join(directory, ".."), 0o750);
+  expect(() => checkControlDirectory(directory)).not.toThrow();
+  chmodSync(join(directory, ".."), 0o705);
+  expect(() => checkControlDirectory(directory)).toThrow("readable by other");
+  chmodSync(join(directory, ".."), 0o700);
+});
+
+function bound() {
+  const base = temp();
+  const root = join(base, "project");
+  const store = join(root, ".crewplane-state");
+  mkdirSync(store, { recursive: true });
+  const env = { CREWPLANE_STATE_DIR: join(base, "state") };
+  return {
+    base,
+    root,
+    store,
+    env,
+    control: controlDirectory(root, env),
+    identity: { primaryRoot: root },
+  };
+}
+
+it("binds the store and the control directory to one another", async () => {
+  const p = bound();
+  expect(() => checkBinding(p.store, p.control, p.identity)).not.toThrow();
+  await ensureControlDirectory(p.control);
+  await bindControl(p.store, p.control, p.identity);
+  expect(existsSync(join(p.store, "control-binding.json"))).toBe(true);
+  expect(existsSync(join(p.control, "identity.json"))).toBe(true);
+  await bindControl(p.store, p.control, p.identity);
+});
+
+it("fails closed when the repository moved, the environment differs or a re-clone would inherit state", async () => {
+  const p = bound();
+  await ensureControlDirectory(p.control);
+  await bindControl(p.store, p.control, p.identity);
+  writeFileSync(join(p.control, "state.json"), "{}", { mode: 0o600 });
+
+  // Repository renamed: the derived directory is new and empty, but the store
+  // records prior supervision.
+  const moved = join(p.base, "renamed");
+  renameSync(join(p.base, "project"), moved);
+  const movedControl = controlDirectory(moved, p.env);
+  expect(movedControl).not.toBe(p.control);
+  expect(() =>
+    checkBinding(join(moved, ".crewplane-state"), movedControl, {
+      primaryRoot: moved,
+    }),
+  ).toThrow("records prior supervision");
+
+  // Different HOME/XDG/override between start and a later command.
+  const elsewhere = controlDirectory(moved, {
+    CREWPLANE_STATE_DIR: join(p.base, "other"),
+  });
+  expect(() =>
+    checkBinding(join(moved, ".crewplane-state"), elsewhere, {
+      primaryRoot: moved,
+    }),
+  ).toThrow("records prior supervision");
+  await expect(
+    bindControl(join(moved, ".crewplane-state"), elsewhere, {
+      primaryRoot: moved,
+    }),
+  ).rejects.toThrow("records prior supervision");
+  expect(existsSync(elsewhere)).toBe(false);
+
+  // Same path, project identity differs (e.g. the directory was copied over).
+  expect(() =>
+    checkBinding(join(moved, ".crewplane-state"), p.control, {
+      primaryRoot: "/other/root",
+    }),
+  ).toThrow("different project identity");
+
+  // A re-clone at the same path has a fresh store without the marker.
+  const reclone = join(p.base, "reclone-store");
+  mkdirSync(reclone);
+  expect(() => checkBinding(reclone, p.control, p.identity)).toThrow(
+    "different checkout",
+  );
+  rmSync(join(moved, ".crewplane-state/control-binding.json"));
+  expect(() =>
+    checkBinding(join(moved, ".crewplane-state"), p.control, p.identity),
+  ).toThrow("different checkout");
 });

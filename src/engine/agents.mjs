@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { checkControlDirectory } from "../control.ts";
+import { checkControlDirectory, controlDirectory } from "../control.ts";
 import { gitEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson, syncDirectory } from "../io.ts";
 import { withProcessLock } from "../process-lock.ts";
@@ -87,13 +87,26 @@ async function context(cwd) {
 }
 
 /**
- * Supervisor run state, for READING only: the child-side board CLI never writes
- * the control directory. An unsafe directory fails closed; an absent one means
- * no supervisor has run for this project.
+ * Supervisor run state, for READING only. Under a supervised child
+ * (CREWPLANE_HEADLESS_LANE) a missing control directory or state file REFUSES
+ * the guard, since a child with a changed HOME or state base would otherwise
+ * bypass it; outside a child, absence means no supervisor has run. Either way
+ * this is an advisory guard: without an OS sandbox a same-user agent can still
+ * edit the board directly.
  */
 async function controlState(ctx) {
-  if (!checkControlDirectory(ctx.control)) return null;
-  return read(join(ctx.control, "state.json"), null);
+  const control = controlDirectory(ctx.primary);
+  const supervised = Boolean(process.env.CREWPLANE_HEADLESS_LANE);
+  if (!checkControlDirectory(control)) {
+    ensure(!supervised, "Supervisor control state is unavailable; refusing");
+    return null;
+  }
+  const state = await read(join(control, "state.json"), null);
+  ensure(
+    !supervised || state !== null,
+    "Supervisor control state is unavailable; refusing",
+  );
+  return state;
 }
 function taskPath(ctx, id, file) {
   return join(ctx.store, "tasks", task(id), file);

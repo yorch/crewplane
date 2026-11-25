@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -17,6 +18,8 @@ import {
   probeBinary,
 } from "./doctor.ts";
 import {
+  bindControl,
+  checkBinding,
   checkControlDirectory,
   controlDirectory,
   ensureControlDirectory,
@@ -42,6 +45,8 @@ import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
 import {
+  describeConfig,
+  isLive,
   migrateControl,
   resolveControlTarget,
   supervisorLiveness,
@@ -60,6 +65,7 @@ import {
   dispatchTarget,
   isProcessAlive,
   isReleaseBuild,
+  liveSupervisorRegistrations,
   readUpdateCache,
   releasesRoot,
   runUpdate,
@@ -271,11 +277,13 @@ async function dispatchToPin(
       {};
     // A live owner may still be in the legacy directory of an older release.
     for (const directory of [
-      identity.control,
+      controlDirectory(identity.primary),
       legacySupervisorDirectory(identity.store),
     ]) {
       try {
-        checkControlDirectory(directory);
+        // The legacy directory's mode is irrelevant to reading a version marker.
+        if (directory !== legacySupervisorDirectory(identity.store))
+          checkControlDirectory(directory);
         state = JSON.parse(
           await readFile(join(directory, "state.json"), "utf8"),
         ) as typeof state;
@@ -341,6 +349,17 @@ async function main() {
   if (command === "help") return output(help);
   if (command !== "update" && !projectCommands.has(command))
     throw new Error("Unknown command. Run crewplane --help.");
+  // A supervised child may only observe and use the board; every verb that
+  // configures, starts, controls, migrates, pins or updates is refused.
+  if (process.env.CREWPLANE_HEADLESS_LANE) {
+    const observing =
+      ["agents", "evidence", "monitor", "status", "doctor"].includes(command) ||
+      (["task", "agent"].includes(command) &&
+        rest.length === 1 &&
+        rest[0] === "list");
+    if (!observing)
+      throw new Error("This command is unavailable to headless agents");
+  }
   if (command === "update") {
     const set = flags(rest, ["--check", "--auto", "--force"]);
     if (set.has("--check") && set.has("--auto"))
@@ -374,8 +393,17 @@ async function main() {
   let ctx: ProjectContext;
   let policy: ProjectPolicy;
   let bypassedPin = false;
+  // A dry-run migration must not prepare the store or schedule an update.
+  const dryMigration = command === "migrate" && rest.includes("--dry-run");
   try {
-    ctx = (await agents(["init"], requested)) as ProjectContext;
+    if (dryMigration) {
+      const found = discoverProject(requested);
+      ctx = {
+        store: found.store,
+        gitCommonDir: found.common,
+        projectRoot: found.primary,
+      };
+    } else ctx = (await agents(["init"], requested)) as ProjectContext;
     policy = projectPolicy(ctx.projectRoot);
   } catch (error) {
     if (error instanceof ProjectVersionError)
@@ -403,16 +431,47 @@ async function main() {
   const common = ctx.gitCommonDir,
     root = ctx.projectRoot;
   // Control plane: private per-user directory, never inside the project store.
-  const controlDir = controlDirectory(root);
+  // Derived lazily so a bad CREWPLANE_STATE_DIR cannot break `init`.
+  const controlDir = command === "init" ? "" : controlDirectory(root);
+  const identity = { primaryRoot: root, gitCommon: common };
+  const halting = ["status", "stop", "pause", "cancel"].includes(command);
   let directory = controlDir;
-  if (!["init", "migrate", "pin"].includes(command)) {
+  let also: string[] = [];
+  // Exempt: they never touch supervisor state, or they report/repair the layout.
+  if (!["init", "migrate", "pin", "doctor"].includes(command)) {
     // Fails closed while an older in-store layout exists (halting verbs excepted).
     const target = resolveControlTarget(ctx.store, controlDir, command);
     directory = target.directory;
+    also = target.also ?? [];
     if (target.warning) console.error(target.warning);
-    checkControlDirectory(directory);
+    if (directory === controlDir) {
+      checkControlDirectory(directory);
+      if (halting)
+        for (const live of await liveSupervisorRegistrations())
+          if (
+            live.store === ctx.store &&
+            live.control !== undefined &&
+            live.control !== controlDir
+          )
+            console.error(
+              `crewplane: a live supervisor (PID ${live.pid}) uses control directory ${printablePath(live.control)}, not ${printablePath(controlDir)}; rerun with the environment it was started with (CREWPLANE_STATE_DIR, XDG_STATE_HOME, HOME)`,
+            );
+      if (!["agents", "task", "evidence", "monitor"].includes(command)) {
+        try {
+          checkBinding(ctx.store, controlDir, identity);
+        } catch (error) {
+          // Read-only status may report the mismatch; a verb that would queue
+          // into a directory no supervisor reads must not pretend to halt.
+          if (command !== "status") throw error;
+          console.error(
+            `crewplane: ${error instanceof Error ? error.message : "control binding mismatch"}`,
+          );
+        }
+      }
+    }
   }
-  if (!policy.requiredVersion) await autoUpdate(command).catch(() => {});
+  if (!policy.requiredVersion && !dryMigration)
+    await autoUpdate(command).catch(() => {});
   if (command === "pin") {
     const opts = options(rest, ["--confirm"]);
     if (opts["--confirm"] !== undefined && opts["--confirm"] !== "true")
@@ -431,7 +490,7 @@ async function main() {
         running?: boolean;
         supervisorVersion?: string;
       } | null;
-      if (state?.running || supervisorLiveness(candidate) !== null)
+      if (state?.running || isLive(supervisorLiveness(candidate)))
         throw new Error(
           `Stop the supervisor${state?.supervisorVersion ? ` (${state.supervisorVersion})` : ""} before changing the project pin`,
         );
@@ -461,17 +520,46 @@ async function main() {
     });
   }
   if (command === "migrate") {
-    // Migration adopts agent-writable legacy state into the control plane.
-    if (process.env.CREWPLANE_HEADLESS_LANE)
-      throw new Error("migrate is unavailable to headless agents");
-    const set = flags(rest, ["--dry-run"]);
-    return output(
-      await migrateControl({
-        store: ctx.store,
-        control: controlDir,
-        dryRun: set.has("--dry-run"),
-      }),
-    );
+    let dryRun = false,
+      discardLegacy = false,
+      acceptConfig = false;
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === "--dry-run" && !dryRun) dryRun = true;
+      else if (arg === "--discard-legacy" && !discardLegacy)
+        discardLegacy = true;
+      else if (
+        arg === "--accept-config" &&
+        rest[i + 1] === "true" &&
+        !acceptConfig
+      ) {
+        acceptConfig = true;
+        i++;
+      } else
+        throw new Error(
+          `Invalid command options: unexpected ${printablePath(String(arg))}`,
+        );
+    }
+    if (discardLegacy && acceptConfig)
+      throw new Error(
+        "--discard-legacy and --accept-config are mutually exclusive",
+      );
+    const report = await migrateControl({
+      store: ctx.store,
+      control: controlDir,
+      root,
+      identity,
+      dryRun,
+      discardLegacy,
+      acceptConfig,
+    });
+    for (const claim of report.ignoredLivenessClaims)
+      console.error(`crewplane: ignoring legacy liveness claim: ${claim}`);
+    if (report.config && dryRun)
+      console.error(
+        `crewplane: legacy configuration to review:\n${describeConfig(report.config)}`,
+      );
+    return output(report);
   }
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
@@ -537,6 +625,7 @@ async function main() {
         throw new Error(`Lane ${laneId} instructions unavailable: ${problem}`);
     }
     await ensureControlDirectory(directory);
+    await bindControl(ctx.store, directory, identity);
     const release = await acquire(directory);
     try {
       const state = await optional(join(directory, "state.json"));
@@ -560,9 +649,11 @@ async function main() {
     const problems: DoctorProblem[] = [];
     let config: Config | null = null;
     let configState = "not-configured";
+    const legacyLayout = existsSync(legacySupervisorDirectory(ctx.store));
     try {
+      checkControlDirectory(controlDir);
       config = (await optional(
-        join(directory, "config.json"),
+        join(controlDir, "config.json"),
       )) as Config | null;
     } catch (error) {
       configState = "invalid";
@@ -718,6 +809,10 @@ async function main() {
       root,
       git,
       runtime: standaloneBinary() ? "compiled" : "bun",
+      controlDirectory: controlDir,
+      legacyLayout: legacyLayout
+        ? "present: run `crewplane migrate` (legacy state is not being used)"
+        : "none",
       config: configState,
       defaultBinary,
       harnesses,
@@ -836,8 +931,6 @@ async function main() {
       "cancel",
     ].includes(command)
   ) {
-    if (process.env.CREWPLANE_HEADLESS_LANE)
-      throw new Error("Control commands are unavailable to headless agents");
     const opts = options(rest, [
       "--lane",
       "--text",
@@ -969,10 +1062,21 @@ async function main() {
     }
     if (value.lane && !(value.lane in (await readConfig(directory)).lanes))
       throw new Error("Unknown configured agent");
-    if (directory === controlDir) await ensureControlDirectory(directory);
-    await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });
+    if (directory === controlDir) {
+      await ensureControlDirectory(directory);
+      await bindControl(ctx.store, directory, identity);
+    }
     const id = randomUUID();
-    await publishJson(join(directory, "commands", `${id}.json`), value);
+    // Narrowing verbs are safe to apply late, so ambiguous legacy liveness
+    // queues them in every candidate directory.
+    for (const target of [
+      directory,
+      ...(["pause", "stop", "cancel"].includes(command) ? also : []),
+    ]) {
+      if (target === controlDir) await ensureControlDirectory(target);
+      await mkdir(join(target, "commands"), { recursive: true, mode: 0o700 });
+      await publishJson(join(target, "commands", `${id}.json`), value);
+    }
     if (!state?.running)
       console.error(
         command === "pause"
@@ -1095,9 +1199,16 @@ async function main() {
         "Build and use dist/crewplane start so agents can invoke the same executable",
       );
     if (rest.length) throw new Error("start takes no options");
-    const config = await readConfig(directory);
-    if (config.root !== root)
+    const stored = await readConfig(directory);
+    if (stored.root !== root)
       throw new Error("Configuration belongs to another project");
+    // Roles come from committed policy, exactly as `configure` derives them.
+    const config = validateConfig({
+      ...stored,
+      coordinator: policy.coordinator,
+      reviewers: policy.reviewers,
+      reviewerRoles: policy.reviewerRoles,
+    } as unknown as Config);
     process.env.CREWPLANE_EXECUTABLE = process.execPath;
     const controller = new AbortController();
     // Stay handled until the drain finishes: a repeated signal must not fall
@@ -1110,7 +1221,10 @@ async function main() {
         );
         controller.abort();
       });
-    return serve(config, directory, controller.signal, { store: ctx.store });
+    return serve(config, directory, controller.signal, {
+      store: ctx.store,
+      gitCommon: common,
+    });
   }
   throw new Error("Unknown command. Run crewplane --help.");
 }

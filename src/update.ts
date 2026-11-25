@@ -733,6 +733,7 @@ async function acquireUpdateLock(
  */
 export async function registerSupervisor(
   environment: UpdateEnvironment = process.env,
+  details: { store?: string; control?: string } = {},
 ): Promise<() => Promise<void>> {
   let path: string;
   try {
@@ -741,7 +742,12 @@ export async function registerSupervisor(
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(
       path,
-      `${JSON.stringify({ version: 1, pid: process.pid, at: new Date().toISOString() })}\n`,
+      `${JSON.stringify({
+        version: 1,
+        pid: process.pid,
+        at: new Date().toISOString(),
+        ...details,
+      })}\n`,
       { mode: 0o600, flush: true },
     );
   } catch {
@@ -750,6 +756,38 @@ export async function registerSupervisor(
   return async () => {
     await unlink(path).catch(() => {});
   };
+}
+
+/** Live registrations with the locations they recorded (advisory, same-user files). */
+export async function liveSupervisorRegistrations(
+  environment: UpdateEnvironment = process.env,
+): Promise<Array<{ pid: number; store?: string; control?: string }>> {
+  const directory = join(cacheDirectory(environment), "supervisors");
+  const result: Array<{ pid: number; store?: string; control?: string }> = [];
+  let entries: string[];
+  try {
+    entries = await readdir(directory);
+  } catch {
+    return result;
+  }
+  for (const entry of entries) {
+    if (!/^\d+\.json$/.test(entry)) continue;
+    try {
+      const value = JSON.parse(await readFile(join(directory, entry), "utf8"));
+      const pid = Number(entry.slice(0, -".json".length));
+      if (!isProcessAlive(pid)) continue;
+      result.push({
+        pid,
+        ...(typeof value.store === "string" ? { store: value.store } : {}),
+        ...(typeof value.control === "string"
+          ? { control: value.control }
+          : {}),
+      });
+    } catch {
+      /* unreadable registrations are ignored */
+    }
+  }
+  return result;
 }
 
 /** Any live registration, from any project, blocks automatic replacement. */

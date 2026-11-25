@@ -2230,3 +2230,28 @@ it("lets coordinator triage close an active assignment-pinned peer question", as
     ).toBe(1);
   });
 });
+
+it("refuses guarded verbs under a supervised child when control state is unreachable", async () => {
+  await fixture(({ root, b }) => {
+    assign(root);
+    const supervised = (extra: Record<string, string>) => {
+      const result = spawnSync(process.execPath, [script, ...claim], {
+        cwd: b,
+        env: { ...env, CREWPLANE_HEADLESS_LANE: "B", ...extra },
+        encoding: "utf8",
+      });
+      return { code: result.status, error: result.stderr };
+    };
+    // A child that changed the state base cannot find the supervisor's state.
+    const moved = supervised({ CREWPLANE_STATE_DIR: join(root, "nowhere") });
+    expect(moved.code).toBe(1);
+    expect(moved.error).toContain("control state is unavailable");
+    // Present directory, no state file yet: still refused for a supervised child.
+    const control = controlDirectory(realpathSync(root));
+    mkdirSync(control, { recursive: true, mode: 0o700 });
+    expect(supervised({}).error).toContain("control state is unavailable");
+    // With state, the guard evaluates normally and the claim succeeds.
+    writeFileSync(join(control, "state.json"), JSON.stringify({ records: {} }));
+    expect(supervised({}).code).toBe(0);
+  });
+});

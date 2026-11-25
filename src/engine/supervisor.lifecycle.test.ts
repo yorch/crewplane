@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { controlDirectory } from "../control.ts";
+import { migrateControl } from "../migrate.ts";
 import { snapshot } from "./dashboard.ts";
 import { type Config, type State, serve } from "./supervisor.ts";
 
@@ -388,6 +389,63 @@ const args=`,
           JSON.parse(await readFile(join(f.directory, "desired.json"), "utf8"))
             .desiredRunning,
         ).toBe(true);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
+  "keeps a re-armed legacy pause holding after migrate and start, and never applies a quarantined resume",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      await rm(f.directory, { recursive: true });
+      const legacy = join(f.root, ".crewplane-state/supervisor");
+      await mkdir(join(legacy, "commands"), { recursive: true, mode: 0o700 });
+      await writeFile(join(legacy, "config.json"), JSON.stringify(f.config));
+      await writeFile(
+        join(legacy, "state.json"),
+        JSON.stringify({ ...initialState(), running: false }),
+      );
+      const at = new Date().toISOString();
+      const pause = "00000000-0000-4000-8000-0000000000a1.json";
+      const resume = "00000000-0000-4000-8000-0000000000a2.json";
+      await writeFile(
+        join(legacy, "commands", pause),
+        JSON.stringify({ action: "pause", all: true, at }),
+      );
+      await writeFile(
+        join(legacy, "commands", resume),
+        JSON.stringify({ action: "resume", all: true, at }),
+      );
+      const report = await migrateControl({
+        store: join(f.root, ".crewplane-state"),
+        control: f.directory,
+        root: f.root,
+        acceptConfig: true,
+      });
+      expect(report.rearmedCommands).toEqual([
+        { id: pause.slice(0, -5), action: "pause" },
+      ]);
+      expect(report.quarantinedCommands).toEqual([
+        { id: resume.slice(0, -5), action: "resume" },
+      ]);
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            return (await f.load()).instanceHeld === true;
+          } catch {
+            return false;
+          }
+        });
+        await new Promise((r) => setTimeout(r, 1500));
+        expect((await f.load()).instanceHeld).toBe(true);
+        await access(join(f.directory, "quarantined-commands", resume));
       } finally {
         c.abort();
         await running;

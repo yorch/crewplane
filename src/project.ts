@@ -13,7 +13,6 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
-import { controlDirectory } from "./control.ts";
 import { gitEnvironment } from "./environment.ts";
 
 /** Canonicalize existing ancestors without creating a store during discovery. */
@@ -355,7 +354,5 @@ export function discoverProject(cwd: string) {
     store: canonicalStore(
       process.env.CREWPLANE_COORD_DIR || join(primaryRoot, ".crewplane-state"),
     ),
-    /** Control plane: private per-user directory outside the project. */
-    control: controlDirectory(primaryRoot),
   };
 }
