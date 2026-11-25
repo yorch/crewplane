@@ -798,6 +798,10 @@ it("keeps selected state visible in forced colors and meets coarse-pointer targe
     if (message.type() === "error" && /Content Security/.test(message.text()))
       touchErrors.push(message.text());
   });
+  // A new context has no sessionStorage: adopt the per-launch session first.
+  const sessionToken = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1] ?? "";
+  await touch.goto(`${base}#token=${sessionToken}`);
+  await touch.locator("#connection").filter({ hasText: "Live" }).waitFor();
   const titles: Record<string, string> = {
     overview: "Overview",
     tasks: "Tasks",
