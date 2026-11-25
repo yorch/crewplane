@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import {
   createHash,
   generateKeyPairSync,
@@ -124,16 +124,20 @@ const signed = (key: KeyObject, tag: string, name: string) =>
   ).toString("base64");
 
 /** Copy install.sh with its key block replaced by throwaway test keys. */
-const installerWithKeys = (keys: { id: string; publicKey: string }[]) => {
+const installerWithKeys = (
+  keys: { id: string; publicKey: string }[],
+  signedSince = "",
+) => {
   const source = readFileSync(installer, "utf8");
-  const begin = source.indexOf("release_keys='");
-  const end = source.indexOf("'\n", begin + 14);
+  const begin = source.indexOf("# BEGIN RELEASE KEYS");
+  const endMarker = "# END RELEASE KEYS";
+  const end = source.indexOf(endMarker);
   assert(begin > 0 && end > begin);
   const path = join(temporary(), "install.sh");
   const body = keys.map((k) => `\n${k.id} ${k.publicKey}`).join("");
   writeFileSync(
     path,
-    `${source.slice(0, begin)}release_keys='${body}\n${source.slice(end)}`,
+    `${source.slice(0, begin)}# BEGIN RELEASE KEYS\nrelease_signed_since='${signedSince}'\nrelease_keys='${body}\n'\n${source.slice(end)}`,
   );
   return path;
 };
@@ -166,10 +170,29 @@ const installWith = async (
   }
 };
 
+/** A directory placed first on PATH holding a stand-in `openssl`. */
+const fakeOpenssl = (body: string) => {
+  const bin = join(temporary(), "fakebin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "openssl"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return { PATH: `${bin}:${process.env.PATH ?? ""}` };
+};
+const tag = `v${patch}`;
+const bin = () => join(temporary(), "bin");
+
 describe("install.sh signing", () => {
-  it("embeds exactly the keys in release-keys.json", () => {
-    const block =
-      /release_keys='([^']*)'/.exec(readFileSync(installer, "utf8"))?.[1] ?? "";
+  beforeAll(() => {
+    // Never let a CI machine silently skip the verification tests.
+    if (process.env.CI && !opensslEd25519)
+      throw new Error(
+        "CI requires an openssl that verifies Ed25519 (pkeyutl -verify -rawin)",
+      );
+  });
+
+  it("embeds exactly the keys and signedSince in release-keys.json", () => {
+    const source = readFileSync(installer, "utf8");
+    const block = /release_keys='([^']*)'/.exec(source)?.[1] ?? "";
+    const since = /release_signed_since='([^']*)'/.exec(source)?.[1];
     const embedded = block
       .split("\n")
       .filter((line) => line.trim() !== "")
@@ -179,13 +202,16 @@ describe("install.sh signing", () => {
       });
     const configured = JSON.parse(
       readFileSync("release-keys.json", "utf8"),
-    ) as { keys: { id: string; publicKey: string }[] };
+    ) as {
+      signedSince?: string | null;
+      keys: { id: string; publicKey: string }[];
+    };
     assert.deepEqual(embedded, configured.keys);
+    assert.equal(since, configured.signedSince ?? "");
   });
 
   it("with no keys installs on the checksum and says so", async () => {
-    const directory = join(temporary(), "bin");
-    const result = await installWith(installerWithKeys([]), directory);
+    const result = await installWith(installerWithKeys([]), bin());
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /no release signing keys are configured/);
   });
@@ -194,8 +220,8 @@ describe("install.sh signing", () => {
     "installs a release with a valid signature",
     async () => {
       const a = keypair();
-      signature = `${signed(a.privateKey, `v${patch}`, asset)}\n`;
-      const directory = join(temporary(), "bin");
+      signature = `${signed(a.privateKey, tag, asset)}\n`;
+      const directory = bin();
       const result = await installWith(
         installerWithKeys([{ id: "k1", publicKey: a.publicKey }]),
         directory,
@@ -211,13 +237,13 @@ describe("install.sh signing", () => {
     async () => {
       const retired = keypair();
       const current = keypair();
-      signature = `current:${signed(current.privateKey, `v${patch}`, asset)}\n`;
+      signature = `current:${signed(current.privateKey, tag, asset)}\n`;
       const result = await installWith(
         installerWithKeys([
           { id: "retired", publicKey: retired.publicKey },
           { id: "current", publicKey: current.publicKey },
         ]),
-        join(temporary(), "bin"),
+        bin(),
       );
       assert.equal(result.status, 0, result.stderr);
       assert.match(result.stderr, /key current/);
@@ -225,15 +251,59 @@ describe("install.sh signing", () => {
   );
 
   it.skipIf(!opensslEd25519)(
-    "refuses bad, foreign, replayed or missing signatures and installs nothing",
+    "accepts a dual-signed .sig for an installer that knows either key",
+    async () => {
+      const retired = keypair();
+      const current = keypair();
+      signature = `${signed(current.privateKey, tag, asset)}\n${signed(retired.privateKey, tag, asset)}\n`;
+      for (const known of [retired, current]) {
+        const result = await installWith(
+          installerWithKeys([{ id: "only", publicKey: known.publicKey }]),
+          bin(),
+        );
+        assert.equal(result.status, 0, result.stderr);
+      }
+      // Unusable lines are skipped; a good line still counts. A last line
+      // without a newline is read too.
+      const stranger = keypair();
+      signature = `\n!!!!\nzzz:${signed(stranger.privateKey, tag, asset)}\n${signed(stranger.privateKey, tag, asset)}\n${signed(current.privateKey, tag, asset)}`;
+      const mixed = await installWith(
+        installerWithKeys([{ id: "only", publicKey: current.publicKey }]),
+        bin(),
+      );
+      assert.equal(mixed.status, 0, mixed.stderr);
+    },
+  );
+
+  it.skipIf(!opensslEd25519)(
+    "refuses a multi-line .sig where no line verifies",
+    async () => {
+      const trusted = keypair();
+      const one = keypair();
+      const two = keypair();
+      signature = `${signed(one.privateKey, tag, asset)}\n${signed(two.privateKey, tag, asset)}\n`;
+      const directory = bin();
+      const result = await installWith(
+        installerWithKeys([{ id: "k1", publicKey: trusted.publicKey }]),
+        directory,
+      );
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /verification failed/);
+      assert.equal(existsSync(join(directory, "crewplane")), false);
+    },
+  );
+
+  it.skipIf(!opensslEd25519)(
+    "refuses bad, foreign, replayed, non-canonical or missing signatures and installs nothing",
     async () => {
       const trusted = keypair();
       const stranger = keypair();
       const keys = [{ id: "k1", publicKey: trusted.publicKey }];
+      const good = signed(trusted.privateKey, tag, asset);
       const cases: [string, string | null, RegExp][] = [
         [
           "foreign key",
-          signed(stranger.privateKey, `v${patch}`, asset),
+          signed(stranger.privateKey, tag, asset),
           /verification failed/,
         ],
         [
@@ -243,19 +313,17 @@ describe("install.sh signing", () => {
         ],
         [
           "other asset",
-          signed(
-            trusted.privateKey,
-            `v${patch}`,
-            "crewplane-v9.9.9-linux-other",
-          ),
+          signed(trusted.privateKey, tag, "crewplane-v9.9.9-linux-other"),
           /verification failed/,
         ],
         ["garbage", "!!!!", /verification failed/],
+        ["non-canonical", `${good.slice(0, 85)}B==`, /verification failed/],
+        ["unpadded", good.slice(0, 86), /verification failed/],
         ["missing", null, /no signature published/],
       ];
       for (const [label, value, expected] of cases) {
         signature = value;
-        const directory = join(temporary(), "bin");
+        const directory = bin();
         const result = await installWith(installerWithKeys(keys), directory);
         assert.notEqual(result.status, 0, label);
         assert.match(result.stderr, expected, label);
@@ -265,19 +333,45 @@ describe("install.sh signing", () => {
     },
   );
 
+  it.skipIf(!opensslEd25519)(
+    "--allow-unverified never skips verification when openssl can verify",
+    async () => {
+      const a = keypair();
+      const stranger = keypair();
+      const script = installerWithKeys([{ id: "k1", publicKey: a.publicKey }]);
+      signature = `${signed(stranger.privateKey, tag, asset)}\n`;
+      const directory = bin();
+      const bad = await installWith(script, directory, ["--allow-unverified"]);
+      assert.notEqual(bad.status, 0);
+      assert.match(bad.stderr, /verification failed/);
+      assert.doesNotMatch(bad.stderr, /WARNING/);
+      assert.equal(existsSync(join(directory, "crewplane")), false);
+      signature = null;
+      const missing = await installWith(script, bin(), ["--allow-unverified"]);
+      assert.notEqual(missing.status, 0);
+      assert.match(missing.stderr, /no signature published/);
+      signature = `${signed(a.privateKey, tag, asset)}\n`;
+      const good = await installWith(script, bin(), ["--allow-unverified"]);
+      assert.equal(good.status, 0, good.stderr);
+      assert.match(good.stderr, /signature verified/);
+    },
+  );
+
   it("refuses when openssl cannot verify Ed25519, unless --allow-unverified", async () => {
     const a = keypair();
     const script = installerWithKeys([{ id: "k1", publicKey: a.publicKey }]);
     // An openssl that verifies nothing, like macOS's LibreSSL.
-    const bin = join(temporary(), "fakebin");
-    mkdirSync(bin);
-    writeFileSync(join(bin, "openssl"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
-    const env = { PATH: `${bin}:${process.env.PATH ?? ""}` };
-    const directory = join(temporary(), "bin");
+    const env = fakeOpenssl("exit 1");
+    const directory = bin();
     const refused = await installWith(script, directory, [], env);
     assert.notEqual(refused.status, 0);
-    assert.match(refused.stderr, /no openssl here can verify Ed25519/);
+    assert.match(refused.stderr, /openssl cannot verify Ed25519/);
     assert.match(refused.stderr, /brew install openssl/);
+    assert.match(refused.stderr, /brew --prefix openssl@3\)\/bin/);
+    assert.match(
+      refused.stderr,
+      /only if that is impossible|Only if that is impossible/,
+    );
     assert.match(refused.stderr, /--allow-unverified/);
     assert.equal(existsSync(join(directory, "crewplane")), false);
 
@@ -288,8 +382,27 @@ describe("install.sh signing", () => {
       env,
     );
     assert.equal(allowed.status, 0, allowed.stderr);
-    assert.match(allowed.stderr, /WARNING: --allow-unverified/);
+    assert.match(
+      allowed.stderr,
+      /WARNING: this machine's openssl cannot verify/,
+    );
     assert.equal(readFileSync(join(directory, "crewplane"), "utf8"), payload);
+  });
+
+  it("refuses an openssl that accepts everything (negative known-answer check)", async () => {
+    const a = keypair();
+    const script = installerWithKeys([{ id: "k1", publicKey: a.publicKey }]);
+    signature = `${signed(a.privateKey, tag, asset)}\n`;
+    const directory = bin();
+    const result = await installWith(
+      script,
+      directory,
+      [],
+      fakeOpenssl("exit 0"),
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /openssl cannot verify Ed25519/);
+    assert.equal(existsSync(join(directory, "crewplane")), false);
   });
 
   it("--allow-unverified still enforces the checksum", async () => {
@@ -297,10 +410,101 @@ describe("install.sh signing", () => {
     checksum = "0".repeat(64);
     const result = await installWith(
       installerWithKeys([{ id: "k1", publicKey: a.publicKey }]),
-      join(temporary(), "bin"),
+      bin(),
       ["--allow-unverified"],
+      fakeOpenssl("exit 1"),
     );
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /checksum mismatch/);
   });
+
+  it("version_ge compares numerically", () => {
+    const source = readFileSync(installer, "utf8");
+    const start = source.indexOf("version_ge() {");
+    const fn = source.slice(start, source.indexOf("\n}\n", start) + 3);
+    const ge = (a: string, b: string) =>
+      spawnSync("sh", ["-c", `${fn}\nversion_ge "${a}" "${b}"`]).status === 0;
+    assert.equal(ge("v0.10.0", "v0.9.0"), true);
+    assert.equal(ge("v0.9.0", "v0.10.0"), false);
+    assert.equal(ge("v1.0.0", "v0.99.99"), true);
+    assert.equal(ge("v0.7.0", "v0.7.0"), true);
+    assert.equal(ge("v0.6.9", "v0.7.0"), false);
+    assert.equal(ge("v0.7.1", "v0.7.0"), true);
+    assert.equal(ge("v0.7.0", "v0.7.0-rc.1"), true);
+    assert.equal(ge("v0.7.0-rc.1", "v0.7.0"), false);
+    assert.equal(ge("v0.7.0+build", "v0.7.0"), true);
+  });
+
+  it("the signedSince floor: older releases install on SHA-256 with a warning, newer ones need a signature", async () => {
+    const a = keypair();
+    const keys = [{ id: "k1", publicKey: a.publicKey }];
+    signature = null;
+    // 9.9.9 is below each of these floors, numerically (9.10.0 > 9.9.9).
+    for (const floor of ["v9.9.10", "v9.10.0", "v10.0.0"]) {
+      const directory = bin();
+      const result = await installWith(
+        installerWithKeys(keys, floor),
+        directory,
+        [],
+        fakeOpenssl("exit 1"),
+      );
+      assert.equal(result.status, 0, `${floor}: ${result.stderr}`);
+      assert.match(result.stderr, /WARNING: v9\.9\.9 predates signed releases/);
+      assert.equal(readFileSync(join(directory, "crewplane"), "utf8"), payload);
+    }
+    // At or above the floor a signature is required (no .sig is published).
+    for (const floor of ["v9.9.9", "v9.9.8", "v9.8.99", "v0.10.0", ""]) {
+      const directory = bin();
+      const result = await installWith(
+        installerWithKeys(keys, floor),
+        directory,
+      );
+      assert.notEqual(result.status, 0, floor);
+      assert.equal(existsSync(join(directory, "crewplane")), false, floor);
+    }
+  });
+
+  it.skipIf(!opensslEd25519)(
+    "every key written by sync-install-keys round-trips through the installer",
+    async () => {
+      const keys = ["a", "b", "c"].map((id) => ({ id, ...keypair() }));
+      const dir = temporary();
+      const keysFile = join(dir, "keys.json");
+      writeFileSync(
+        keysFile,
+        JSON.stringify({
+          signedSince: "v9.9.9",
+          keys: keys.map((k) => ({ id: k.id, publicKey: k.publicKey })),
+        }),
+      );
+      const copy = join(dir, "install.sh");
+      writeFileSync(copy, readFileSync(installer, "utf8"));
+      const sync = (extra: string[]) =>
+        spawnSync(
+          process.env.BUN ?? "bun",
+          [
+            resolve("scripts/sync-install-keys.ts"),
+            "--keys",
+            keysFile,
+            "--install",
+            copy,
+            ...extra,
+          ],
+          { encoding: "utf8" },
+        );
+      assert.notEqual(sync(["--check"]).status, 0);
+      assert.equal(sync([]).status, 0);
+      assert.equal(sync(["--check"]).status, 0);
+      assert.match(
+        readFileSync(copy, "utf8"),
+        /release_signed_since='v9\.9\.9'/,
+      );
+      for (const key of keys) {
+        signature = `${signed(key.privateKey, tag, asset)}\n`;
+        const result = await installWith(copy, bin());
+        assert.equal(result.status, 0, `${key.id}: ${result.stderr}`);
+        assert.match(result.stderr, new RegExp(`key ${key.id}\\)`));
+      }
+    },
+  );
 });
