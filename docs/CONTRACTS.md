@@ -66,7 +66,7 @@ names an unsupported harness), `BINARY_MISSING` (no binary configured, or the
 path does not exist), `BINARY_INVALID` (not a string, relative, or not a regular
 file), `BINARY_NOT_EXECUTABLE`, `INSTRUCTIONS_INVALID` (a lane's instruction
 file), `RELEASES_ROOT_INVALID` (relative `CREWPLANE_RELEASES_DIR` or
-`XDG_DATA_HOME`) and `CACHE_DIR_INVALID` (relative `CREWPLANE_CACHE_DIR`).
+`XDG_DATA_HOME`) `CACHE_DIR_INVALID` (relative `CREWPLANE_CACHE_DIR`) and `LEGACY_LAYOUT` (a pre-relocation `<store>/supervisor` holding state; doctor stays exempt from the migration gate but reports it and exits 2).
 Configuration is validated without the binary-existence check, so a missing
 binary never hides another configuration error; binaries are reported only by
 the probes, and `config` is `valid` when only binaries fail. Each lane's
