@@ -10,7 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { main } from "../src/engine/agents.mjs";
-import { gitEnvironment } from "../src/environment.ts";
+import {
+  gitEnvironment,
+  harnessEnvironment,
+  validPassEnvName,
+} from "../src/environment.ts";
 import { discoverProject, validId } from "../src/project.ts";
 
 it("does not accept agent names that collide with prototype-backed runtime dictionaries", () => {
@@ -136,4 +140,62 @@ it("canonicalizes trailing separators and symlinked ancestors for shared stores 
     else process.env.CREWPLANE_COORD_DIR = previous;
     rmSync(parent, { recursive: true, force: true });
   }
+});
+
+it("forwards only the base, the harness's provider variables and explicit passEnv to harness children", () => {
+  const input = {
+    PATH: "/tools",
+    HOME: "/home/synthetic",
+    LC_ALL: "C",
+    HTTPS_PROXY: "http://proxy.invalid",
+    GIT_AUTHOR_NAME: "Synthetic",
+    GIT_DIR: "/foreign",
+    OPENAI_API_KEY: "synthetic",
+    ANTHROPIC_API_KEY: "synthetic",
+    GITHUB_TOKEN: "synthetic",
+    GH_TOKEN: "synthetic",
+    AWS_ACCESS_KEY_ID: "synthetic",
+    NPM_TOKEN: "synthetic",
+    EXTRA_OK: "yes",
+  };
+  const codex = harnessEnvironment("codex", [], input);
+  expect(Object.keys(codex).sort()).toEqual(
+    [
+      "GIT_AUTHOR_NAME",
+      "HOME",
+      "HTTPS_PROXY",
+      "LC_ALL",
+      "OPENAI_API_KEY",
+      "PATH",
+    ].sort(),
+  );
+  const claude = harnessEnvironment(
+    "claude",
+    ["AWS_ACCESS_KEY_ID", "EXTRA_OK", "NODE_OPTIONS", "CREWPLANE_X"],
+    { ...input, NODE_OPTIONS: "--require=/x", CREWPLANE_X: "1" },
+  );
+  expect(claude.ANTHROPIC_API_KEY).toBe("synthetic");
+  expect(claude.OPENAI_API_KEY).toBeUndefined();
+  expect(claude.AWS_ACCESS_KEY_ID).toBe("synthetic");
+  expect(claude.EXTRA_OK).toBe("yes");
+  expect(claude.GITHUB_TOKEN).toBeUndefined();
+  // Runtime-steering names cannot be opted in.
+  expect(claude.NODE_OPTIONS).toBeUndefined();
+});
+it("validates passEnv names", () => {
+  for (const ok of ["AWS_PROFILE", "_X", "a1"])
+    expect(validPassEnvName(ok)).toBe(true);
+  for (const bad of [
+    "",
+    "1X",
+    "A-B",
+    "A=B",
+    "NODE_OPTIONS",
+    "LD_PRELOAD",
+    "DYLD_INSERT_LIBRARIES",
+    "CREWPLANE_COORD_DIR",
+    "BASH_ENV",
+    42,
+  ])
+    expect(validPassEnvName(bad)).toBe(false);
 });

@@ -13,7 +13,7 @@ import type {
   State,
   Work,
 } from "../contracts.ts";
-import { gitEnvironment } from "../environment.ts";
+import { gitEnvironment, harnessEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
@@ -1405,7 +1405,10 @@ export async function serve(
               child = spawn(invocation.binary, invocation.args, {
                 cwd,
                 env: {
-                  ...gitEnvironment(),
+                  ...harnessEnvironment(
+                    laneHarness,
+                    config.lanes[work.lane]?.passEnv,
+                  ),
                   CREWPLANE_COORD_DIR: dirname(directory),
                   CREWPLANE_HEADLESS_LANE: work.lane,
                 },

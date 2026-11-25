@@ -243,6 +243,68 @@ it(
   15000,
 );
 it(
+  "launches harness children with an allowlisted environment plus the lane's explicit passEnv",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const dump = join(f.root, "child-env.json");
+      const body = await readFile(f.config.binary, "utf8");
+      await writeFile(
+        f.config.binary,
+        body.replace(
+          "const args=",
+          `writeFileSync(${JSON.stringify(dump)},JSON.stringify(Object.keys(process.env)));\nconst args=`,
+        ),
+        { mode: 0o700 },
+      );
+      f.config.lanes.coordinator = {
+        enabled: true,
+        passEnv: ["SYNTHETIC_PASS"],
+      };
+      await writeFile(
+        join(f.directory, "config.json"),
+        JSON.stringify(f.config),
+      );
+      const seeded = {
+        GITHUB_TOKEN: "synthetic",
+        AWS_SECRET_ACCESS_KEY: "synthetic",
+        SYNTHETIC_PASS: "kept",
+        OPENAI_API_KEY: "synthetic",
+      };
+      Object.assign(process.env, seeded);
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            await access(dump);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        const keys = JSON.parse(await readFile(dump, "utf8")) as string[];
+        expect(keys).toEqual(
+          expect.arrayContaining([
+            "PATH",
+            "SYNTHETIC_PASS",
+            "OPENAI_API_KEY",
+            "CREWPLANE_COORD_DIR",
+            "CREWPLANE_HEADLESS_LANE",
+          ]),
+        );
+        expect(keys).not.toContain("GITHUB_TOKEN");
+        expect(keys).not.toContain("AWS_SECRET_ACCESS_KEY");
+      } finally {
+        for (const key of Object.keys(seeded)) delete process.env[key];
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  15000,
+);
+it(
   "releases startup lease on invalid state and pauses interrupted records even without a stored PID",
   () =>
     withEnv(async () => {

@@ -1065,3 +1065,17 @@ it("sums OpenCode per-step reported cost without treating it as billing", () => 
   expect(stream.reportedCostUsd).toBeCloseTo(0.75);
   expect(stream.reportedCostUsd).toBeLessThan(1e6);
 });
+
+it("validates the optional lane passEnv list", () => {
+  const ok = { ...lane, passEnv: ["AWS_PROFILE"] };
+  expect(() => validateHarness(config, ok)).not.toThrow();
+  for (const passEnv of [
+    ["NODE_OPTIONS"],
+    ["A=B"],
+    "AWS_PROFILE",
+    Array.from({ length: 33 }, (_, i) => `V${i}`),
+  ])
+    expect(() =>
+      validateHarness(config, { ...lane, passEnv } as never),
+    ).toThrow("Invalid passEnv");
+});

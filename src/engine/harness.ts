@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { open, readFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
+import { maxPassEnv, validPassEnvName } from "../environment.ts";
 
 export const harnesses = ["codex", "pi", "claude", "opencode"] as const;
 export type Harness = (typeof harnesses)[number];
@@ -38,6 +39,7 @@ export const laneKeys = new Set([
   "maxRunsPerHour",
   "maxRunMinutes",
   "maxCostUsdPerRun",
+  "passEnv",
 ]);
 
 const uuidSessionId =
@@ -80,6 +82,8 @@ export interface LaneHarness {
   maxRunsPerHour?: number;
   maxRunMinutes?: number;
   maxCostUsdPerRun?: number;
+  /** Extra environment variable names forwarded to this lane's harness child. */
+  passEnv?: string[];
 }
 export interface HarnessConfig {
   root: string;
@@ -299,6 +303,15 @@ export function validateHarness(config: HarnessConfig, lane: LaneHarness) {
   if (instructionProblem) throw new Error(instructionProblem);
   boundedCount(lane.maxRunsPerHour, "maxRunsPerHour");
   boundedCount(lane.maxRunMinutes, "maxRunMinutes");
+  if (
+    lane.passEnv !== undefined &&
+    (!Array.isArray(lane.passEnv) ||
+      lane.passEnv.length > maxPassEnv ||
+      !lane.passEnv.every(validPassEnvName))
+  )
+    throw new Error(
+      `Invalid passEnv: up to ${maxPassEnv} variable names (not NODE_OPTIONS, LD_*, CREWPLANE_*)`,
+    );
   if (harness === "pi") {
     rejectForeign(lane, ["piModel", "piPermissions"], "Pi");
     if (lane.model || lane.piPermissions !== "no-tools")
