@@ -302,13 +302,18 @@ it(
           "CREWPLANE_HEADLESS_LANE",
         ]);
         // Nothing outside the base, codex provider names and explicit opt-ins.
-        for (const key of keys)
-          expect(
-            allowed.has(key) ||
-              /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i.test(
-                key,
-              ),
-          ).toBe(true);
+        // The OS and the node shebang may add their own bookkeeping names.
+        const osAdded = /^(?:__CF_.*|_|PWD|OLDPWD|SHLVL)$/;
+        const allowedPattern =
+          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
+        expect(
+          keys.filter(
+            (key) =>
+              !allowed.has(key) &&
+              !osAdded.test(key) &&
+              !allowedPattern.test(key),
+          ),
+        ).toEqual([]);
         expect(keys).not.toContain("GITHUB_TOKEN");
         expect(keys).not.toContain("AWS_SECRET_ACCESS_KEY");
       } finally {
