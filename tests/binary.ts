@@ -6,7 +6,7 @@ import {
   spawn,
   spawnSync,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -531,6 +531,7 @@ try {
     releaseArch = process.arch === "x64" ? "x86_64" : "arm64",
     releaseAsset = `crewplane-v9.9.9-${releaseOs}-${releaseArch}`,
     releaseHash = createHash("sha256").update(releaseBytes).digest("hex");
+  let releaseSignature: string | null = null;
   const releaseServer = createHttpServer((request, response) => {
     const url = request.url ?? "/";
     if (url === "/latest") {
@@ -541,6 +542,11 @@ try {
     if (url === `/download/v9.9.9/${releaseAsset}`) {
       response.writeHead(200);
       response.end(releaseBytes);
+      return;
+    }
+    if (url === `/download/v9.9.9/${releaseAsset}.sig` && releaseSignature) {
+      response.writeHead(200);
+      response.end(releaseSignature);
       return;
     }
     if (url === `/download/v9.9.9/${releaseAsset}.sha256`) {
@@ -567,12 +573,19 @@ try {
       CREWPLANE_RELEASE_BUILD: "1",
     };
     // Async execution keeps this process's release server responsive.
-    const update = (args: string[]) =>
+    const update = (
+      args: string[],
+      options: { bin?: string; env?: Record<string, string> } = {},
+    ) =>
       new Promise<{ status: number; stdout: string; stderr: string }>((done) =>
         execFile(
-          updateBin,
+          options.bin ?? updateBin,
           args,
-          { env: updateEnv, encoding: "utf8", timeout: 120000 },
+          {
+            env: { ...updateEnv, ...options.env },
+            encoding: "utf8",
+            timeout: 120000,
+          },
           (error, stdout, stderr) => {
             const code =
               error && typeof (error as { code?: unknown }).code === "number"
@@ -585,6 +598,59 @@ try {
         ),
       );
     const version = () => update(["--version"]);
+
+    // Signed-build variant. The key list override is honored by this plain
+    // build only; build:release defines it away, so a shipped binary cannot be
+    // pointed at other keys by its environment.
+    const signer = generateKeyPairSync("ed25519");
+    const signedEnv = {
+      CREWPLANE_TEST_RELEASE_KEYS: JSON.stringify({
+        keys: [
+          {
+            id: "acceptance",
+            publicKey: signer.publicKey
+              .export({ format: "der", type: "spki" })
+              .subarray(-32)
+              .toString("base64"),
+          },
+        ],
+      }),
+      CREWPLANE_CACHE_DIR: join(temp, "signed-cache"),
+      CREWPLANE_RELEASES_DIR: join(temp, "signed-releases"),
+    };
+    const signedBin = join(updateDirectory, "signed", "crewplane");
+    mkdirSync(join(updateDirectory, "signed"), { recursive: true });
+    copyFileSync(bin, signedBin);
+    const before = readFileSync(signedBin);
+    const unsigned = await update(["update"], {
+      bin: signedBin,
+      env: signedEnv,
+    });
+    assert.notEqual(unsigned.status, 0, "unsigned release must be refused");
+    assert.match(unsigned.stderr, /signature missing/);
+    assert.equal(readFileSync(signedBin).equals(before), true);
+    releaseSignature = sign(
+      null,
+      Buffer.from(
+        `crewplane-release-v1\nv9.9.9\n${releaseAsset}\n${releaseHash}\n`,
+      ),
+      signer.privateKey,
+    ).toString("base64");
+    const signedUpdate = await update(["update"], {
+      bin: signedBin,
+      env: signedEnv,
+    });
+    assert.equal(signedUpdate.status, 0, signedUpdate.stderr);
+    const signedOutcome = JSON.parse(signedUpdate.stdout) as {
+      status: string;
+      integrity: string;
+      signingKey: string;
+    };
+    assert.equal(signedOutcome.status, "updated");
+    assert.equal(signedOutcome.integrity, "signed");
+    assert.equal(signedOutcome.signingKey, "acceptance");
+    assert.equal(readFileSync(signedBin).equals(releaseBytes), true);
+    releaseSignature = null;
     const checked = await update(["update", "--check"]);
     assert.equal(checked.status, 0, checked.stderr);
     const available = JSON.parse(checked.stdout) as {
@@ -602,6 +668,10 @@ try {
     assert.equal(
       (JSON.parse(updated.stdout) as { status: string }).status,
       "updated",
+    );
+    assert.equal(
+      (JSON.parse(updated.stdout) as { integrity: string }).integrity,
+      "sha256",
     );
     assert.equal(readFileSync(updateBin).equals(releaseBytes), true);
     assert.notEqual(statSync(updateBin).mode & 0o111, 0);
