@@ -18,6 +18,7 @@ import { bindControl, ensureControlDirectory } from "../control.ts";
 import { gitEnvironment, harnessEnvironment } from "../environment.ts";
 import { sha256Json } from "../hash.ts";
 import { durableMkdir, publishJson } from "../io.ts";
+import { probeProcess } from "../liveness.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
   coordinatorOf,
@@ -475,8 +476,11 @@ export async function serve(
     runTimeoutMs?: number;
     cleanupGraceMs?: number;
     stdioGraceMs?: number;
+    /** Liveness probe for retained child pids and (negative) process groups. */
+    probe?: typeof probeProcess;
   } = {},
 ) {
+  const probe = options.probe ?? probeProcess;
   const startedAt = new Date().toISOString();
   const readBoard = options.readBoard ?? snapshot;
   let config = validateConfig(initialConfig);
@@ -588,18 +592,13 @@ export async function serve(
           "Prior run has no child identity; inspect and retry explicitly";
         continue;
       }
-      let alive = true;
-      try {
-        process.kill(
+      if (
+        probe(
           process.platform === "win32"
             ? record.pid
             : -(record.processGroupId ?? record.pid),
-          0,
-        );
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-      }
-      if (alive)
+        ) !== "dead"
+      )
         throw new Error(
           `Prior lane PID ${record.pid} may still be running; do not start overlapping writers`,
         );
@@ -665,18 +664,15 @@ export async function serve(
           (!record.pid && !record.processGroupId)
         )
           continue;
-        try {
-          process.kill(
+        if (
+          probe(
             process.platform === "win32"
               ? (record.pid as number)
               : -(record.processGroupId ?? (record.pid as number)),
-            0,
-          );
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-            delete record.pid;
-            delete record.processGroupId;
-          }
+          ) === "dead"
+        ) {
+          delete record.pid;
+          delete record.processGroupId;
         }
       }
       const pendingCommands = await Promise.all(
@@ -1548,17 +1544,13 @@ export async function serve(
           });
           const groupAlive = () => {
             if (!record.pid) return false;
-            try {
-              process.kill(
+            return (
+              probe(
                 process.platform === "win32"
                   ? record.pid
                   : -(record.processGroupId ?? record.pid),
-                0,
-              );
-              return true;
-            } catch (error) {
-              return (error as NodeJS.ErrnoException).code !== "ESRCH";
-            }
+              ) !== "dead"
+            );
           };
           const killGroup = (signal: NodeJS.Signals) => {
             if (!record.pid) return;
