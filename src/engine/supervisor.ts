@@ -5,6 +5,7 @@ import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import pkg from "../../package.json" with { type: "json" };
 import { adapters } from "../adapters.ts";
+import { snapshot } from "../board.ts";
 import type {
   Config,
   ControlLogEntry,
@@ -49,7 +50,6 @@ import {
   evaluateOrchestration,
   type SchedulingError,
 } from "./orchestration.ts";
-import { snapshot } from "./read-model.ts";
 import { loadedScheduling } from "./scheduling.ts";
 import { evaluateTurnWait } from "./wait-policy.ts";
 import { acquire } from "./watch.ts";

@@ -242,3 +242,29 @@ it("tolerates wrongly shaped supervisor state and config files", async () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+it("adds planned cards only through an injected parser for the policy's roadmap format", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-plan-")));
+  try {
+    execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
+    writeFileSync(join(root, projectPolicy(root).planPath), "plan body");
+    writeFileSync(
+      join(root, "crewplane.json"),
+      JSON.stringify({ ...projectPolicy(root), roadmapFormat: "relay" }),
+    );
+    const custom = (text: string, existing: Set<string>) =>
+      text === "plan body" && !existing.has("X-1")
+        ? [{ id: "X-1", markdown: "# X-1\nGoal: parsed\n" }]
+        : [];
+    expect((await snapshot(root)).tasks).toEqual([]);
+    expect(
+      (await snapshot(root, { planParsers: { other: custom } })).tasks,
+    ).toEqual([]);
+    const view = await snapshot(root, { planParsers: { relay: custom } });
+    expect(view.tasks.map((task) => [task.id, task.goal])).toEqual([
+      ["X-1", "parsed"],
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

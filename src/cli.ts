@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
+import { snapshot } from "./board.ts";
 import type { Config, State } from "./contracts.ts";
 import {
   bindControl,
@@ -39,7 +40,6 @@ import {
   instructionFileProblem,
   validHarness,
 } from "./engine/harness.ts";
-import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";

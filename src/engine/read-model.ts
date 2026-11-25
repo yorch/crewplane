@@ -5,7 +5,7 @@ import { isAbsolute, join, relative } from "node:path";
 import type { Board, LiveTask } from "../contracts.ts";
 import { checkControlDirectory, controlDirectory } from "../control.ts";
 import { gitEnvironment } from "../environment.ts";
-import { relayPlannedTasks } from "../profiles/relay.ts";
+import type { PlanParser } from "../ports.ts";
 import {
   coordinatorOf,
   projectPolicy,
@@ -116,8 +116,12 @@ export function parseTask(id: string, markdown: string, live?: LiveTask) {
   };
 }
 
-export function plannedTasks(plan: string, existingIds: Set<string>) {
-  return relayPlannedTasks(plan, existingIds).map((card) =>
+export function plannedTasks(
+  parser: PlanParser,
+  plan: string,
+  existingIds: Set<string>,
+) {
+  return parser(plan, existingIds).map((card) =>
     parseTask(card.id, card.markdown),
   );
 }
@@ -174,7 +178,12 @@ export async function monitorStatus(store: string, now = new Date()) {
 
 export const headlessStatus = readHeadless;
 
-export async function snapshot(root: string) {
+export interface SnapshotOptions {
+  /** Roadmap-format parsers keyed by policy `roadmapFormat`; none are built in. */
+  planParsers?: Readonly<Record<string, PlanParser>>;
+}
+
+export async function snapshot(root: string, options: SnapshotOptions = {}) {
   const board = (await coordination(["board"], root)) as Board;
   const documentProblems: DocumentProblem[] = [];
   const policy = projectPolicy(root);
@@ -205,8 +214,16 @@ export async function snapshot(root: string) {
     policy.planPath,
     documentProblems,
   );
-  if (policy.roadmapFormat === "relay")
-    tasks.push(...plannedTasks(plan, new Set(tasks.map((task) => task.id))));
+  const parser = Object.hasOwn(
+    options.planParsers ?? {},
+    policy.roadmapFormat ?? "none",
+  )
+    ? options.planParsers?.[policy.roadmapFormat ?? "none"]
+    : undefined;
+  if (parser)
+    tasks.push(
+      ...plannedTasks(parser, plan, new Set(tasks.map((task) => task.id))),
+    );
   tasks.sort((a, b) => a.id.localeCompare(b.id));
   // Control state is read from the private per-user directory, never the store.
   const control = controlDirectory(root);

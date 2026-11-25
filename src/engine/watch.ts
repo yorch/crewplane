@@ -8,10 +8,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { snapshot } from "../board.ts";
 import { publishJson } from "../io.ts";
 import { coordinatorOf } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
-import { monitorStatus, snapshot } from "./read-model.ts";
+import { monitorStatus } from "./read-model.ts";
 
 type Snapshot = Awaited<ReturnType<typeof snapshot>>;
 interface Settings {

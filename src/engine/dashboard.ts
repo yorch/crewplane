@@ -7,6 +7,7 @@ import {
   controlDirectory,
   ensureControlDirectory,
 } from "../control.ts";
+import { plannedTasks, snapshot } from "../board.ts";
 import { publishJson } from "../io.ts";
 import { discoverProject, validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
@@ -15,15 +16,9 @@ import { control } from "./control-policy.ts";
 import { createEvidenceStore } from "./evidence/store.ts";
 import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
-import { snapshot } from "./read-model.ts";
 
-export {
-  headlessStatus,
-  monitorStatus,
-  parseTask,
-  plannedTasks,
-  snapshot,
-} from "./read-model.ts";
+export { headlessStatus, monitorStatus, parseTask } from "./read-model.ts";
+export { plannedTasks, snapshot };
 
 const tokenMatches = (given: unknown, expected: string) => {
   if (typeof given !== "string") return false;

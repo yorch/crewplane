@@ -14,6 +14,9 @@ import {
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import { gitEnvironment } from "./environment.ts";
+import { planParsers } from "./profiles/index.ts";
+
+const roadmapFormats = ["none", ...Object.keys(planParsers)];
 
 /** Canonicalize existing ancestors without creating a store during discovery. */
 function canonicalStore(path: string): string {
@@ -65,7 +68,8 @@ export interface ProjectPolicy extends Roles {
   planPath: string;
   statusPath: string;
   instructionsPath: string;
-  roadmapFormat?: "none" | "relay";
+  /** "none" or a key of the profile registry. */
+  roadmapFormat?: string;
 }
 const exactVersion =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
@@ -158,7 +162,7 @@ export function projectPolicy(
   if (![1, 2].includes(p.version))
     throw new Error("Unsupported project policy version");
   if (
-    !["none", "relay"].includes(p.roadmapFormat ?? "none") ||
+    !roadmapFormats.includes(p.roadmapFormat ?? "none") ||
     !validId(p.coordinator) ||
     !Array.isArray(p.reviewers) ||
     !p.reviewers.every(validId) ||
