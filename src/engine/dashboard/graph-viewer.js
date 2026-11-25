@@ -22,7 +22,12 @@ function update(value) {
   }
   note.textContent = `Explicit recorded relationships only. Process status is an observation, not productive work. ${value.coverage?.messagesIncluded ?? 0} of ${value.coverage?.messagesTotal ?? 0} events supplied. Task dependency metadata: ${value.coverage?.dependencyMetadata ?? "unknown"}.`;
   if (renderer) renderer.update(graph);
-  else renderer = renderGraph(document, host, graph, { onSelect: select });
+  else
+    renderer = renderGraph(document, host, graph, {
+      onSelect: select,
+      // Shared formatter from dashboard.js; raw value until it has loaded.
+      formatTime: (at) => window.crewplane?.formatTime?.(at) ?? String(at),
+    });
 }
 view.addEventListener("change", () => {
   window.crewplane?.setParams({ graph: view.value });

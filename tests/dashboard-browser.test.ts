@@ -632,6 +632,8 @@ it("pages retained runs beyond two pages and keeps incremental events unique dur
     async () => (await page.locator("#run-history .run-row").count()) === 41,
     "third run page",
   );
+  // The automatically selected newest run is reflected in the URL.
+  expect(await hash(page)).toContain(`run=${ids[0]}`);
   expect(requests).toContain(ids[19]);
   expect(requests).toContain(ids[39]);
   expect(await page.locator("#run-more").isDisabled()).toBe(true);
@@ -670,3 +672,90 @@ it("adopts a fresh session fragment in the same tab, in every accepted form, wit
   }
   await page.close();
 });
+
+it("uses plain status labels with stable filter values and readable exact times", async () => {
+  const { page, errors } = await open("#/tasks");
+  await title(page, "Tasks");
+  const options = await page
+    .locator("#state option")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => [
+        (node as HTMLOptionElement).value,
+        node.textContent,
+      ]),
+    );
+  expect(options).toContainEqual(["attention", "Blocked or awaiting review"]);
+  expect(options).toContainEqual(["review", "Awaiting review"]);
+  expect(options).toContainEqual(["completed", "Accepted"]);
+  expect(JSON.stringify(options)).not.toMatch(/Needs decision|disposition/);
+  await page.goto(`${base}#/overview`);
+  await title(page, "Overview");
+  expect(await page.locator("#view-overview").textContent()).toContain(
+    "Blocked or awaiting review",
+  );
+  // Exact time is real text, not only a tooltip.
+  await page.goto(`${base}#/tasks?task=WEB-1`);
+  await page.locator("#task-detail time .time-exact").first().waitFor({
+    state: "attached",
+  });
+  const [text, iso] = await page
+    .locator("#task-detail time")
+    .first()
+    .evaluate((node) => [node.textContent, node.getAttribute("datetime")]);
+  expect(iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(text).toMatch(/\(.*\d.*\)/);
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("reports an unknown run id and states broadcast filtering", async () => {
+  const { page, errors } = await open("#/runs?run=not-a-run");
+  await page.locator('#run-events:has-text("Unknown run id")').waitFor();
+  await page.goto(`${base}#/messages`);
+  await title(page, "Messages");
+  expect(
+    await page.locator("label:has(#message-agent)").textContent(),
+  ).toContain("also shows messages to everyone");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("keeps selected state visible in forced colors and meets coarse-pointer target sizes without overflow", async () => {
+  const { page, errors } = await open("#/tasks?task=WEB-2&layout=board");
+  await page.locator("#tasks .card.is-selected").waitFor();
+  await page.emulateMedia({ forcedColors: "active" });
+  const outline = await page
+    .locator("#tasks .card.is-selected")
+    .evaluate((node) => getComputedStyle(node).outlineStyle);
+  expect(outline).not.toBe("none");
+  await page.close();
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 800 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const touch = await context.newPage();
+  await touch.goto(`${base}#/tasks?layout=list`);
+  await touch.locator("#view-title").filter({ hasText: "Tasks" }).waitFor();
+  const small = await touch
+    .locator("#view-tasks button:visible, #view-tasks select:visible")
+    .evaluateAll((nodes) =>
+      nodes
+        .map((node) => node.getBoundingClientRect().height)
+        .filter((height) => height < 43.5),
+    );
+  expect(small).toEqual([]);
+  expect(await noOverflow(touch)).toBe(true);
+  // Touch also shows exact times inline: no view may overflow at any width.
+  for (const width of [320, 390, 1024, 1440]) {
+    await touch.setViewportSize({ width, height: 900 });
+    for (const view of views) {
+      await touch.goto(`${base}#/${view}`);
+      await touch.locator("#view-title").filter({ hasText: /./ }).waitFor();
+      await touch.waitForTimeout(150);
+      expect(await noOverflow(touch), `${view} at ${width}`).toBe(true);
+    }
+  }
+  await context.close();
+  expect(errors).toEqual([]);
+}, 30000);

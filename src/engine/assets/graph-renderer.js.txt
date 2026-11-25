@@ -1,5 +1,6 @@
 const selectableKinds = new Set(["task", "lane"]);
 const svgNamespace = "http://www.w3.org/2000/svg";
+let detailCounter = 0;
 const pill = { width: 128, height: 34 };
 
 /** Layered positions: prerequisites to the left; cycles are cut by a visit guard. */
@@ -65,6 +66,7 @@ function shorten(label) {
 
 /** Render only the supplied bounded graph projection. Selection IDs are opaque. */
 export function renderGraph(document, host, initialSnapshot, options = {}) {
+  const formatTime = options.formatTime ?? ((value) => String(value));
   const root = document.createElement("section");
   root.className = "relay-graph";
   root.setAttribute("aria-label", "Operational relationships");
@@ -102,9 +104,14 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     const option = make("option", label, kind);
     option.value = value;
   }
+  // Short polite live message; the long coverage detail is static and not live.
   const summary = make("p");
   summary.className = "relay-graph-summary";
   summary.setAttribute("role", "status");
+  const detail = make("p");
+  detail.id = `relay-graph-detail-${detailCounter++}`;
+  detail.className = "relay-graph-detail";
+  search.setAttribute("aria-describedby", detail.id);
   // The diagram is a visual aid; node buttons and the table carry the same data.
   const canvas = make("div");
   canvas.className = "relay-graph-canvas";
@@ -379,7 +386,7 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
         edgeElements.set(edge.id, row);
       }
       row.children[0].textContent = `${known.get(edge.from)?.label ?? `[Missing reference: ${edge.from}]`} → ${known.get(edge.to)?.label ?? `[Missing reference: ${edge.to}]`}`;
-      row.children[1].textContent = `${edge.kind}: ${edge.label} · ${edge.unanswered ? "unanswered" : "not marked unanswered"}${edge.at ? ` · Recorded: ${edge.at}` : ""}`;
+      row.children[1].textContent = `${edge.kind}: ${edge.label} · ${edge.unanswered ? "unanswered" : "not marked unanswered"}${edge.at ? ` · Recorded: ${formatTime(edge.at)}` : ""}`;
       const cell = row.children[2];
       if (edge.threadId !== null) {
         let button = cell.querySelector("button");
@@ -410,7 +417,9 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     const missing = edges.filter(
       (edge) => !known.has(edge.from) || !known.has(edge.to),
     ).length;
-    summary.textContent = `${visible.length} nodes; ${edges.length} relationships. Archived/hidden upstream: ${next.hidden.nodes} nodes, ${next.hidden.edges} edges. Truncated: ${(next.truncated?.nodes ?? 0) + Math.max(0, next.nodes.length - 50)} nodes, ${(next.truncated?.edges ?? 0) + Math.max(0, next.edges.length - 100)} edges. Filtered/view hidden: ${suppliedNodes.length - visible.length} nodes, ${suppliedEdges.length - edges.length} edges. Missing-reference relationships: ${missing}.${visible.length === 0 ? " No matching nodes." : ""}`;
+    summary.textContent = `${visible.length} nodes, ${edges.length} relationships`;
+    detail.textContent = `Archived/hidden upstream: ${next.hidden.nodes} nodes, ${next.hidden.edges} edges. Truncated: ${(next.truncated?.nodes ?? 0) + Math.max(0, next.nodes.length - 50)} nodes, ${(next.truncated?.edges ?? 0) + Math.max(0, next.edges.length - 100)} edges. Filtered/view hidden: ${suppliedNodes.length - visible.length} nodes, ${suppliedEdges.length - edges.length} edges. Missing-reference relationships: ${missing}.`;
+    if (visible.length === 0) summary.textContent += ". No matching nodes";
     drawn = { nodes: visible, edges, view: next.view };
     draw();
     if (activeControl?.isConnected && root.contains(activeControl)) {

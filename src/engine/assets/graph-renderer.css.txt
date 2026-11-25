@@ -18,6 +18,7 @@
   font-weight: 650;
 }
 .relay-graph-legend,
+.relay-graph-detail,
 .relay-graph-summary {
   margin: 4px 0 0;
   color: #566072;
@@ -206,5 +207,41 @@
   }
   .relay-graph td button {
     padding: 4px;
+  }
+}
+
+@media (pointer: coarse) {
+  .relay-graph button,
+  .relay-graph input,
+  .relay-graph select {
+    min-height: 44px;
+  }
+  .relay-graph summary {
+    min-height: 44px;
+    padding-block: 10px;
+  }
+}
+
+@media (forced-colors: active) {
+  .relay-node rect {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+  .relay-node text {
+    fill: CanvasText;
+  }
+  .relay-edge {
+    stroke: CanvasText;
+  }
+  .relay-arrow {
+    fill: CanvasText;
+  }
+  .relay-node.is-selected rect {
+    stroke: Highlight;
+    stroke-width: 4;
+  }
+  .relay-graph button[aria-pressed="true"]:not(:focus-visible) {
+    outline: 3px solid Highlight;
+    outline-offset: -3px;
   }
 }

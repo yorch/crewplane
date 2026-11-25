@@ -103,13 +103,13 @@
                 <select id="state">
                   <option value="">All statuses</option>
                   <option value="active">Active (assigned or in progress)</option>
-                  <option value="attention">Needs decision (blocked or submitted)</option>
+                  <option value="attention">Blocked or awaiting review</option>
                   <option value="todo">To do</option>
                   <option value="assigned">Assigned</option>
                   <option value="working">In progress</option>
                   <option value="blocked">Blocked</option>
-                  <option value="review">Submitted / disposition</option>
-                  <option value="completed">Completed / accepted slice</option>
+                  <option value="review">Awaiting review</option>
+                  <option value="completed">Accepted</option>
                 </select>
               </label>
               <div class="toolbar-actions">
@@ -176,7 +176,7 @@
                 <button id="messages-all" type="button" aria-pressed="false">All <span id="message-count" class="segmented-count"></span></button>
               </fieldset>
               <label class="field field-grow">Search<input id="message-search" type="search" placeholder="Message, task or agent…" autocomplete="off" /></label>
-              <label class="field">Agent<select id="message-agent"><option value="">All agents</option></select></label>
+              <label class="field">Agent <span class="field-help">(also shows messages to everyone)</span><select id="message-agent"><option value="">All agents</option></select></label>
               <label class="field">Phase<select id="message-phase"><option value="">All phases</option></select></label>
               <div class="toolbar-actions">
                 <button id="messages-clear" class="text-button" type="button" hidden>Clear filters</button>
@@ -204,7 +204,7 @@
                   <span id="runs-status" class="count" role="status">Checking…</span>
                 </div>
                 <fieldset id="run-history" class="run-history" aria-label="Run history" data-scroll-key="run-history"></fieldset>
-                <button id="run-more" type="button">Older runs</button>
+                <button id="run-more" type="button" disabled>Older runs</button>
               </section>
               <section class="panel runs-timeline" aria-labelledby="timeline-heading">
                 <div class="panel-head">

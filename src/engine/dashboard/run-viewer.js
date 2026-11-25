@@ -48,11 +48,13 @@
     node.href = window.crewplane.hrefFor(view, params);
     return node;
   };
-  const stamp = (value) => {
-    const time = new Date(value);
-    return Number.isFinite(time.getTime())
-      ? time.toLocaleString()
-      : "not reported";
+  // One shared formatter (dashboard.js) so every view prints the same text.
+  const stamp = (value) => window.crewplane.formatTime(value);
+  const timeNode = (value) => {
+    const node = make("time", stamp(value), "time");
+    const at = new Date(value);
+    if (Number.isFinite(at.getTime())) node.dateTime = at.toISOString();
+    return node;
   };
   const timelinePlaceholder = (text) => {
     get("run-events").replaceChildren(make("li", text, "timeline-empty"));
@@ -64,7 +66,7 @@
     const row = make("li", undefined, `timeline-row kind-${e.kind}`);
     row.dataset.sequence = String(e.sequence);
     const head = make("div", undefined, "timeline-head");
-    const time = make("time", stamp(e.at), "time");
+    const time = timeNode(e.at);
     head.append(
       make("span", `#${e.sequence}`, "mono timeline-seq"),
       make("span", e.kind, "timeline-kind"),
@@ -166,7 +168,7 @@
     meta.append(
       badge(run.status, statusTones[run.status] ?? "unknown"),
       make("span", run.harness),
-      make("span", stamp(run.startedAt)),
+      timeNode(run.startedAt),
     );
     button.append(title, meta);
     button.addEventListener("click", () => {
@@ -270,7 +272,14 @@
       get("run-more").disabled = !before;
       setText("run-more", before ? "Older runs" : "No older runs");
       for (const run of value.runs) runs.set(run.runId, run);
-      if (!selected && value.runs[0]) selectRun(value.runs[0].runId);
+      if (viewActive && !selected && !urlRun && value.runs[0]) {
+        const newest = value.runs[0].runId;
+        selectRun(newest);
+        // Reflect the automatic choice in the URL without a history entry.
+        // urlRun is set first so the resulting route event is not a change.
+        urlRun = newest;
+        window.crewplane.setParams({ run: newest });
+      }
       renderHistory();
       let status = runs.size
         ? "Incremental private metadata"
@@ -278,7 +287,7 @@
       if (value.incomplete || value.retentionLimited)
         status += " · limited/retained history";
       setText("runs-status", status);
-      if (!runs.size && !selected) {
+      if (!runs.size && !selected && !urlRun) {
         setText(
           "run-note",
           "The previous supervisor has no retroactive normalized history. New collection starts after safe native reload.",
@@ -328,6 +337,7 @@
       else if (runChanged) {
         selected = null;
         resetTimeline();
+        if (run) timelinePlaceholder("Unknown run id");
         renderHistory();
       }
     }

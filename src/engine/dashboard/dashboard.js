@@ -87,8 +87,8 @@ const stateLabels = {
   assigned: "Assigned",
   working: "In progress",
   blocked: "Blocked",
-  review: "Submitted",
-  completed: "Completed",
+  review: "Awaiting review",
+  completed: "Accepted",
 };
 const stateTones = {
   todo: "neutral",
@@ -106,8 +106,8 @@ const BOARD_COLUMNS = [
   ["To do", ["todo"]],
   ["Assigned", ["assigned"]],
   ["In progress", ["working", "blocked"]],
-  ["Submitted", ["review"]],
-  ["Completed", ["completed"]],
+  ["Awaiting review", ["review"]],
+  ["Accepted", ["completed"]],
 ];
 const processLabels = {
   running: "Running",
@@ -126,7 +126,7 @@ const processTones = {
 const PROCESS_ORDER = ["stale", "paused", "running", "idle", "standby"];
 const progressLabels = {
   working: "In progress",
-  ready: "Submitted",
+  ready: "Awaiting review",
   blocked: "Blocked",
   assigned: "Assigned",
   accepted: "Accepted",
@@ -205,6 +205,7 @@ window.crewplaneFetch = (url, options = {}) => {
 };
 let internalNavigation = false;
 let messageLimit = 100;
+let messageLimitKey = "";
 const filterMemory = {};
 const scrollMemory = new Map();
 const compactLayout = window.matchMedia("(max-width: 860px)");
@@ -346,16 +347,24 @@ function relative(value) {
 }
 function timeEl(value) {
   if (!validTime(value)) return el("span", "not reported", "is-unknown");
-  const node = el("time", relative(value), "time");
+  const node = el("time", undefined, "time");
   node.dateTime = new Date(value).toISOString();
   node.title = date(value);
   node.dataset.at = String(new Date(value).getTime());
+  // The exact time is real text (not only a tooltip) so keyboard, touch and
+  // screen-reader users can read it; touch devices also show it visibly.
+  node.append(
+    el("span", relative(value), "time-relative"),
+    el("span", ` (${date(value)})`, "time-exact"),
+  );
   return node;
 }
 function refreshRelativeTimes() {
   for (const node of document.querySelectorAll("time[data-at]")) {
+    const target = node.querySelector(".time-relative");
+    if (!target) continue;
     const text = relative(Number(node.dataset.at));
-    if (node.textContent !== text) node.textContent = text;
+    if (target.textContent !== text) target.textContent = text;
   }
 }
 function fields(rows, className) {
@@ -566,7 +575,7 @@ function attentionItems() {
       "danger",
       "Watchdog",
       `Watchdog reported ${code}`,
-      "Persistent observation; inspect before retry.",
+      "The watchdog keeps reporting this. Check it before you retry.",
       system,
     );
   if (data.watchdog?.state === "stale")
@@ -632,7 +641,7 @@ function attentionItems() {
       add(
         5,
         "info",
-        "Submitted",
+        "Awaiting review",
         `${task.id} · ${taskTitle(task)}`,
         task.scheduling?.label ?? "Awaiting coordinator disposition",
         hrefFor("tasks", { task: task.id }),
@@ -702,12 +711,12 @@ function renderMetrics() {
       ],
       [
         states("blocked", "review"),
-        "Blocked / submitted",
+        "Blocked or awaiting review",
         hrefFor("tasks", { state: "attention" }),
       ],
       [
         states("completed"),
-        "Completed / accepted",
+        "Accepted",
         hrefFor("tasks", { state: "completed" }),
       ],
       [
@@ -1528,6 +1537,11 @@ function messageRow(message, open, index) {
 }
 function renderMessageList(index) {
   const params = route.params;
+  const limitKey = JSON.stringify([params.q, params.agent, params.phase]);
+  if (limitKey !== messageLimitKey) {
+    messageLimitKey = limitKey;
+    messageLimit = 100;
+  }
   const showOpen = (params.filter ?? "open") === "open";
   const openIds = new Set(data.unanswered.map((message) => message.id));
   const questions = data.unanswered.filter((m) => visibleMessage(m, params));
@@ -1733,7 +1747,7 @@ function renderSystem() {
         "none",
       ],
       [
-        "Planning since",
+        "Planning started",
         attention.planningSince ? timeEl(attention.planningSince) : null,
         "not planning",
       ],
@@ -2126,6 +2140,7 @@ async function refresh() {
 // ---- Wiring ----------------------------------------------------------------
 
 window.crewplane = {
+  formatTime: date,
   hrefFor,
   navigate,
   setParams: setRouteParams,
