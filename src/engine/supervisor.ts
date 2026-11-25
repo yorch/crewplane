@@ -13,6 +13,7 @@ import type {
   State,
   Work,
 } from "../contracts.ts";
+import { ensureControlDirectory } from "../control.ts";
 import { gitEnvironment, harnessEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson } from "../io.ts";
 import type { HarnessAdapter } from "../ports.ts";
@@ -458,11 +459,17 @@ export async function progress(
   });
 }
 
+/**
+ * `directory` is the private control directory (see src/control.ts); the board
+ * and operational traces live in `options.store` (default: the project store),
+ * which is the only location children are told about.
+ */
 export async function serve(
   initialConfig: Config,
   directory: string,
   signal: AbortSignal,
   options: {
+    store?: string;
     readBoard?: typeof snapshot;
     writeState?: typeof publishJson;
     runTimeoutMs?: number;
@@ -473,7 +480,10 @@ export async function serve(
   const startedAt = new Date().toISOString();
   const readBoard = options.readBoard ?? snapshot;
   let config = validateConfig(initialConfig);
-  await durableMkdir(directory);
+  await ensureControlDirectory(directory);
+  const store =
+    options.store ??
+    (process.env.CREWPLANE_COORD_DIR || join(config.root, ".crewplane-state"));
   const release = await acquire(directory);
   // Announce supervision so the per-user updater never replaces this binary.
   const unregister = await registerSupervisor();
@@ -549,9 +559,7 @@ export async function serve(
     return saving;
   };
   try {
-    const traces = await createTraceStore(
-      join(dirname(directory), "operational-traces"),
-    );
+    const traces = await createTraceStore(join(store, "operational-traces"));
     const latest = new Map<Lane, RecordState>();
     for (const r of Object.values(state.records).sort((a, b) =>
       (a.startedAt ?? "").localeCompare(b.startedAt ?? ""),
@@ -1415,7 +1423,8 @@ export async function serve(
                         ? config.lanes[work.lane]?.piModel?.provider
                         : config.lanes[work.lane]?.model?.split("/")[0],
                   }),
-                  CREWPLANE_COORD_DIR: dirname(directory),
+                  // Board only: the control directory is never given to a child.
+                  CREWPLANE_COORD_DIR: store,
                   CREWPLANE_HEADLESS_LANE: work.lane,
                 },
                 stdio: ["pipe", "pipe", "pipe"],

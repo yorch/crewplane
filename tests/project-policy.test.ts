@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 import pkg from "../package.json" with { type: "json" };
+import { controlDirectory } from "../src/control.ts";
 import { main } from "../src/engine/agents.mjs";
 import {
   ProjectVersionError,
@@ -283,11 +284,9 @@ it("repins the project at the running release and preserves the rest of the poli
 
     // A live supervisor must never see its own project's policy change.
     f.save({ ...f.policy, requiredVersion: "0.3.0" });
-    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
-      recursive: true,
-    });
+    mkdirSync(controlDirectory(f.root), { recursive: true, mode: 0o700 });
     writeFileSync(
-      join(f.root, ".crewplane-state", "supervisor", "state.json"),
+      join(controlDirectory(f.root), "state.json"),
       JSON.stringify({ running: true, supervisorVersion: "0.1.0" }),
     );
     const running = pin("--confirm", "true");
@@ -478,11 +477,9 @@ it("does not dispatch into a store a newer release already owns", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
-      recursive: true,
-    });
+    mkdirSync(controlDirectory(f.root), { recursive: true, mode: 0o700 });
     writeFileSync(
-      join(f.root, ".crewplane-state", "supervisor", "state.json"),
+      join(controlDirectory(f.root), "state.json"),
       JSON.stringify({
         running: true,
         pid: process.pid,
@@ -522,15 +519,8 @@ it("fails closed on unusable supervisor state and ignores a dead owner", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    const stateFile = join(
-      f.root,
-      ".crewplane-state",
-      "supervisor",
-      "state.json",
-    );
-    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
-      recursive: true,
-    });
+    const stateFile = join(controlDirectory(f.root), "state.json");
+    mkdirSync(controlDirectory(f.root), { recursive: true, mode: 0o700 });
     f.save({ ...f.policy, requiredVersion: "0.3.0" });
     const run = () =>
       spawnSync(bin, ["--project", f.root, "status"], {
@@ -571,15 +561,8 @@ it("warns when the live supervisor's release may ignore a queued verb", () => {
   const f = fixture();
   try {
     const bin = resolve("dist/crewplane");
-    const stateFile = join(
-      f.root,
-      ".crewplane-state",
-      "supervisor",
-      "state.json",
-    );
-    mkdirSync(join(f.root, ".crewplane-state", "supervisor"), {
-      recursive: true,
-    });
+    const stateFile = join(controlDirectory(f.root), "state.json");
+    mkdirSync(controlDirectory(f.root), { recursive: true, mode: 0o700 });
     f.save({ ...f.policy, requiredVersion: "0.3.0" });
     const queue = () =>
       spawnSync(bin, ["--project", f.root, "stop"], {

@@ -262,3 +262,17 @@ it("validates passEnv names, including case variants of refused names", () => {
   ])
     expect(validPassEnvName(bad)).toBe(false);
 });
+
+it("forwards only the control-directory base override, never a control path", () => {
+  const input = {
+    PATH: "/usr/bin",
+    HOME: "/home/u",
+    CREWPLANE_STATE_DIR: "/srv/state",
+    CREWPLANE_COORD_DIR: "/srv/board",
+  };
+  const child = harnessEnvironment("codex", { input });
+  expect(child.CREWPLANE_STATE_DIR).toBe("/srv/state");
+  // The supervisor sets the board location itself; it is not forwarded from input.
+  expect(child).not.toHaveProperty("CREWPLANE_COORD_DIR");
+  expect(Object.keys(child).some((key) => /CONTROL/i.test(key))).toBe(false);
+});

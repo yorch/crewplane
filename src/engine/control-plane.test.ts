@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import type { Config } from "../contracts.ts";
+import { controlDirectory } from "../control.ts";
 import { serve } from "./supervisor.ts";
 
 async function fixture() {
@@ -16,8 +17,8 @@ async function fixture() {
   git("config", "user.email", "synthetic@example.invalid");
   git("add", ".");
   git("commit", "-qm", "test: control fixture");
-  const directory = join(root, ".crewplane-state/supervisor");
-  await mkdir(join(directory, "commands"), { recursive: true });
+  const directory = controlDirectory(root);
+  await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });
   const load = async () => {
     try {
       return JSON.parse(

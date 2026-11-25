@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { controlDirectory } from "../control.ts";
 
 const script = fileURLToPath(new URL("./agents.mjs", import.meta.url));
 const env = { ...process.env, CREWPLANE_COORD_DIR: "" };
@@ -893,8 +894,8 @@ it("refuses claims and revisions while a different native task is running", asyn
     ok(b, ...claim);
     ok(b, ...ready);
     expect(second(root).code).toBe(0);
-    const directory = join(root, ".crewplane-state/supervisor");
-    mkdirSync(directory, { recursive: true });
+    const directory = controlDirectory(realpathSync(root));
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
     const state = join(directory, "state.json");
     writeFileSync(
       state,
@@ -1001,8 +1002,8 @@ it.each(["assigned", "claimed", "working", "native-running"])(
       if (state === "native-running") {
         // coordinator frozen newer submission can still have a native turn running.
         ok(b2, ...ready.map((value) => (value === "P1-01" ? "P1-02" : value)));
-        const directory = join(root, ".crewplane-state/supervisor");
-        mkdirSync(directory, { recursive: true });
+        const directory = controlDirectory(realpathSync(root));
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
         writeFileSync(
           join(directory, "state.json"),
           JSON.stringify({
@@ -1505,8 +1506,8 @@ it("checkpoints the current task before routing a revision to its original workt
     );
     ok(b2, ...secondWorking);
     revisionRequest(root);
-    const directory = join(root, ".crewplane-state/supervisor");
-    mkdirSync(directory, { recursive: true });
+    const directory = controlDirectory(realpathSync(root));
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
     const state = join(directory, "state.json");
     writeFileSync(
       state,
@@ -1654,10 +1655,10 @@ it("closes serviced corrections and rejects stale reopening or releasing native 
       board.unanswered.some((m: { id: string }) => m.id === request.id),
     ).toBe(false);
     expect(cli(b, ...working).code).toBe(1);
-    const store = ok(root, "init").store;
-    mkdirSync(join(store, "supervisor"), { recursive: true });
+    const control = controlDirectory(realpathSync(root));
+    mkdirSync(control, { recursive: true, mode: 0o700 });
     writeFileSync(
-      join(store, "supervisor/state.json"),
+      join(control, "state.json"),
       JSON.stringify({
         records: { old: { task: "P1-01", lane: "B", status: "running" } },
       }),
@@ -2063,15 +2064,15 @@ it("requires task owners to scope questions and refuses release for retained ide
         "Scoped blocker",
       ).task,
     ).toBe("P1-01");
-    const store = ok(root, "init").store;
-    mkdirSync(join(store, "supervisor"), { recursive: true });
+    const control = controlDirectory(realpathSync(root));
+    mkdirSync(control, { recursive: true, mode: 0o700 });
     for (const identity of [
       { pid: 123 },
       { processGroupId: 123 },
       { cleanupUnverified: true },
     ]) {
       writeFileSync(
-        join(store, "supervisor/state.json"),
+        join(control, "state.json"),
         JSON.stringify({
           records: {
             old: { task: "P1-01", lane: "B", status: "paused", ...identity },

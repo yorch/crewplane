@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { controlDirectory } from "../control.ts";
 import { snapshot } from "./dashboard.ts";
 import { type Config, type State, serve } from "./supervisor.ts";
 
@@ -27,8 +28,8 @@ const initialState = (): State => ({
 });
 async function fixture(mode = "ready") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "relay-audit-")));
-  const directory = join(root, ".crewplane-state/supervisor");
-  await mkdir(directory, { recursive: true });
+  const directory = controlDirectory(root);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   await mkdir(join(root, "tasks"), { recursive: true });
   await writeFile(join(root, "STATUS.md"), "Synthetic audit fixture");
   await writeFile(
@@ -305,7 +306,7 @@ it(
         // The OS and the node shebang may add their own bookkeeping names.
         const osAdded = /^(?:__CF_.*|_|PWD|OLDPWD|SHLVL)$/;
         const allowedPattern =
-          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
+          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE|STATE_DIR)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
         expect(
           keys.filter(
             (key) =>
@@ -326,6 +327,74 @@ it(
       }
     }),
   15000,
+);
+it(
+  "never exposes the control directory to a child and ignores commands a child plants through its board path",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const dump = join(f.root, "child-env-values.json");
+      const planted = "00000000-0000-4000-8000-0000000000ff.json";
+      const body = await readFile(f.config.binary, "utf8");
+      await writeFile(
+        f.config.binary,
+        body.replace(
+          "const args=",
+          `const fsm=await import('node:fs');const coord=process.env.CREWPLANE_COORD_DIR;
+fsm.mkdirSync(coord+'/supervisor/commands',{recursive:true});
+fsm.writeFileSync(coord+'/supervisor/commands/${planted}',JSON.stringify({action:'stop',at:new Date().toISOString()}));
+fsm.writeFileSync(${JSON.stringify(dump)},JSON.stringify(process.env));
+const args=`,
+        ),
+        { mode: 0o700 },
+      );
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            await access(dump);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        // Let at least one more supervisor cycle consume anything consumable.
+        await new Promise((r) => setTimeout(r, 2500));
+        const environment = JSON.parse(await readFile(dump, "utf8")) as Record<
+          string,
+          string
+        >;
+        // The child is given the board only, never the control directory.
+        expect(environment.CREWPLANE_COORD_DIR).toBe(
+          join(f.root, ".crewplane-state"),
+        );
+        for (const value of Object.values(environment)) {
+          expect(value).not.toContain(f.directory);
+          expect(value).not.toContain("/crewplane/projects/");
+        }
+        expect(f.directory.startsWith(f.root)).toBe(false);
+        // The planted stop is not in the supervisor's command queue, so the
+        // supervisor never applied it and never recorded it.
+        await access(
+          join(f.root, ".crewplane-state/supervisor/commands", planted),
+        );
+        const state = await f.load();
+        expect(state.running).toBe(true);
+        expect(state.draining).toBe(false);
+        expect(state.commands).not.toContain(planted);
+        expect(state.controlLog ?? []).toEqual([]);
+        expect(
+          JSON.parse(await readFile(join(f.directory, "desired.json"), "utf8"))
+            .desiredRunning,
+        ).toBe(true);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
 );
 it(
   "releases startup lease on invalid state and pauses interrupted records even without a stored PID",

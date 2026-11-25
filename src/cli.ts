@@ -16,6 +16,12 @@ import {
   failureMessage,
   probeBinary,
 } from "./doctor.ts";
+import {
+  checkControlDirectory,
+  controlDirectory,
+  ensureControlDirectory,
+  legacySupervisorDirectory,
+} from "./control.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
 import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
@@ -35,6 +41,11 @@ import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
+import {
+  migrateControl,
+  resolveControlTarget,
+  supervisorLiveness,
+} from "./migrate.ts";
 import {
   defaultPolicy,
   discoverProject,
@@ -152,6 +163,7 @@ const knownCommands = new Set([
   "evidence",
   "monitor",
   "watchdog",
+  "migrate",
 ]);
 const projectCommands = new Set([...knownCommands, "pin"]);
 /**
@@ -255,17 +267,22 @@ async function dispatchToPin(
     return `already running on ${error.required}`;
   try {
     const identity = discoverProject(requested);
-    let state: { running?: boolean; pid?: number; supervisorVersion?: string };
-    try {
-      state = JSON.parse(
-        await readFile(
-          join(identity.store, "supervisor", "state.json"),
-          "utf8",
-        ),
-      ) as typeof state;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      state = {};
+    let state: { running?: boolean; pid?: number; supervisorVersion?: string } =
+      {};
+    // A live owner may still be in the legacy directory of an older release.
+    for (const directory of [
+      identity.control,
+      legacySupervisorDirectory(identity.store),
+    ]) {
+      try {
+        checkControlDirectory(directory);
+        state = JSON.parse(
+          await readFile(join(directory, "state.json"), "utf8"),
+        ) as typeof state;
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     // A live newer release owns this store; an older one must not touch it.
     if (
@@ -385,7 +402,16 @@ async function main() {
   }
   const common = ctx.gitCommonDir,
     root = ctx.projectRoot;
-  const directory = join(ctx.store, "supervisor");
+  // Control plane: private per-user directory, never inside the project store.
+  const controlDir = controlDirectory(root);
+  let directory = controlDir;
+  if (!["init", "migrate", "pin"].includes(command)) {
+    // Fails closed while an older in-store layout exists (halting verbs excepted).
+    const target = resolveControlTarget(ctx.store, controlDir, command);
+    directory = target.directory;
+    if (target.warning) console.error(target.warning);
+    checkControlDirectory(directory);
+  }
   if (!policy.requiredVersion) await autoUpdate(command).catch(() => {});
   if (command === "pin") {
     const opts = options(rest, ["--confirm"]);
@@ -395,14 +421,21 @@ async function main() {
       throw new Error(
         "Project is not pinned; requiredVersion requires project policy version 2",
       );
-    const state = (await optional(join(directory, "state.json"))) as {
-      running?: boolean;
-      supervisorVersion?: string;
-    } | null;
-    if (state?.running)
-      throw new Error(
-        `Stop the supervisor${state.supervisorVersion ? ` (${state.supervisorVersion})` : ""} before changing the project pin`,
-      );
+    // The pin is exempt from the migration gate, so check both layouts.
+    checkControlDirectory(controlDir);
+    for (const candidate of [
+      controlDir,
+      legacySupervisorDirectory(ctx.store),
+    ]) {
+      const state = (await optional(join(candidate, "state.json"))) as {
+        running?: boolean;
+        supervisorVersion?: string;
+      } | null;
+      if (state?.running || supervisorLiveness(candidate) !== null)
+        throw new Error(
+          `Stop the supervisor${state?.supervisorVersion ? ` (${state.supervisorVersion})` : ""} before changing the project pin`,
+        );
+    }
     if (policy.requiredVersion === pkg.version)
       return output({
         version: 1,
@@ -426,6 +459,19 @@ async function main() {
         "crewplane configure --file PATH",
       ],
     });
+  }
+  if (command === "migrate") {
+    // Migration adopts agent-writable legacy state into the control plane.
+    if (process.env.CREWPLANE_HEADLESS_LANE)
+      throw new Error("migrate is unavailable to headless agents");
+    const set = flags(rest, ["--dry-run"]);
+    return output(
+      await migrateControl({
+        store: ctx.store,
+        control: controlDir,
+        dryRun: set.has("--dry-run"),
+      }),
+    );
   }
   if (command === "init") {
     if (rest.length) throw new Error("init takes no options");
@@ -490,6 +536,7 @@ async function main() {
       if (problem)
         throw new Error(`Lane ${laneId} instructions unavailable: ${problem}`);
     }
+    await ensureControlDirectory(directory);
     const release = await acquire(directory);
     try {
       const state = await optional(join(directory, "state.json"));
@@ -922,6 +969,7 @@ async function main() {
     }
     if (value.lane && !(value.lane in (await readConfig(directory)).lanes))
       throw new Error("Unknown configured agent");
+    if (directory === controlDir) await ensureControlDirectory(directory);
     await mkdir(join(directory, "commands"), { recursive: true, mode: 0o700 });
     const id = randomUUID();
     await publishJson(join(directory, "commands", `${id}.json`), value);
@@ -1011,8 +1059,7 @@ async function main() {
   if (command === "watchdog") {
     if (rest.length !== 1)
       throw new Error("watchdog requires start, once or status");
-    process.env.CREWPLANE_COORD_DIR = ctx.store;
-    return watchdogMain(rest);
+    return watchdogMain(rest, { control: controlDir });
   }
   if (command === "dashboard") {
     const opts = options(rest, ["--port", "--controls"]);
@@ -1063,7 +1110,7 @@ async function main() {
         );
         controller.abort();
       });
-    return serve(config, directory, controller.signal);
+    return serve(config, directory, controller.signal, { store: ctx.store });
   }
   throw new Error("Unknown command. Run crewplane --help.");
 }

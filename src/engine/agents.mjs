@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { checkControlDirectory } from "../control.ts";
 import { gitEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson, syncDirectory } from "../io.ts";
 import { withProcessLock } from "../process-lock.ts";
@@ -85,6 +86,15 @@ async function context(cwd) {
   return { ...identity, policy: projectPolicy(identity.primary) };
 }
 
+/**
+ * Supervisor run state, for READING only: the child-side board CLI never writes
+ * the control directory. An unsafe directory fails closed; an absent one means
+ * no supervisor has run for this project.
+ */
+async function controlState(ctx) {
+  if (!checkControlDirectory(ctx.control)) return null;
+  return read(join(ctx.control, "state.json"), null);
+}
 function taskPath(ctx, id, file) {
   return join(ctx.store, "tasks", task(id), file);
 }
@@ -315,7 +325,7 @@ async function executionGuard(
   revision = false,
   checkpoint = false,
 ) {
-  const state = await read(join(ctx.store, "supervisor", "state.json"), null);
+  const state = await controlState(ctx);
   for (const record of Object.values(state?.records ?? {})) {
     ensure(
       record.lane !== agent ||
@@ -816,10 +826,7 @@ async function execute(command, o, ctx) {
       !(await read(taskPath(ctx, id, "accepted.json"), null)),
       "Accepted work needs a new task, not release",
     );
-    const runtime = await read(
-      join(ctx.store, "supervisor", "state.json"),
-      null,
-    );
+    const runtime = await controlState(ctx);
     ensure(
       !Object.values(runtime?.records ?? {}).some(
         (r) =>

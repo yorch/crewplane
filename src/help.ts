@@ -35,6 +35,7 @@ Usage: crewplane [--project PATH] COMMAND
   evidence list|create|append|manifest  Manage bounded screenshot/video artifacts
   monitor [--once|--status]     Observe task progress and unanswered messages
   watchdog start|once|status    Independent notice-only health observer
+  migrate [--dry-run]          Move legacy in-store supervisor state to the private control directory
   update [--check] [--force]   Replace this release binary with the latest one
   --help | --version
 

@@ -91,7 +91,13 @@ const baseNames = new Set([
   "GIT_CONFIG_NOSYSTEM",
   "GIT_EDITOR",
   "GIT_TERMINAL_PROMPT",
-  // Crewplane location settings the board CLI needs inside the child.
+  // Crewplane location settings the board CLI needs inside the child. The
+  // board location (CREWPLANE_COORD_DIR) is set by the supervisor; the control
+  // directory is never passed. CREWPLANE_STATE_DIR is only the operator's base
+  // override, so `crewplane agents` can derive the same directory to READ run
+  // state (the CLI never writes there from a child). Read-only intent is
+  // enforced by a sandbox, not by Crewplane.
+  "CREWPLANE_STATE_DIR",
   "CREWPLANE_EXECUTABLE",
   "CREWPLANE_RELEASES_DIR",
   "CREWPLANE_CACHE_DIR",

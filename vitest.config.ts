@@ -18,6 +18,8 @@ export default defineConfig({
     // Keep updater caches and supervisor registrations out of $HOME.
     env: {
       CREWPLANE_CACHE_DIR: mkdtempSync(join(tmpdir(), "crewplane-test-cache-")),
+      // Control directories land here, never in the real home directory.
+      CREWPLANE_STATE_DIR: mkdtempSync(join(tmpdir(), "crewplane-test-state-")),
     },
     environment: "node",
     testTimeout: 30000,

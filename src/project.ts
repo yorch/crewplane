@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
+import { controlDirectory } from "./control.ts";
 import { gitEnvironment } from "./environment.ts";
 
 /** Canonicalize existing ancestors without creating a store during discovery. */
@@ -345,13 +346,16 @@ export function discoverProject(cwd: string) {
     !isAbsolute(process.env.CREWPLANE_COORD_DIR)
   )
     throw new Error("CREWPLANE_COORD_DIR must be an absolute shared path");
+  const primaryRoot = realpathSync(primary);
   return {
     root,
     common,
-    primary: realpathSync(primary),
+    primary: primaryRoot,
+    /** Board: tasks, messages, evidence, traces. Agents may write it. */
     store: canonicalStore(
-      process.env.CREWPLANE_COORD_DIR ||
-        join(realpathSync(primary), ".crewplane-state"),
+      process.env.CREWPLANE_COORD_DIR || join(primaryRoot, ".crewplane-state"),
     ),
+    /** Control plane: private per-user directory outside the project. */
+    control: controlDirectory(primaryRoot),
   };
 }

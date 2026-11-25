@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
+import { checkControlDirectory } from "../../control.ts";
 import { durableMkdir, publishJson } from "../../io.ts";
 import {
   coordinatorOf,
@@ -64,11 +65,11 @@ const fingerprint = (value: unknown): string | null =>
 const operationFile =
   /^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.json$/i;
 async function operations(
-  store: string,
+  control: string,
   now: number,
 ): Promise<WatchdogInput["pendingOperations"]> {
   try {
-    const directory = join(store, "supervisor/commands");
+    const directory = join(control, "commands");
     const stat = await lstat(directory);
     if (
       !stat.isDirectory() ||
@@ -152,16 +153,14 @@ const queueState = (
   return null;
 };
 export async function readHealth(
-  store: string,
+  control: string,
   now = Date.now(),
   observe: (pid: number | null) => Liveness = liveness,
 ): Promise<WatchdogInput> {
-  const state = object(await privateJson(join(store, "supervisor/state.json")));
-  const config = await privateJson(join(store, "supervisor/config.json"));
+  const state = object(await privateJson(join(control, "state.json")));
+  const config = await privateJson(join(control, "config.json"));
   const coordinator = coordinatorOf(config as Config);
-  const desired = object(
-    await privateJson(join(store, "supervisor/desired.json")),
-  );
+  const desired = object(await privateJson(join(control, "desired.json")));
   const rawRecords = object(state?.records);
   const recordValues = Object.values(rawRecords ?? {});
   const records = recordValues
@@ -300,7 +299,7 @@ export async function readHealth(
   }
   queue.push(...projected.slice(0, 64 - queue.length));
   const maxParallel = object(state?.scheduling)?.maxParallel;
-  const pendingOperations = await operations(store, now);
+  const pendingOperations = await operations(control, now);
   const availableCapacity =
     typeof maxParallel === "number" &&
     Number.isInteger(maxParallel) &&
@@ -423,7 +422,7 @@ export const settings: WatchdogSettings = {
   recoveryEnabled: false,
 };
 export async function deliverNotice(
-  store: string,
+  control: string,
   notice: { key: string; codes: string[] },
 ) {
   const faults = new Set([
@@ -453,8 +452,8 @@ export async function deliverNotice(
       throw Error("Unsafe notice directory");
   };
   const atomicNotice = (path: string, value: unknown) =>
-    publishJson(path, value, { directoryRoot: store });
-  const directory = join(store, "watchdog");
+    publishJson(path, value, { directoryRoot: control });
+  const directory = join(control, "watchdog");
   await safeDirectory(directory);
   await atomicNotice(join(directory, "notice.json"), {
     version: 1,
@@ -464,39 +463,38 @@ export async function deliverNotice(
   });
   // A notice is a bounded informational wake-up, never a retry, acceptance,
   // budget increase, service restart, or override of an intentional stop/hold.
-  const intent = object(
-    await privateJson(join(store, "supervisor/desired.json")),
-  );
-  const state = object(await privateJson(join(store, "supervisor/state.json")));
+  const intent = object(await privateJson(join(control, "desired.json")));
+  const state = object(await privateJson(join(control, "state.json")));
   if (
     intent?.desiredRunning !== true ||
     state?.running !== true ||
     typeof state.generation !== "string"
   )
     return;
-  await safeDirectory(join(store, "supervisor"));
-  await safeDirectory(join(store, "supervisor/commands"));
-  await atomicNotice(
-    join(store, "supervisor/commands", `${randomUUID()}.json`),
-    {
-      action: "nudge",
-      generation: state.generation,
-      lane: coordinatorOf(
-        (await privateJson(join(store, "supervisor/config.json"))) as Config,
-      ),
-      at: new Date().toISOString(),
-      text: "Watchdog reports an orchestration condition. Read private watchdog status and the task/operation queue. Preserve operator holds, failure pauses, phase gates and runtime budgets.",
-    },
-  );
+  await safeDirectory(control);
+  await safeDirectory(join(control, "commands"));
+  await atomicNotice(join(control, "commands", `${randomUUID()}.json`), {
+    action: "nudge",
+    generation: state.generation,
+    lane: coordinatorOf(
+      (await privateJson(join(control, "config.json"))) as Config,
+    ),
+    at: new Date().toISOString(),
+    text: "Watchdog reports an orchestration condition. Read private watchdog status and the task/operation queue. Preserve operator holds, failure pauses, phase gates and runtime budgets.",
+  });
 }
-export async function watchdogMain(args = process.argv.slice(2)) {
+export async function watchdogMain(
+  args = process.argv.slice(2),
+  where?: { control: string },
+) {
   const action = args[0];
   if (!["start", "once", "status"].includes(action ?? ""))
     throw Error("Use start|once|status");
-  const store =
-    process.env.CREWPLANE_COORD_DIR || discoverProject(process.cwd()).store;
-  if (!isAbsolute(store)) throw Error("CREWPLANE_COORD_DIR must be absolute");
-  const directory = join(store, "watchdog");
+  // Control state lives outside the project store; see src/control.ts.
+  const control = where?.control ?? discoverProject(process.cwd()).control;
+  if (!isAbsolute(control)) throw Error("Control directory must be absolute");
+  checkControlDirectory(control);
+  const directory = join(control, "watchdog");
   if (action === "status") {
     console.log(
       JSON.stringify(await privateJson(join(directory, "latest.json"))),
@@ -510,9 +508,9 @@ export async function watchdogMain(args = process.argv.slice(2)) {
     directory,
     settings,
     signal: controller.signal,
-    readInput: () => readHealth(store),
+    readInput: () => readHealth(control),
     notify: (notice: { key: string; codes: string[] }) =>
-      deliverNotice(store, notice),
+      deliverNotice(control, notice),
     requestRecovery: async () => {
       throw Error("Notice-only runner cannot restart supervisor");
     },

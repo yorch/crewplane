@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { controlDirectory } from "../../src/control.ts";
 
 if (process.argv[2] === "child") {
   if (process.argv[3] === "ignore-term") process.on("SIGTERM", () => {});
@@ -12,8 +13,10 @@ if (process.argv[2] === "child") {
   const mode = process.env.CREWPLANE_FIXTURE_MODE;
   if (!store || !pidFile || !mode)
     throw Error("Synthetic lifecycle context absent");
+  // The child is only given the board; it derives the control directory the
+  // same way `crewplane agents` does, to READ run state.
   const state = JSON.parse(
-    readFileSync(`${store}/supervisor/state.json`, "utf8"),
+    readFileSync(`${controlDirectory(process.cwd())}/state.json`, "utf8"),
   ) as { records: Record<string, { pid?: number; status: string }> };
   if (
     !Object.values(state.records).some(

@@ -1,15 +1,19 @@
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { controlDirectory } from "../control.ts";
 import { createDashboard } from "./dashboard.ts";
 
 const root = mkdtempSync(join(tmpdir(), "crewplane-controls-"));
@@ -96,7 +100,7 @@ it("requires exact Origin, token and JSON for hold/cancel only", async () => {
       )
     ).status,
   ).toBe(200);
-  const directory = join(root, ".crewplane-state/supervisor/commands");
+  const directory = join(controlDirectory(realpathSync(root)), "commands");
   const files = readdirSync(directory).filter((file) => file.endsWith(".json"));
   const commands = files.map(
     (file) =>
@@ -108,9 +112,13 @@ it("requires exact Origin, token and JSON for hold/cancel only", async () => {
     "cancel",
     "pause",
   ]);
+  // Commands are authority: nothing may land in the agent-writable store.
+  expect(existsSync(join(root, ".crewplane-state/supervisor"))).toBe(false);
+  expect(directory.startsWith(root)).toBe(false);
+  expect(statSync(directory).mode & 0o077).toBe(0);
 });
 it("answers 503 instead of hanging when a control cannot be queued", async () => {
-  const directory = join(root, ".crewplane-state/supervisor/commands");
+  const directory = join(controlDirectory(realpathSync(root)), "commands");
   const moved = `${directory}.moved`;
   renameSync(directory, moved);
   writeFileSync(directory, "not a directory");

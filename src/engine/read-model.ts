@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, readdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import type { Board, LiveTask } from "../contracts.ts";
+import { checkControlDirectory, controlDirectory } from "../control.ts";
 import { gitEnvironment } from "../environment.ts";
 import { relayPlannedTasks } from "../profiles/relay.ts";
 import {
@@ -207,18 +208,32 @@ export async function snapshot(root: string) {
   if (policy.roadmapFormat === "relay")
     tasks.push(...plannedTasks(plan, new Set(tasks.map((task) => task.id))));
   tasks.sort((a, b) => a.id.localeCompare(b.id));
+  // Control state is read from the private per-user directory, never the store.
+  const control = controlDirectory(root);
+  const usable = (() => {
+    try {
+      checkControlDirectory(control);
+      return true;
+    } catch {
+      return false; // unsafe control directory: treated as unavailable
+    }
+  })();
   const [runtime, configured] = await Promise.all([
-    readFile(join(board.store, "supervisor/state.json"), "utf8")
-      .then((s) => normalizeState(JSON.parse(s)))
-      .catch(() => null),
-    readFile(join(board.store, "supervisor/config.json"), "utf8")
-      .then((s) => normalizeConfig(JSON.parse(s)))
-      .catch(() => null),
+    usable
+      ? readFile(join(control, "state.json"), "utf8")
+          .then((s) => normalizeState(JSON.parse(s)))
+          .catch(() => null)
+      : null,
+    usable
+      ? readFile(join(control, "config.json"), "utf8")
+          .then((s) => normalizeConfig(JSON.parse(s)))
+          .catch(() => null)
+      : null,
   ]);
   for (const task of tasks)
     task.scheduling = schedulingReason(task, runtime, configured);
   const headless = await headlessStatus(
-    board.store,
+    control,
     board.tasks.filter((t) => !t.accepted).map((t) => t.assignment.owner),
   );
   // Branch names are decoration: a slow or failing git must not fail the snapshot.
@@ -363,7 +378,7 @@ export async function snapshot(root: string) {
     coordinator: coordinatorOf(configured ?? policy),
     updatedAt: new Date().toISOString(),
     monitor: await monitorStatus(board.store),
-    watchdog: await watchdogHealth(board.store),
+    watchdog: await watchdogHealth(control),
     headless: {
       ...headless,
       configState:

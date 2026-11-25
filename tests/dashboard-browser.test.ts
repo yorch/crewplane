@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Browser, chromium, type Page } from "@playwright/test";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { controlDirectory } from "../src/control.ts";
 import { createTraceStore } from "../src/engine/operational-traces.ts";
 
 const bin = resolve("dist/crewplane");
@@ -180,9 +181,10 @@ beforeAll(async () => {
   await writer.emit({ kind: "tool-start", tool: "read", status: "running" });
   await writer.finish("finished", "waiting");
   // A persisted observation with a real observed model; no process is started.
-  await mkdir(join(root, ".crewplane-state/supervisor"), { recursive: true });
+  const control = controlDirectory(root);
+  await mkdir(control, { recursive: true, mode: 0o700 });
   await writeFile(
-    join(root, ".crewplane-state/supervisor/state.json"),
+    join(control, "state.json"),
     JSON.stringify({
       version: 1,
       running: false,

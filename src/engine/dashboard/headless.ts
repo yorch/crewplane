@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config, State } from "../../contracts.ts";
+import { checkControlDirectory } from "../../control.ts";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -209,18 +210,20 @@ export function projectHeadless(
   };
 }
 
-export async function readHeadless(store: string, knownAgents: string[] = []) {
+export async function readHeadless(
+  control: string,
+  knownAgents: string[] = [],
+) {
   async function read<T>(file: string): Promise<T | null> {
     try {
-      return JSON.parse(
-        await readFile(join(store, "supervisor", file), "utf8"),
-      ) as T;
+      return JSON.parse(await readFile(join(control, file), "utf8")) as T;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
   }
   try {
+    checkControlDirectory(control);
     const [config, state] = await Promise.all([
       read<Config>("config.json").catch(() => null),
       read<State>("state.json"),
