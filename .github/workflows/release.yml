@@ -22,15 +22,13 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-  build:
+  verify:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - { os: ubuntu-latest, name: linux }
-          - { os: macos-latest, name: macos }
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -58,6 +56,33 @@ jobs:
       - run: bun run verify
         env:
           TMPDIR: /tmp
+  # The signed binaries come from a clean checkout that never runs tests, the
+  # browser install or any verification tooling: only dependencies installed
+  # without lifecycle scripts, then the release build.
+  build:
+    needs: [release-please, verify]
+    if: needs.release-please.outputs.release_created == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux }
+          - { os: macos-latest, name: macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Tag must match package.json
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: test "v$(bun -p 'require("./package.json").version')" = "$TAG"
       - name: Package
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
@@ -82,6 +107,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.1
