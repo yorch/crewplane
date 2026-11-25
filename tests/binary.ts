@@ -438,45 +438,56 @@ try {
     });
   });
   const dashboard = start("dashboard", "--port", String(port));
+  await until(
+    async () => nativeLogs.includes(`http://127.0.0.1:${port}/?token=`),
+    "dashboard session URL",
+  );
+  const token =
+    new RegExp(`http://127.0.0.1:${port}/\\?token=([A-Za-z0-9_-]+)`).exec(
+      nativeLogs,
+    )?.[1] ?? "";
+  assert.equal(token.length, 43);
+  const dget = (path: string, headers: Record<string, string> = {}) =>
+    fetch(`http://127.0.0.1:${port}${path}`, {
+      headers: { "x-crewplane-token": token, ...headers },
+      redirect: "manual",
+    });
   await until(async () => {
     try {
-      return (await fetch(`http://127.0.0.1:${port}/api/snapshot`)).ok;
+      return (await dget("/api/snapshot")).ok;
     } catch {
       return false;
     }
   }, "embedded dashboard");
-  const html = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-  assert(html.includes("Crewplane"));
-  assert(
-    (
-      await (await fetch(`http://127.0.0.1:${port}/dashboard.js`)).text()
-    ).includes("fetch"),
+  // Reads need the per-launch session; the printed URL trades it for a cookie.
+  assert.equal(
+    (await fetch(`http://127.0.0.1:${port}/api/snapshot`)).status,
+    401,
   );
-  const snap = (await (
-    await fetch(`http://127.0.0.1:${port}/api/snapshot`)
-  ).json()) as { headless: { state: string }; tasks: unknown[] };
+  const exchange = await fetch(`http://127.0.0.1:${port}/?token=${token}`, {
+    redirect: "manual",
+  });
+  assert.equal(exchange.status, 303);
+  assert(/HttpOnly/.test(exchange.headers.get("set-cookie") ?? ""));
+  const html = await (await dget("/")).text();
+  assert(html.includes("Crewplane"));
+  assert((await (await dget("/dashboard.js")).text()).includes("fetch"));
+  const snap = (await (await dget("/api/snapshot")).json()) as {
+    headless: { state: string };
+    tasks: unknown[];
+  };
   assert.equal(snap.headless.state, "stopped");
   assert.equal(snap.tasks.length, 2);
   assert.equal(
-    (
-      await fetch(`http://127.0.0.1:${port}/api/snapshot`, {
-        headers: { Origin: "https://example.invalid" },
-      })
-    ).status,
+    (await dget("/api/snapshot", { Origin: "https://example.invalid" })).status,
     403,
   );
-  const runs = await (await fetch(`http://127.0.0.1:${port}/api/runs`)).json();
+  const runs = await (await dget("/api/runs")).json();
   assert(JSON.stringify(runs).includes("builder"));
-  const image = await fetch(
-    `http://127.0.0.1:${port}/api/evidence/artifacts/${artifact.artifactId}`,
-  );
+  const image = await dget(`/api/evidence/artifacts/${artifact.artifactId}`);
   assert.equal(image.headers.get("content-type"), "image/png");
   assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
-  assert.equal(
-    (await fetch(`http://127.0.0.1:${port}/api/evidence/artifacts/not-an-id`))
-      .status,
-    404,
-  );
+  assert.equal((await dget("/api/evidence/artifacts/not-an-id")).status, 404);
   dashboard.kill("SIGTERM");
   await closed(dashboard);
   command("watchdog", "once");

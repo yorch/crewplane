@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -26,9 +26,28 @@ const tokenMatches = (given: unknown, expected: string) => {
   const b = Buffer.from(expected);
   return a.length === b.length && timingSafeEqual(a, b);
 };
+/** Fresh per-launch secret for dashboard read access. */
+export const newSessionToken = () => randomBytes(32).toString("base64url");
+const cookieValue = (header: string | undefined, name: string) => {
+  for (const part of (header ?? "").split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return rest.join("=");
+  }
+  return undefined;
+};
 export function createDashboard(
   root: string,
-  options: { controls?: { token: string } } = {},
+  options: {
+    controls?: { token: string };
+    /**
+     * Require a per-launch session for every read. A visitor presents the token
+     * once as `/?token=…`, receives an HttpOnly SameSite=Strict cookie and is
+     * redirected to a clean URL; scripts may send `x-crewplane-token` instead.
+     * Omitted for embedding and tests, where the server is not reachable by
+     * other local users.
+     */
+    session?: { token: string };
+  } = {},
 ) {
   let traces: ReturnType<typeof createTraceStore> | undefined;
   const getTraces = () =>
@@ -57,6 +76,7 @@ export function createDashboard(
     const expectedHost = `127.0.0.1:${address}`;
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; media-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
@@ -143,6 +163,38 @@ export function createDashboard(
     if (request.method !== "GET") {
       response.writeHead(405, { Allow: "GET" }).end();
       return;
+    }
+    const session = options.session;
+    if (session) {
+      const cookie = `crewplane_session_${address}`;
+      const url = new URL(request.url ?? "/", `http://${expectedHost}`);
+      if (url.pathname === "/" && url.searchParams.has("token")) {
+        if (!tokenMatches(url.searchParams.get("token"), session.token)) {
+          response.writeHead(401).end("Unauthorized");
+          return;
+        }
+        response
+          .writeHead(303, {
+            "Set-Cookie": `${cookie}=${session.token}; HttpOnly; SameSite=Strict; Path=/`,
+            Location: "/",
+          })
+          .end();
+        return;
+      }
+      if (
+        !tokenMatches(
+          cookieValue(request.headers.cookie, cookie),
+          session.token,
+        ) &&
+        !tokenMatches(request.headers["x-crewplane-token"], session.token)
+      ) {
+        response
+          .writeHead(401, { "Content-Type": "text/plain; charset=utf-8" })
+          .end(
+            "Unauthorized. Open the URL printed by `crewplane dashboard` (it includes the session token).",
+          );
+        return;
+      }
     }
     try {
       if (request.url === "/api/snapshot") {
