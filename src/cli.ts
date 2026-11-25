@@ -10,6 +10,12 @@ import {
 import { dirname, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import type { Config, State } from "./contracts.ts";
+import {
+  type DoctorProblem,
+  effectiveBinary,
+  failureMessage,
+  probeBinary,
+} from "./doctor.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
 import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
@@ -21,6 +27,7 @@ import { createEvidenceStore } from "./engine/evidence/store.ts";
 import {
   harnessCapabilities,
   instructionFileProblem,
+  validHarness,
 } from "./engine/harness.ts";
 import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
@@ -503,33 +510,110 @@ async function main() {
   }
   if (command === "doctor") {
     if (rest.length) throw new Error("doctor takes no options");
-    const config = await optional(join(directory, "config.json"));
-    if (config) validateConfig(config);
+    const problems: DoctorProblem[] = [];
+    let config: Config | null = null;
+    let configState = "not-configured";
+    try {
+      config = (await optional(
+        join(directory, "config.json"),
+      )) as Config | null;
+    } catch (error) {
+      configState = "invalid";
+      problems.push({
+        code: "CONFIG_INVALID",
+        message: failureMessage(error, "Configuration is unreadable"),
+      });
+    }
+    if (config) {
+      try {
+        // Binaries are probed per lane below, so a missing one must not hide
+        // the first other configuration error.
+        validateConfig(config, { checkBinary: false });
+        configState = "valid";
+      } catch (error) {
+        configState = "invalid";
+        problems.push({
+          code: "CONFIG_INVALID",
+          message: failureMessage(error, "Configuration is invalid"),
+        });
+      }
+    } else if (configState === "not-configured")
+      problems.push({
+        code: "CONFIG_MISSING",
+        message:
+          "Project is not configured; run crewplane configure --file PATH",
+      });
     // Retention failures only reach the update cache; surface them here, since a
     // silently stalled self-update is otherwise invisible.
-    const updateCache = await readUpdateCache(updateCachePath(process.env));
-    return output({
+    let updateCache: Awaited<ReturnType<typeof readUpdateCache>> = {
       version: 1,
-      update: {
-        latest: updateCache.latest ?? null,
-        lastAttemptAt: updateCache.lastAttemptAt ?? null,
-        error: updateCache.error ?? null,
-        retainedReleases: safeRoot(),
-      },
-      root,
-      git: execFileSync("git", ["--version"], { encoding: "utf8" }).trim(),
-      runtime: "bun",
-      config: config ? "valid" : "not-configured",
-      harnesses: config
-        ? Object.entries((config as Config).lanes).map(([id, lane]) => ({
+    };
+    try {
+      updateCache = await readUpdateCache(updateCachePath(process.env));
+    } catch (error) {
+      problems.push({
+        code: "CACHE_DIR_INVALID",
+        message: failureMessage(error, "Update cache directory is invalid"),
+      });
+    }
+    let releases: string;
+    try {
+      releases = printablePath(releasesRoot());
+    } catch (error) {
+      releases = `(unavailable: ${error instanceof Error ? error.message : "invalid environment"})`;
+      problems.push({
+        code: "RELEASES_ROOT_INVALID",
+        message: failureMessage(error, "Releases directory is invalid"),
+      });
+    }
+    let git: string | null = null;
+    try {
+      git = execFileSync("git", ["--version"], { encoding: "utf8" }).trim();
+    } catch {
+      // Project discovery already ran git, so this is not expected to fail.
+    }
+    const reportedPaths = new Set<string>();
+    const probeFor = async (harness: string, path?: string, lane?: string) => {
+      const { probe, code } = await probeBinary(path, harness);
+      if (code && !(probe.path !== null && reportedPaths.has(probe.path))) {
+        problems.push({
+          code,
+          ...(lane === undefined ? {} : { lane }),
+          message: probe.problem ?? "binary unusable",
+        });
+        if (probe.path !== null) reportedPaths.add(probe.path);
+      }
+      return probe;
+    };
+    const harnesses: unknown[] = [];
+    if (config && typeof config.lanes === "object" && config.lanes)
+      for (const [id, lane] of Object.entries(config.lanes)) {
+        try {
+          if (typeof lane !== "object" || lane === null || Array.isArray(lane))
+            throw new Error("Lane is invalid");
+          const harness = lane.harness ?? "codex";
+          if (!validHarness(harness)) throw new Error("Unsupported harness");
+          const instructions = lane.instructionsPath
+            ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
+            : "none";
+          if (instructions !== "none" && instructions !== "ok")
+            problems.push({
+              code: "INSTRUCTIONS_INVALID",
+              lane: id,
+              message: instructions,
+            });
+          harnesses.push({
             id,
-            harness: lane.harness ?? "codex",
-            capabilities: harnessCapabilities[lane.harness ?? "codex"],
+            harness,
+            binary: await probeFor(
+              harness,
+              effectiveBinary(config ?? {}, harness),
+              id,
+            ),
+            capabilities: harnessCapabilities[harness],
             permissions: lanePermissions(lane),
             model: lane.piModel ?? lane.model ?? null,
-            instructions: lane.instructionsPath
-              ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
-              : "none",
+            instructions,
             passEnv: lane.passEnv ?? [],
             budgets: {
               maxRunsPerHour: lane.maxRunsPerHour ?? null,
@@ -553,12 +637,44 @@ async function main() {
                     auto: lane.opencodeAuto === true,
                   }
                 : null,
-          }))
-        : [],
-      globalInstructions: (() => {
-        const problem = instructionFileProblem(root, policy.instructionsPath);
-        return problem ?? "ok";
-      })(),
+          });
+        } catch (error) {
+          problems.push({
+            code: "CONFIG_INVALID",
+            lane: id,
+            message: failureMessage(error, "Lane is invalid"),
+          });
+        }
+      }
+    // The top-level binary is probed itself, even when no lane resolves to it;
+    // a failure already reported for the same path by a lane is not repeated.
+    const defaultBinary = config?.binary
+      ? await probeFor("default", config.binary)
+      : null;
+    const globalProblem = instructionFileProblem(root, policy.instructionsPath);
+    // A missing global file is reported at prompt time, not a hard failure.
+    const warnings: DoctorProblem[] = globalProblem
+      ? [{ code: "INSTRUCTIONS_GLOBAL_UNAVAILABLE", message: globalProblem }]
+      : [];
+    process.exitCode = problems.length ? 2 : 0;
+    return output({
+      version: 1,
+      ok: problems.length === 0,
+      problems,
+      warnings,
+      update: {
+        latest: updateCache.latest ?? null,
+        lastAttemptAt: updateCache.lastAttemptAt ?? null,
+        error: updateCache.error ?? null,
+        retainedReleases: releases,
+      },
+      root,
+      git,
+      runtime: standaloneBinary() ? "compiled" : "bun",
+      config: configState,
+      defaultBinary,
+      harnesses,
+      globalInstructions: globalProblem ?? "ok",
       providerCredentials: "not-probed",
       servicesStarted: false,
     });

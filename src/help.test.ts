@@ -109,3 +109,8 @@ it("documents the dashboard controls opt-in and the agents help pointer", () => 
   expect(help).toContain("dashboard [--port PORT] [--controls true]");
   expect(help).toContain("crewplane agents help");
 });
+
+it("documents what doctor probes and its exit code", () => {
+  expect(help).toMatch(/doctor\s+Diagnose config and harness binaries/);
+  expect(help).toContain("exit 2 on problems");
+});

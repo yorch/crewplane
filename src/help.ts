@@ -7,7 +7,7 @@ export const help = `Crewplane — local orchestration for coding agents
 Usage: crewplane [--project PATH] COMMAND
   init                         Create project policy and private file store
   pin --confirm true           Point the project's version pin at this release
-  doctor                       Check project and configured harness prerequisites
+  doctor                       Diagnose config and harness binaries (exit 2 on problems)
   configure --file PATH        Validate and install an explicit supervisor config
   agents COMMAND [OPTIONS]     Task and message coordination; see crewplane agents help
   task list                    Show durable tasks and messages

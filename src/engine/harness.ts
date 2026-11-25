@@ -290,13 +290,20 @@ const costCapProblem = (value: unknown): string | null => {
     return "Claude maxCostUsdPerRun must be 0.01-100 with at most two decimals";
   return null;
 };
-export function validateHarness(config: HarnessConfig, lane: LaneHarness) {
+export function validateHarness(
+  config: HarnessConfig,
+  lane: LaneHarness,
+  options: { checkBinary?: boolean } = {},
+) {
   const harness = harnessName(lane);
   if (!validHarness(harness)) throw new Error("Unsupported harness");
   const binary =
     config.binaries?.[harness] ??
     (harness === "codex" ? config.binary : undefined);
-  if (!binary || !isAbsolute(binary) || !existsSync(binary))
+  if (
+    options.checkBinary !== false &&
+    (!binary || !isAbsolute(binary) || !existsSync(binary))
+  )
     throw new Error(`Missing absolute ${harness} binary`);
   if (
     lane.sessionEpoch !== undefined &&
@@ -424,7 +431,9 @@ export function validateHarness(config: HarnessConfig, lane: LaneHarness) {
     if (lane.model !== undefined && !codexModelId.test(lane.model))
       throw new Error("Invalid Codex model identifier");
   }
-  return binary;
+  // SAFETY: checkBinary defaults to true, which throws above unless binary is a
+  // non-empty string; only doctor opts out and ignores the result.
+  return binary as string;
 }
 export function harnessKey(lane: LaneHarness | undefined) {
   return lane?.sessionEpoch

@@ -182,7 +182,11 @@ try {
   const configFile = join(temp, "runtime.json");
   writeFileSync(configFile, JSON.stringify(config));
   json("configure", "--file", configFile);
-  assert.equal(json("doctor").config, "valid");
+  const doctor = json("doctor");
+  assert.equal(doctor.config, "valid");
+  assert.equal(doctor.runtime, "compiled");
+  assert.equal(doctor.defaultBinary.ok, true);
+  assert.equal(doctor.harnesses[0].binary.ok, true);
   assert.equal(json("status").state, null);
   const agents = (...args: string[]) => json("agents", ...args);
   for (const [id, owner, path] of [
