@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { controlDirectory } from "../src/control.ts";
 
 const bin = resolve("dist/crewplane");
 const cleanup: string[] = [];
@@ -104,8 +105,8 @@ function project() {
     expect(result.status, result.stderr).toBe(0);
   };
   const storedConfig = () => {
-    const store = (JSON.parse(run(["init"]).stdout) as { store: string }).store;
-    return join(store, "supervisor", "config.json");
+    const root = (JSON.parse(run(["init"]).stdout) as { root: string }).root;
+    return join(controlDirectory(root), "config.json");
   };
   const doctor = (env: Record<string, string> = {}) => {
     const result = run(["doctor"], env);

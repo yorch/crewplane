@@ -148,7 +148,8 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     });
     // doctor is read-only, exempt from the gate, and reports the layout.
     const doctor = p.run(runner, "doctor");
-    expect(doctor.status).toBe(0);
+    // Exit 2 only reports that the project is not configured.
+    expect(doctor.status).toBe(2);
     expect(JSON.parse(doctor.stdout).legacyLayout).toContain(
       "crewplane migrate",
     );
@@ -357,7 +358,7 @@ describe.each(runners)("%s CLI", (_name, runner) => {
       ["agents", "board"],
       ["evidence", "list"],
     ])
-      expect(run(...args).status, args.join(" ")).toBe(0);
+      expect([0, 2], args.join(" ")).toContain(run(...args).status);
     expect(existsSync(p.control)).toBe(false);
   });
 

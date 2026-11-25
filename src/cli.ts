@@ -12,12 +12,6 @@ import { dirname, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
 import type { Config, State } from "./contracts.ts";
 import {
-  type DoctorProblem,
-  effectiveBinary,
-  failureMessage,
-  probeBinary,
-} from "./doctor.ts";
-import {
   bindControl,
   checkBinding,
   checkControlDirectory,
@@ -26,6 +20,12 @@ import {
   legacySupervisorDirectory,
   rebindControl,
 } from "./control.ts";
+import {
+  type DoctorProblem,
+  effectiveBinary,
+  failureMessage,
+  probeBinary,
+} from "./doctor.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
 import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
