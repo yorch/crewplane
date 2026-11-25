@@ -20,13 +20,13 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { standaloneBinary } from "./environment.ts";
 import { sha256Hex } from "./hash.ts";
 import { syncDirectory } from "./io.ts";
+import { isProcessAlive } from "./liveness.ts";
 import { embeddedReleaseTrust } from "./release-keys.ts";
 import {
   type ReleaseTrust,
   signatureRequired,
   verifyReleaseSignature,
 } from "./release-signing.ts";
-import { isProcessAlive } from "./liveness.ts";
 
 /**
  * Root holding one retained binary per release this machine's shared binary has
@@ -1003,7 +1003,7 @@ export async function downloadRelease(
       keys,
       tag,
       asset,
-      sha256: digest(bytes),
+      sha256: sha256Hex(bytes),
       signatureText,
     });
     return { asset, bytes, integrity: "signed", signingKey: checked.keyId };
