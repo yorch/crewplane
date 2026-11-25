@@ -22,15 +22,13 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-  build:
+  verify:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     strategy:
       fail-fast: true
       matrix:
-        include:
-          - { os: ubuntu-latest, name: linux }
-          - { os: macos-latest, name: macos }
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -58,6 +56,33 @@ jobs:
       - run: bun run verify
         env:
           TMPDIR: /tmp
+  # The signed binaries come from a clean checkout that never runs tests, the
+  # browser install or any verification tooling: only dependencies installed
+  # without lifecycle scripts, then the release build.
+  build:
+    needs: [release-please, verify]
+    if: needs.release-please.outputs.release_created == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux }
+          - { os: macos-latest, name: macos }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Tag must match package.json
+        env:
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: test "v$(bun -p 'require("./package.json").version')" = "$TAG"
       - name: Package
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
@@ -79,13 +104,34 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.1
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           merge-multiple: true
           path: release
+      - name: install.sh keys must equal release-keys.json
+        run: bun scripts/sync-install-keys.ts --check
+      # With keys listed in release-keys.json the secret is mandatory: this step
+      # fails (no unsigned release) when it is missing or does not match a
+      # listed key. With no keys it prints a notice and signs nothing.
+      - name: Sign release assets
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          TAG: ${{ needs.release-please.outputs.tag_name }}
+        run: |
+          assets=$(find release -maxdepth 1 -type f -name 'crewplane-*' ! -name '*.sha256' ! -name '*.sig')
+          # shellcheck disable=SC2086
+          bun scripts/sign-release.ts --tag "$TAG" $assets
       - name: Attach binaries to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+        # No --clobber: published assets are immutable (see docs/RELEASING.md).
+        run: gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY"

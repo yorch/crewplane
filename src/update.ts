@@ -18,6 +18,12 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { syncDirectory } from "./io.ts";
+import { embeddedReleaseTrust } from "./release-keys.ts";
+import {
+  type ReleaseTrust,
+  signatureRequired,
+  verifyReleaseSignature,
+} from "./release-signing.ts";
 
 /**
  * Root holding one retained binary per release this machine's shared binary has
@@ -189,9 +195,16 @@ export type UpdateOutcome = {
   asset?: string;
   target?: string;
   reason?: string;
+  /** How the installed bytes were authenticated; present once downloaded. */
+  integrity?: "signed" | "sha256";
+  signingKey?: string;
+  /** Why a release was accepted without a signature, when keys exist. */
+  note?: string;
 };
 
 export type UpdateRequest = {
+  /** Trusted keys; defaults to the list bundled into this build. */
+  releaseTrust?: ReleaseTrust;
   current: string;
   checkOnly?: boolean;
   auto?: boolean;
@@ -893,12 +906,28 @@ export async function resolveLatest(
   return parseTag(tagName);
 }
 
+export type Download = {
+  asset: string;
+  bytes: Uint8Array;
+  integrity: "signed" | "sha256";
+  signingKey?: string;
+  note?: string;
+};
+
+/**
+ * With trusted keys configured, a release at or after `signedSince` (every
+ * release when it is unset) needs a valid signature: a missing or invalid one
+ * is an error and never degrades to the checksum alone. Without keys, or for
+ * a release older than `signedSince`, the checksum is the only integrity check
+ * and the outcome says so.
+ */
 export async function downloadRelease(
   tag: string,
   target: ReleaseTarget,
   config: UpdateConfig,
   fetchImpl: FetchLike = fetch,
-): Promise<{ asset: string; bytes: Uint8Array }> {
+  trust: ReleaseTrust = embeddedReleaseTrust(),
+): Promise<Download> {
   const asset = assetName(tag, target),
     base = `${config.base}/${tag}`,
     headers = { "user-agent": "crewplane-updater" };
@@ -919,7 +948,48 @@ export async function downloadRelease(
   assertDigest(bytes, expected, asset);
   if (!looksExecutable(bytes, target.os))
     throw new Error(`Downloaded ${asset} is not a ${target.os} executable`);
-  return { asset, bytes };
+  if (!signatureRequired(trust, tag))
+    return {
+      asset,
+      bytes,
+      integrity: "sha256",
+      ...(trust.keys.length === 0
+        ? {}
+        : {
+            note: `${tag} predates signed releases (signedSince ${trust.signedSince}); installed on SHA-256 only`,
+          }),
+    };
+  const keys = trust.keys;
+  let signatureText: string;
+  try {
+    signatureText = await fetchText(
+      `${base}/${asset}.sig`,
+      fetchImpl,
+      config.timeoutMs,
+      headers,
+      { redirect: "follow", maxBytes: 4096 },
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "fetch failed";
+    throw new Error(
+      `Release signature missing or unreadable for ${asset}; refusing to install (${detail})`,
+    );
+  }
+  try {
+    const checked = verifyReleaseSignature({
+      keys,
+      tag,
+      asset,
+      sha256: digest(bytes),
+      signatureText,
+    });
+    return { asset, bytes, integrity: "signed", signingKey: checked.keyId };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "invalid";
+    throw new Error(
+      `Release signature invalid for ${asset}; refusing to install (${detail})`,
+    );
+  }
 }
 
 function runVersion(path: string): Promise<string> {
@@ -1094,6 +1164,7 @@ export async function runUpdate(
       targetPlatform,
       config,
       fetchImpl,
+      request.releaseTrust ?? embeddedReleaseTrust(),
     );
     await retainRelease(target, request.current, environment);
     if (!(await safeToReplace()))
@@ -1117,6 +1188,11 @@ export async function runUpdate(
       tag,
       target,
       asset: download.asset,
+      integrity: download.integrity,
+      ...(download.signingKey === undefined
+        ? {}
+        : { signingKey: download.signingKey }),
+      ...(download.note === undefined ? {} : { note: download.note }),
     });
   };
 
