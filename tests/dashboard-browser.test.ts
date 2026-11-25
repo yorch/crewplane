@@ -841,3 +841,54 @@ it("keeps selected state visible in forced colors and meets coarse-pointer targe
   await context.close();
   expect(errors).toEqual([]);
 }, 60000);
+
+it("does not rewrite the URL back to Runs when another view was already navigated to", async () => {
+  const { page, errors } = await open("#/overview");
+  const id = "1794100000500-00000000-0000-4000-8000-000000000001";
+  let release: () => void = () => {};
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const meta = {
+    version: 1,
+    runId: id,
+    lane: "custom-builder",
+    task: "WEB-1",
+    harness: "codex",
+    sessionId: null,
+    startedAt: "2026-11-08T00:00:00Z",
+    status: "finished",
+    events: 0,
+    bytes: 0,
+    truncated: false,
+    omitted: 0,
+    finalState: "waiting",
+  };
+  await page.route("**/api/runs**", async (route) => {
+    const url = new URL(route.request().url());
+    await gate;
+    await route.fulfill({
+      json:
+        url.pathname === "/api/runs"
+          ? { runs: [meta], nextCursor: null, incomplete: false }
+          : { meta, events: [], nextCursor: 0, incomplete: false },
+    });
+  });
+  await page.goto(`${base}#/runs`);
+  await page.locator("#view-runs:not([hidden])").waitFor();
+  // The browser has committed the new fragment but hashchange has not run yet.
+  await page.evaluate(() => history.pushState(null, "", "#/relationships"));
+  release();
+  await page
+    .locator("#runs-status")
+    .filter({ hasText: "Incremental private metadata" })
+    .waitFor();
+  expect(await hash(page)).toBe("#/relationships");
+  await page.evaluate(() =>
+    window.dispatchEvent(new HashChangeEvent("hashchange")),
+  );
+  await page.locator("#view-relationships:not([hidden])").waitFor();
+  expect(await hash(page)).toBe("#/relationships");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);

@@ -275,10 +275,15 @@
       if (viewActive && !selected && !urlRun && value.runs[0]) {
         const newest = value.runs[0].runId;
         selectRun(newest);
-        // Reflect the automatic choice in the URL without a history entry.
-        // urlRun is set first so the resulting route event is not a change.
-        urlRun = newest;
-        window.crewplane.setParams({ run: newest });
+        // Reflect the automatic choice in the URL without a history entry,
+        // but never while a navigation to another view is pending: the URL
+        // already names that view and the hashchange event has not run yet,
+        // so rewriting it would bounce the user back to Runs.
+        if (window.location.hash.startsWith("#/runs")) {
+          // urlRun is set first so the resulting route event is not a change.
+          urlRun = newest;
+          window.crewplane.setParams({ run: newest });
+        }
       }
       renderHistory();
       let status = runs.size
