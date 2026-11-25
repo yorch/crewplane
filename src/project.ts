@@ -21,7 +21,7 @@ function canonicalStore(path: string): string {
   const missing: string[] = [];
   while (true) {
     try {
-      return join(realpathSync(current), ...missing.reverse());
+      return join(realpathSync.native(current), ...missing.reverse());
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       const parent = dirname(current);
@@ -299,11 +299,11 @@ export function discoverProject(cwd: string) {
   }
   if (bare === "true")
     throw new Error("Crewplane requires a non-bare Git project");
-  const root = realpathSync(git("rev-parse", "--show-toplevel"));
-  const common = realpathSync(
+  const root = realpathSync.native(git("rev-parse", "--show-toplevel"));
+  const common = realpathSync.native(
     git("rev-parse", "--path-format=absolute", "--git-common-dir"),
   );
-  const gitDir = realpathSync(git("rev-parse", "--absolute-git-dir"));
+  const gitDir = realpathSync.native(git("rev-parse", "--absolute-git-dir"));
   const reportedPrimary = git("worktree", "list", "--porcelain", "-z")
     .split("\0")[0]
     ?.slice("worktree ".length);
@@ -319,7 +319,7 @@ export function discoverProject(cwd: string) {
         typeof binding.root !== "string"
       )
         throw new Error("Invalid primary binding");
-      primary = realpathSync(binding.root);
+      primary = realpathSync.native(binding.root);
       const actualCommon = execFileSync(
         "git",
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -330,7 +330,7 @@ export function discoverProject(cwd: string) {
           stdio: ["ignore", "pipe", "pipe"],
         },
       ).trim();
-      if (realpathSync(actualCommon) !== common)
+      if (realpathSync.native(actualCommon) !== common)
         throw new Error("Primary binding belongs to another repository");
     } catch {
       throw new Error(
@@ -345,7 +345,7 @@ export function discoverProject(cwd: string) {
     !isAbsolute(process.env.CREWPLANE_COORD_DIR)
   )
     throw new Error("CREWPLANE_COORD_DIR must be an absolute shared path");
-  const primaryRoot = realpathSync(primary);
+  const primaryRoot = realpathSync.native(primary);
   return {
     root,
     common,

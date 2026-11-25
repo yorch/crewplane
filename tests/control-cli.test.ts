@@ -8,6 +8,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,7 +122,6 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     seedLegacy(p.legacy);
     for (const args of [
       ["configure", "--file", "x.json"],
-      ["pause", "--all", "true"],
       ["resume", "--all", "true"],
       ["retry", "--lane", "a"],
       ["start"],
@@ -148,8 +149,11 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     });
     // doctor is read-only, exempt from the gate, and reports the layout.
     const doctor = p.run(runner, "doctor");
-    // Exit 2 only reports that the project is not configured.
+    // Exit 2: the project is not configured and the legacy layout is a problem.
     expect(doctor.status).toBe(2);
+    expect(
+      JSON.parse(doctor.stdout).problems.map((x: { code: string }) => x.code),
+    ).toContain("LEGACY_LAYOUT");
     expect(JSON.parse(doctor.stdout).legacyLayout).toContain(
       "crewplane migrate",
     );
@@ -293,6 +297,146 @@ describe.each(runners)("%s CLI", (_name, runner) => {
         ignoredPids: [sup.pid],
       });
       expect(existsSync(p.legacy)).toBe(false);
+    } finally {
+      sup.stop();
+    }
+  });
+
+  it("never lets an agent-writable marker or an empty legacy directory block a halt", () => {
+    const p = project();
+    p.run(runner, "init");
+    expect(p.run(runner, "pause", "--all", "true").status).toBe(0);
+    const marker = join(p.store, "control-binding.json");
+    // Garbage and a FIFO in place of the marker: halts still queue, promptly.
+    rmSync(marker, { force: true });
+    writeFileSync(marker, "{ garbage");
+    for (const args of [
+      ["stop"],
+      ["pause", "--all", "true"],
+      ["cancel", "--all", "true"],
+    ]) {
+      const result = p.run(runner, ...args);
+      expect(result.status, args.join(" ")).toBe(0);
+    }
+    rmSync(marker);
+    execFileSync("mkfifo", [marker]);
+    for (const args of [
+      ["stop"],
+      ["pause", "--all", "true"],
+      ["cancel", "--all", "true"],
+    ]) {
+      const result = p.run(runner, ...args);
+      expect(result.status, `${args.join(" ")} (fifo)`).toBe(0);
+    }
+    // An empty legacy supervisor directory is not state.
+    rmSync(marker);
+    mkdirSync(join(p.legacy, "commands"), { recursive: true });
+    for (const args of [
+      ["task", "list"],
+      ["agents", "board"],
+      ["stop"],
+      ["status"],
+    ]) {
+      const result = p.run(runner, ...args);
+      expect(result.status, args.join(" ")).toBe(0);
+      expect(result.stderr).not.toContain(legacyRefusal);
+    }
+  });
+
+  it("halts through hostile legacy files without blocking, failing or following links", async () => {
+    const p = project();
+    p.run(runner, "init");
+    const daemon = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      // A lease naming a same-user process that is not a supervisor: ambiguous.
+      mkdirSync(join(p.legacy, "commands"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(p.legacy, "watcher.lock"),
+        JSON.stringify({ pid: daemon.pid, token: "t" }),
+      );
+      execFileSync("mkfifo", [join(p.legacy, "state.json")]);
+      execFileSync("mkfifo", [join(p.legacy, "config.json")]);
+      const pause = p.run(runner, "pause", "--all", "true");
+      expect(pause.status).toBe(0);
+      const queued = JSON.parse(pause.stdout).id;
+      expect(existsSync(join(p.control, "commands", `${queued}.json`))).toBe(
+        true,
+      );
+      // A lane the (nonexistent) control config cannot vouch for is still halted.
+      const lane = p.run(runner, "pause", "--lane", "ghost");
+      expect(lane.status).toBe(0);
+      expect(lane.stderr).not.toContain("not configured");
+      // A symlinked legacy commands/ is never written through.
+      rmSync(join(p.legacy, "commands"), { recursive: true });
+      const outside = join(p.base, "outside");
+      mkdirSync(outside);
+      symlinkSync(outside, join(p.legacy, "commands"));
+      const linked = p.run(runner, "stop");
+      expect(linked.status).toBe(0);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(linked.stderr).toContain("not a plain directory");
+      // status reads the FIFO and a 600 MiB sparse file as "unreadable", fast.
+      const status = JSON.parse(p.run(runner, "status").stdout);
+      expect(status.unverifiedLegacy).toMatchObject({ state: "unreadable" });
+      rmSync(join(p.legacy, "state.json"));
+      writeFileSync(join(p.legacy, "state.json"), "");
+      truncateSync(join(p.legacy, "state.json"), 600 * 1024 * 1024);
+      const sparse = JSON.parse(p.run(runner, "status").stdout);
+      expect(sparse.unverifiedLegacy).toMatchObject({ state: "unreadable" });
+    } finally {
+      daemon.kill();
+    }
+  });
+
+  it("migrates after a halt was queued in the control directory and the halt stays in force", async () => {
+    const p = project();
+    p.run(runner, "init");
+    const daemon = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      seedLegacy(p.legacy);
+      writeFileSync(
+        join(p.legacy, "watcher.lock"),
+        JSON.stringify({ pid: daemon.pid, token: "t" }),
+      );
+      const halted = JSON.parse(p.run(runner, "pause", "--all", "true").stdout);
+      expect(existsSync(join(p.control, "commands", `${halted.id}.json`))).toBe(
+        true,
+      );
+      const done = JSON.parse(migrateReviewed(p, runner).stdout);
+      expect(done.status).toBe("migrated");
+      expect(existsSync(join(p.control, "commands", `${halted.id}.json`))).toBe(
+        true,
+      );
+      const status = JSON.parse(p.run(runner, "status").stdout);
+      expect(status.view).toBeDefined();
+    } finally {
+      daemon.kill();
+    }
+  });
+
+  it("lets a normal migrate ignore one PID the operator verified", async () => {
+    const p = project();
+    p.run(runner, "init");
+    const sup = await fakeSupervisor(p.base);
+    try {
+      seedLegacy(p.legacy, validState({ running: true, pid: sup.pid }));
+      expect(p.run(runner, "migrate", "--dry-run").status).toBe(1);
+      const ignore = ["--ignore-pid", String(sup.pid)];
+      const dry = p.run(runner, "migrate", "--dry-run", ...ignore);
+      expect(dry.status).toBe(0);
+      expect(dry.stderr).toContain(`PID ${sup.pid}`);
+      const done = p.run(
+        runner,
+        "migrate",
+        "--accept-config",
+        JSON.parse(dry.stdout).digest,
+        ...ignore,
+      );
+      expect(done.status).toBe(0);
+      expect(JSON.parse(done.stdout)).toMatchObject({
+        status: "migrated",
+        ignoredPids: [sup.pid],
+      });
     } finally {
       sup.stop();
     }

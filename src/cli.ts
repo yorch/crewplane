@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -49,7 +49,9 @@ import {
   describeAdoption,
   escapeJsonText,
   isLive,
+  legacyPresent,
   migrateControl,
+  readBoundedJson,
   resolveControlTarget,
   supervisorLiveness,
 } from "./migrate.ts";
@@ -570,8 +572,6 @@ async function main() {
       throw new Error(
         "--discard-legacy, --rebind and --accept-config are mutually exclusive",
       );
-    if (ignorePids.length && !discardLegacy)
-      throw new Error("--ignore-pid only applies to --discard-legacy");
     for (const pid of ignorePids)
       console.error(
         `crewplane: treating PID ${pid} as not a supervisor (--ignore-pid)`,
@@ -695,7 +695,13 @@ async function main() {
     const problems: DoctorProblem[] = [];
     let config: Config | null = null;
     let configState = "not-configured";
-    const legacyLayout = existsSync(legacySupervisorDirectory(ctx.store));
+    const legacyLayout = legacyPresent(legacySupervisorDirectory(ctx.store));
+    if (legacyLayout)
+      problems.push({
+        code: "LEGACY_LAYOUT",
+        message:
+          "Legacy supervisor state is in the project store and is not used; run `crewplane migrate`",
+      });
     try {
       checkControlDirectory(controlDir);
       config = (await optional(
@@ -968,9 +974,10 @@ async function main() {
       unverifiedLegacy = {
         unverified: true,
         note: "agent-writable legacy state; not used by this release",
-        state: await optional(
-          join(unverifiedLegacyDirectory, "state.json"),
-        ).catch(() => "unreadable"),
+        // Bounded, non-blocking: a FIFO or huge file is "unreadable".
+        state:
+          readBoundedJson(join(unverifiedLegacyDirectory, "state.json")) ??
+          "unreadable",
       };
     return output({
       desired,
@@ -1015,7 +1022,13 @@ async function main() {
       throw new Error("Cleanup confirmation must be true");
     if (opts["--new-session"] !== undefined && opts["--new-session"] !== "true")
       throw new Error("New session selection must be true");
-    const state = (await optional(join(directory, "state.json"))) as {
+    // Files of an agent-writable legacy directory are only read bounded and
+    // non-blocking; failure is "absent".
+    const readIn = async (path: string): Promise<unknown> =>
+      directory === controlDir && path.startsWith(`${controlDir}/`)
+        ? await optional(path)
+        : readBoundedJson(path);
+    const state = (await readIn(join(directory, "state.json"))) as {
       generation?: string;
       laneRev?: Record<string, number>;
       records?: Record<
@@ -1120,8 +1133,25 @@ async function main() {
       if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60)
         throw new Error("Wait must be an integer from 1 to 60 seconds");
     }
-    if (value.lane && !(value.lane in (await readConfig(directory)).lanes))
-      throw new Error("Unknown configured agent");
+    if (value.lane) {
+      if (["pause", "stop", "cancel"].includes(command)) {
+        // Narrowing must never be blocked by a missing or foreign config: the
+        // check applies only to the private config, and only when it exists.
+        const known = (
+          (await readIn(join(directory, "config.json")).catch(() => null)) as {
+            lanes?: Record<string, unknown>;
+          } | null
+        )?.lanes;
+        if (known && !(value.lane in known)) {
+          if (directory === controlDir)
+            throw new Error("Unknown configured agent");
+          console.error(
+            "crewplane: that agent is not in the (unverified) legacy configuration; queueing anyway",
+          );
+        }
+      } else if (!(value.lane in (await readConfig(directory)).lanes))
+        throw new Error("Unknown configured agent");
+    }
     if (directory === controlDir) {
       await ensureControlDirectory(directory);
       await bindControl(ctx.store, directory, identity, {
@@ -1133,31 +1163,58 @@ async function main() {
     // queues them in every candidate directory. Each copy is bound to THAT
     // directory's own supervisor generation, never the primary's.
     let anyRunning = state?.running === true;
+    // The control copy is queued FIRST and unconditionally; legacy copies are
+    // best effort and never read or written unsafely.
     const targets = [
       directory,
       ...(["pause", "stop", "cancel"].includes(command) ? also : []),
-    ];
+    ].sort((a, b) => Number(b === controlDir) - Number(a === controlDir));
     for (const target of targets) {
       let queued = value;
       if (target !== directory) {
-        const own = (await optional(join(target, "state.json")).catch(
-          () => null,
-        )) as { generation?: string; running?: boolean } | null;
-        const config = (await optional(join(target, "config.json")).catch(
-          () => null,
-        )) as { lanes?: Record<string, unknown> } | null;
-        if (value.lane && config?.lanes && !(value.lane in config.lanes)) {
+        const own = readBoundedJson(join(target, "state.json")) as {
+          generation?: string;
+          running?: boolean;
+        } | null;
+        anyRunning ||= own?.running === true;
+        queued = control({
+          ...value,
+          generation:
+            typeof own?.generation === "string" ? own.generation : undefined,
+        });
+      }
+      if (target === controlDir) {
+        await ensureControlDirectory(target);
+        await mkdir(join(target, "commands"), { recursive: true, mode: 0o700 });
+      } else {
+        // Never follow a symlinked legacy directory or commands/ into somewhere
+        // else, and never fail the halt because of it.
+        try {
+          if (!lstatSync(target).isDirectory())
+            throw new Error("not a directory");
+          const commands = join(target, "commands");
+          try {
+            if (!lstatSync(commands).isDirectory())
+              throw new Error("not a directory");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            await mkdir(commands, { mode: 0o700 });
+          }
+        } catch {
           console.error(
-            `crewplane: ${printablePath(target)} does not configure that agent; not queued there`,
+            `crewplane: ${printablePath(target)} is not a plain directory; not queued there`,
           );
           continue;
         }
-        anyRunning ||= own?.running === true;
-        queued = control({ ...value, generation: own?.generation });
       }
-      if (target === controlDir) await ensureControlDirectory(target);
-      await mkdir(join(target, "commands"), { recursive: true, mode: 0o700 });
-      await publishJson(join(target, "commands", `${id}.json`), queued);
+      await publishJson(join(target, "commands", `${id}.json`), queued).catch(
+        (error) => {
+          if (target === controlDir) throw error;
+          console.error(
+            `crewplane: could not queue in ${printablePath(target)}; continuing`,
+          );
+        },
+      );
     }
     anyRunning ||= isLive(supervisorLiveness(directory));
     if (!anyRunning)
@@ -1170,7 +1227,7 @@ async function main() {
       const seconds = Number(opts["--wait"]);
       const deadline = Date.now() + seconds * 1000;
       while (Date.now() < deadline) {
-        const current = (await optional(join(directory, "state.json"))) as {
+        const current = (await readIn(join(directory, "state.json"))) as {
           controlLog?: Array<{ id: string; outcome: string; code: string }>;
         } | null;
         const entry = current?.controlLog?.find((item) => item.id === id);

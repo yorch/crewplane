@@ -81,6 +81,26 @@ export const escapeJsonText = (value: string) =>
   });
 const printable = visible;
 /** Bounded, non-blocking JSON read: a FIFO, symlink or huge file is simply null. */
+const readBoundedBuffer = (path: string, cap: number): Buffer | null => {
+  let fd: number | undefined;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDONLY |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK |
+        constants.O_NOCTTY,
+    );
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > cap) return null;
+    return readFileSync(fd);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+};
+export const readBoundedJson = (path: string): unknown => readJson(path);
 const readJson = (path: string): unknown => {
   let fd: number | undefined;
   try {
@@ -131,6 +151,19 @@ export const processOwner: Owner = (pid) => {
   return "ours";
 };
 
+let cachedTicks: number | undefined;
+const clockTicks = () => {
+  if (cachedTicks === undefined)
+    try {
+      cachedTicks =
+        Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" })) ||
+        100;
+    } catch {
+      cachedTicks = 100;
+    }
+  return cachedTicks;
+};
+
 interface ProcessInfo {
   start: number | null;
   exe: string | null;
@@ -145,14 +178,7 @@ export function processInfo(pid: number): ProcessInfo {
     const btime = Number(
       /^btime (\d+)$/m.exec(readFileSync("/proc/stat", "utf8"))?.[1],
     );
-    let hz = 100;
-    try {
-      hz =
-        Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" })) ||
-        100;
-    } catch {
-      /* default 100 */
-    }
+    const hz = clockTicks();
     let exe: string | null = null;
     try {
       exe = realpathSync(readlinkSync(`/proc/${pid}/exe`));
@@ -348,7 +374,8 @@ export function resolveControlTarget(
   options: LivenessOptions = {},
 ): ControlTarget {
   const legacy = legacySupervisorDirectory(store);
-  if (!existsSync(legacy) && !isSymlink(legacy)) return { directory: control };
+  // An empty or inert directory (no regular file anywhere in it) is not state.
+  if (!legacyPresent(legacy)) return { directory: control };
   if (haltingCommands.has(command)) {
     const old = supervisorLiveness(legacy, options);
     const note = evidence(old).length
@@ -377,8 +404,34 @@ export function resolveControlTarget(
         also: [legacy],
         warning: `crewplane: legacy supervisor liveness is ambiguous${note}; ${command} is queued in both the control and legacy directories`,
       };
+    // Halting must never be refused: with nothing live anywhere, the verb is
+    // simply queued in the control directory.
+    return {
+      directory: control,
+      warning: `crewplane: legacy supervisor state exists in the project store and is not used; ${command} is queued in the control directory. Run \`crewplane migrate\``,
+    };
   }
   throw new Error(legacyRefusal);
+}
+/** Whether a legacy directory holds anything at all (a symlink always counts). */
+export function legacyPresent(path: string): boolean {
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) return true;
+    let budget = limits.count;
+    const walk = (directory: string): boolean => {
+      for (const name of readdirSync(directory)) {
+        if (budget-- <= 0) return true;
+        const child = join(directory, name);
+        const entry = lstatSync(child);
+        if (!entry.isDirectory() || walk(child)) return true;
+      }
+      return false;
+    };
+    return walk(path);
+  } catch {
+    return false;
+  }
 }
 function isSymlink(path: string) {
   try {
@@ -415,8 +468,14 @@ interface Journal {
   destination: string;
   digest: string;
 }
-const readJournal = (from: string): Journal | null => {
-  const value = object(readJson(join(from, journalName)));
+/**
+ * The journal lives in the private control parent, never in the agent-writable
+ * legacy tree, so a forged journal can never mark a migration as resumable.
+ */
+const journalPath = (control: string) =>
+  join(dirname(control), `${basename(control)}.migrating.json`);
+const readJournal = (control: string): Journal | null => {
+  const value = object(readJson(journalPath(control)));
   return value &&
     typeof value.destination === "string" &&
     typeof value.digest === "string"
@@ -441,8 +500,8 @@ async function treeDigest(root: string) {
   return hash.digest("hex");
 }
 /** A previous run published its staged copy but did not retire the source. */
-async function resumable(from: string, to: string): Promise<boolean> {
-  const journal = readJournal(from);
+async function resumable(to: string): Promise<boolean> {
+  const journal = readJournal(to);
   if (!journal || journal.destination !== to || !existsSync(to)) return false;
   return (await treeDigest(to)) === journal.digest;
 }
@@ -904,18 +963,20 @@ function interpret(
     const records: Record<string, unknown> = {};
     for (const [key, raw] of Object.entries(object(state.records) ?? {})) {
       const entry = object(raw) ?? {};
-      const identity: Record<string, number> = {};
-      if (entry.pid !== undefined || entry.processGroupId !== undefined) {
-        const pid = entry.pid as number | undefined;
-        const group = entry.processGroupId as number | undefined;
-        for (const candidate of [pid, group])
-          if (candidate !== undefined && options.owner(candidate) !== "dead")
-            throw new Error(
-              `Legacy record ${printable(key)} carries live process ${candidate}; stop that process (the old supervisor and its children must be gone) and rerun`,
-            );
-        if (pid !== undefined) identity.pid = pid;
-        if (group !== undefined) identity.processGroupId = group;
-      }
+      // Dead process identities are dropped: a recycled pid must never make a
+      // later start refuse permanently. A record that had a run is paused.
+      const hadRun =
+        entry.status === "running" ||
+        entry.pid !== undefined ||
+        entry.processGroupId !== undefined;
+      for (const candidate of [entry.pid, entry.processGroupId])
+        if (
+          typeof candidate === "number" &&
+          options.owner(candidate) !== "dead"
+        )
+          throw new Error(
+            `Legacy record ${printable(key)} carries live process ${candidate}; stop that process (the old supervisor and its children must be gone) and rerun`,
+          );
       records[key] = {
         key,
         lane: entry.lane,
@@ -927,27 +988,62 @@ function interpret(
           typeof entry.cwd === "string" && isAbsolute(entry.cwd)
             ? entry.cwd.slice(0, 4096)
             : options.root,
-        status: recordStatus.has(String(entry.status)) ? entry.status : "idle",
-        reason: shortReason(entry.reason),
-        ...(pauseKinds.has(String(entry.pauseKind))
-          ? { pauseKind: entry.pauseKind }
-          : {}),
+        status: hadRun
+          ? "paused"
+          : recordStatus.has(String(entry.status))
+            ? entry.status
+            : "idle",
+        reason: hadRun
+          ? "Prior run interrupted; inspect the worktree and retry explicitly"
+          : shortReason(entry.reason),
+        ...(hadRun
+          ? { pauseKind: "failure" }
+          : pauseKinds.has(String(entry.pauseKind))
+            ? { pauseKind: entry.pauseKind }
+            : {}),
         ...(typeof entry.pauseId === "string" &&
         /^[a-f0-9-]{36}$/.test(entry.pauseId)
           ? { pauseId: entry.pauseId }
           : {}),
-        ...(entry.cleanupUnverified === true
+        ...(entry.cleanupUnverified === true || hadRun
           ? { cleanupUnverified: true }
           : {}),
         ...(validHarness(entry.harness) ? { harness: entry.harness } : {}),
-        seen: [],
+        // Structural event ids, not free text: without them every old message,
+        // review and planning event would count as new and burn budget.
+        seen: (Array.isArray(entry.seen) ? entry.seen : [])
+          .filter(
+            (id): id is string =>
+              typeof id === "string" &&
+              /^(message|review|planning|checkpoint|assignment|failure|resume|work):[A-Za-z0-9._:-]{1,200}$/.test(
+                id,
+              ),
+          )
+          .slice(-2000),
+        ...(typeof entry.seenMessagesThrough === "string" &&
+        Number.isFinite(Date.parse(entry.seenMessagesThrough))
+          ? {
+              seenMessagesThrough: new Date(
+                Date.parse(entry.seenMessagesThrough),
+              ).toISOString(),
+            }
+          : {}),
+        ...(Array.isArray(entry.seenMessagesAtBoundary)
+          ? {
+              seenMessagesAtBoundary: entry.seenMessagesAtBoundary
+                .filter(
+                  (id): id is string =>
+                    typeof id === "string" && /^[a-f0-9-]{36}$/.test(id),
+                )
+                .slice(-2000),
+            }
+          : {}),
         runs: Array.isArray(entry.runs)
           ? entry.runs.map(counter).slice(-120)
           : [],
         noProgress: counter(entry.noProgress),
         inputTokens: counter(entry.inputTokens),
         outputTokens: counter(entry.outputTokens),
-        ...identity,
       };
     }
     const lanes = (value: unknown) =>
@@ -1170,7 +1266,7 @@ export async function migrateControl(
   const bad = legacyProblem(legacy);
   if (bad)
     throw new Error(`Legacy supervisor directory ${bad}; inspect it manually`);
-  const resuming = await resumable(legacy, options.control);
+  const resuming = await resumable(options.control);
   const blocking = (skipLease = false): string | null => {
     const found = liveness(skipLease);
     report.ignoredLivenessClaims = found.suspicious;
@@ -1185,10 +1281,60 @@ export async function migrateControl(
           : ""
       }. A forged directory can be set aside with \`crewplane migrate --discard-legacy\``,
     );
-  const destinationBusy = () =>
-    !resuming &&
-    checkControlDirectory(options.control) &&
-    !isEmptyDirectory(options.control);
+  /**
+   * The destination may already hold a matching identity.json and validated
+   * narrowing commands (halts queued before migrating); those are carried into
+   * the staged set. Anything else makes it busy.
+   */
+  const inspectDestination = () => {
+    const carried = new Map<string, string>();
+    const carriedCommands: PendingCommand[] = [];
+    if (!checkControlDirectory(options.control))
+      return { busy: false, carried, carriedCommands, bindingId: null };
+    let bindingId: string | null = null;
+    for (const name of readdirSync(options.control)) {
+      if (name === "identity.json") {
+        const found = object(readJson(join(options.control, name)));
+        if (
+          !found ||
+          found.primaryRoot !==
+            (options.identity ?? { primaryRoot: options.root }).primaryRoot
+        )
+          return { busy: true, carried, carriedCommands, bindingId };
+        bindingId =
+          typeof found.bindingId === "string" ? found.bindingId : null;
+      } else if (name === "commands") {
+        const directory = join(options.control, name);
+        if (!lstatSync(directory).isDirectory())
+          return { busy: true, carried, carriedCommands, bindingId };
+        for (const file of readdirSync(directory)) {
+          const raw = /^[a-f0-9-]{36}\.json$/.test(file)
+            ? readBoundedBuffer(join(directory, file), limits.command)
+            : null;
+          let value: ReturnType<typeof control> | null = null;
+          try {
+            value = raw ? control(JSON.parse(raw.toString("utf8"))) : null;
+          } catch {
+            value = null;
+          }
+          if (
+            !value ||
+            !narrowing.has(value.action) ||
+            (value as { cancelActive?: unknown }).cancelActive === true
+          )
+            return { busy: true, carried, carriedCommands, bindingId };
+          carried.set(`commands/${file}`, canonicalText(value));
+          carriedCommands.push({
+            id: file.slice(0, -5),
+            action: value.action,
+            reason: "already queued in the control directory",
+          });
+        }
+      } else return { busy: true, carried, carriedCommands, bindingId };
+    }
+    return { busy: false, carried, carriedCommands, bindingId };
+  };
+  const destinationBusy = () => !resuming && inspectDestination().busy;
   const busyMessage = () =>
     `Refusing to migrate: ${printable(options.control)} already has content. Inspect both locations; remove or rename the legacy ${printable(legacy)} once it is confirmed stale`;
   if (destinationBusy()) throw new Error(busyMessage());
@@ -1209,6 +1355,11 @@ export async function migrateControl(
     await moves.afterSnapshot?.();
     deadline();
     const read = interpret(snap, { root: options.root, owner });
+    // Halts already queued in the control directory are part of the reviewed set.
+    const existing = inspectDestination();
+    for (const [path, text] of existing.carried)
+      if (!read.files.has(path)) read.files.set(path, text);
+    read.rearm.push(...existing.carriedCommands);
     report.config = read.config;
     report.files = Object.fromEntries(read.files);
     report.digest = digestOf(read.files);
@@ -1334,7 +1485,10 @@ export async function migrateControl(
       // identity.json comes from the current project, never from the legacy
       // tree, and is checked against the store marker BEFORE anything is
       // published.
-      const bindingId = storeMarkerId(options.store) ?? randomUUID();
+      const bindingId =
+        storeMarkerId(options.store) ??
+        inspectDestination().bindingId ??
+        randomUUID();
       await writeFresh(
         join(staging, "identity.json"),
         identityText(bindingId, identity),
@@ -1345,7 +1499,7 @@ export async function migrateControl(
       )
         throw new Error("The store marker changed during migration");
       await writeFile(
-        join(legacy, journalName),
+        journalPath(options.control),
         JSON.stringify({
           version: 1,
           destination: options.control,
@@ -1354,8 +1508,17 @@ export async function migrateControl(
         { mode: 0o600, flush: true },
       );
       deadline();
+      // A destination holding only carried halts is replaced by the staged set,
+      // which already contains them; the old copy is removed afterwards.
+      let prior: string | null = null;
+      if (!isEmptyDirectory(options.control)) {
+        prior = `${options.control}.prior-${randomUUID().slice(0, 8)}`;
+        await rename(options.control, prior);
+      }
       await rename(staging, options.control);
       published = true;
+      if (prior)
+        await rm(prior, { recursive: true, force: true }).catch(() => {});
       await syncDirectory(dirname(options.control));
       await moves.afterPublish?.();
     }
@@ -1366,13 +1529,14 @@ export async function migrateControl(
     // Our own guards go first; the inert directory then carries no live lock.
     await dropLocks();
     report.leftover = await retire(legacy);
+    await rm(journalPath(options.control), { force: true }).catch(() => {});
     await asideWatchdog();
     if (resuming) report.configAccepted = true;
   } catch (error) {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
     if (createdLeaf && !published) await rmdir(options.control).catch(() => {});
     if (!published)
-      await rm(join(legacy, journalName), { force: true }).catch(() => {});
+      await rm(journalPath(options.control), { force: true }).catch(() => {});
     throw error;
   } finally {
     await dropLocks();

@@ -98,10 +98,11 @@ const baseNames = new Set([
   // state. Under CREWPLANE_HEADLESS_LANE the CLI refuses configure, start,
   // control verbs, migrate and pin, so a child only reads there. Read-only intent is
   // enforced by a sandbox, not by Crewplane.
+  // The update cache (and its supervisor registry) is deliberately NOT forwarded:
+  // anything that can write it can forge a supervisor registration.
   "CREWPLANE_STATE_DIR",
   "CREWPLANE_EXECUTABLE",
   "CREWPLANE_RELEASES_DIR",
-  "CREWPLANE_CACHE_DIR",
   "CREWPLANE_NO_AUTO_UPDATE",
   // Windows process basics.
   "SYSTEMROOT",

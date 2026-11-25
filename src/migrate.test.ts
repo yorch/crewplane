@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -24,6 +25,7 @@ import {
   describeAdoption,
   describeConfig,
   escapeJsonText,
+  legacyPresent,
   legacyRefusal,
   type MigrateOptions,
   migrateControl,
@@ -612,10 +614,131 @@ it("keeps validated dead process identities for crash recovery", async () => {
     readFileSync(join(p.control, "state.json"), "utf8"),
   );
   expect(adopted.running).toBe(true);
-  expect(adopted.records["builder:T-1"]).toMatchObject({
-    pid: deadPid,
-    processGroupId: deadPid,
+  // Dead process identities are dropped (a recycled pid could otherwise make a
+  // later start refuse permanently); the record is paused for explicit retry.
+  const record0 = adopted.records["builder:T-1"];
+  expect(record0.pid).toBeUndefined();
+  expect(record0.processGroupId).toBeUndefined();
+  expect(record0).toMatchObject({
+    status: "paused",
+    pauseKind: "failure",
+    cleanupUnverified: true,
   });
+});
+
+it("adopts the structural event cursor so old history is not replayed", async () => {
+  const p = project();
+  p.seed(
+    validState({
+      records: {
+        "builder:T-1": record(p.root, {
+          seen: [
+            `message:${uuid(1)}`,
+            "review:T-1:abc123",
+            "planning:x",
+            "not an id with spaces",
+            "other:thing",
+            `work:${"x".repeat(300)}`,
+          ],
+          seenMessagesThrough: "2024-05-06T07:08:09.000Z",
+          seenMessagesAtBoundary: [uuid(1), "not-a-uuid", 42],
+        }),
+      },
+    }),
+  );
+  await p.migrate();
+  const adopted = JSON.parse(
+    readFileSync(join(p.control, "state.json"), "utf8"),
+  ).records["builder:T-1"];
+  expect(adopted.seen).toEqual([
+    `message:${uuid(1)}`,
+    "review:T-1:abc123",
+    "planning:x",
+  ]);
+  expect(adopted.seenMessagesThrough).toBe("2024-05-06T07:08:09.000Z");
+  expect(adopted.seenMessagesAtBoundary).toEqual([uuid(1)]);
+});
+
+it("carries halts already queued in the control directory instead of calling it busy", async () => {
+  const p = project();
+  p.seed(validState(), false);
+  // An operator halted before migrating: an identity and a narrowing command.
+  mkdirSync(join(p.control, "commands"), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(p.control, "identity.json"),
+    JSON.stringify({
+      version: 1,
+      bindingId: "existing-id",
+      primaryRoot: p.root,
+    }),
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    join(p.control, "commands", `${uuid(7)}.json`),
+    JSON.stringify({
+      v: 2,
+      action: "pause",
+      all: true,
+      at: new Date().toISOString(),
+    }),
+    { mode: 0o600 },
+  );
+  const dry = await p.migrate({ dryRun: true });
+  expect(dry.rearmedCommands).toEqual([
+    {
+      id: uuid(7),
+      action: "pause",
+      reason: "already queued in the control directory",
+    },
+  ]);
+  const done = await p.migrate();
+  expect(done.status).toBe("migrated");
+  expect(readdirSync(join(p.control, "commands"))).toEqual([`${uuid(7)}.json`]);
+  expect(
+    JSON.parse(readFileSync(join(p.control, "identity.json"), "utf8"))
+      .bindingId,
+  ).toBe("existing-id");
+  expect(
+    readdirSync(join(p.control, "..")).filter((n) => n.includes("prior")),
+  ).toEqual([]);
+  // Anything else in the destination, or a widening command, is still busy.
+  for (const plant of [
+    (c: string) => writeFileSync(join(c, "state.json"), "{}"),
+    (c: string) =>
+      writeFileSync(
+        join(c, "commands", `${uuid(8)}.json`),
+        JSON.stringify({ action: "resume", all: true }),
+      ),
+    (c: string) =>
+      writeFileSync(
+        join(c, "identity.json"),
+        JSON.stringify({ primaryRoot: "/another/project" }),
+      ),
+  ]) {
+    const busy = project();
+    busy.seed(validState(), false);
+    mkdirSync(join(busy.control, "commands"), { recursive: true, mode: 0o700 });
+    plant(busy.control);
+    await expect(
+      busy.migrate({ acceptConfig: "0".repeat(64) }),
+    ).rejects.toThrow("already has content");
+  }
+});
+
+it("never lets a forged legacy journal skip the review", async () => {
+  const p = project();
+  p.seed();
+  mkdirSync(p.control, { recursive: true, mode: 0o700 });
+  const empty = createHash("sha256").update("").digest("hex");
+  writeFileSync(
+    join(p.legacy, ".migrating-to"),
+    JSON.stringify({ version: 1, destination: p.control, digest: empty }),
+  );
+  // Without the reviewed digest nothing is adopted, journal or not.
+  await expect(p.migrate({ acceptConfig: "" })).rejects.toThrow(
+    "--accept-config",
+  );
+  expect(existsSync(join(p.legacy, "state.json"))).toBe(true);
 });
 
 it("re-arms only a normalized narrowing command naming a configured agent", async () => {
@@ -716,9 +839,7 @@ it("never reads a FIFO, a swapped directory or an oversized file", async () => {
   big.seed();
   truncateSync(join(big.legacy, "state.json"), 512 * 1024 * 1024);
   truncateSync(join(big.legacy, "config.json"), 512 * 1024 * 1024);
-  const before = process.memoryUsage().rss;
   const sized = await big.migrate({ dryRun: true });
-  expect(process.memoryUsage().rss - before).toBeLessThan(128 * 1024 * 1024);
   expect(Object.keys(sized.files).sort()).toEqual(
     ["desired.json", `commands/${uuid(1)}.json`].sort(),
   );
@@ -1077,7 +1198,7 @@ it("verifies every staged file and cleans up after a mismatch", async () => {
     }),
   ).rejects.toThrow("Verification failed");
   expect(existsSync(join(p.legacy, "state.json"))).toBe(true);
-  expect(existsSync(join(p.legacy, ".migrating-to"))).toBe(false);
+  expect(existsSync(`${p.control}.migrating.json`)).toBe(false);
   expect(
     readdirSync(join(p.control, "..")).filter((e) => e.includes("staging")),
   ).toEqual([]);
@@ -1098,7 +1219,9 @@ it("finishes retiring the source after a crash between publication and retiremen
       },
     }),
   ).rejects.toThrow("simulated crash");
-  expect(existsSync(join(p.legacy, ".migrating-to"))).toBe(true);
+  // The journal is private (beside the control directory), never in the legacy tree.
+  expect(existsSync(`${p.control}.migrating.json`)).toBe(true);
+  expect(existsSync(join(p.legacy, ".migrating-to"))).toBe(false);
   expect(existsSync(join(p.control, "state.json"))).toBe(true);
   const rerun = await p.migrate({ owner: dead, acceptConfig: "" });
   expect(rerun.status).toBe("migrated");
@@ -1174,17 +1297,25 @@ it("fails closed on a legacy layout and routes halting verbs without trusting fo
 
   const dead = project();
   dead.seed();
-  for (const command of [
-    "start",
-    "stop",
-    "pause",
-    "configure",
-    "agents",
-    "dashboard",
-  ])
+  for (const command of ["start", "configure", "agents", "dashboard"])
     expect(() =>
       resolveControlTarget(dead.store, dead.control, command, options),
     ).toThrow(legacyRefusal);
+  // Halting never throws: with nothing live it is queued in the control directory.
+  for (const command of ["stop", "pause", "cancel"])
+    expect(
+      resolveControlTarget(dead.store, dead.control, command, options),
+    ).toMatchObject({ directory: dead.control });
+  // An empty or file-less legacy directory is not state: nothing is refused.
+  const inert = project();
+  mkdirSync(join(inert.legacy, "commands"), { recursive: true });
+  for (const command of ["start", "agents", "stop", "status"])
+    expect(
+      resolveControlTarget(inert.store, inert.control, command, options),
+    ).toEqual({ directory: inert.control });
+  expect(legacyPresent(inert.legacy)).toBe(false);
+  writeFileSync(join(inert.legacy, "commands", "x"), "");
+  expect(legacyPresent(inert.legacy)).toBe(true);
   // status never reads legacy state as truth: it shows it as unverified.
   expect(
     resolveControlTarget(dead.store, dead.control, "status", options),

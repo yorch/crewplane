@@ -276,3 +276,10 @@ it("forwards only the control-directory base override, never a control path", ()
   expect(child).not.toHaveProperty("CREWPLANE_COORD_DIR");
   expect(Object.keys(child).some((key) => /CONTROL/i.test(key))).toBe(false);
 });
+
+it("does not forward the update cache directory, which holds supervisor registrations", () => {
+  const child = harnessEnvironment("codex", {
+    input: { PATH: "/usr/bin", CREWPLANE_CACHE_DIR: "/home/u/cache" },
+  });
+  expect(child).not.toHaveProperty("CREWPLANE_CACHE_DIR");
+});

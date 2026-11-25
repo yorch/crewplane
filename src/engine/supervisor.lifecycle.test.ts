@@ -467,6 +467,68 @@ it(
   20000,
 );
 it(
+  "keeps a halt queued before migration in force after migrate and start",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      await rm(f.directory, { recursive: true });
+      const legacy = join(f.root, ".crewplane-state/supervisor");
+      await mkdir(legacy, { recursive: true, mode: 0o700 });
+      await writeFile(join(legacy, "config.json"), JSON.stringify(f.config));
+      await writeFile(
+        join(legacy, "state.json"),
+        JSON.stringify({ ...initialState(), running: false }),
+      );
+      // The operator halted while the legacy directory still existed.
+      await mkdir(join(f.directory, "commands"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(
+        join(f.directory, "identity.json"),
+        JSON.stringify({ version: 1, bindingId: "id-1", primaryRoot: f.root }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(
+          f.directory,
+          "commands",
+          "00000000-0000-4000-8000-0000000000b1.json",
+        ),
+        JSON.stringify({ v: 2, action: "pause", all: true }),
+        { mode: 0o600 },
+      );
+      const base = {
+        store: join(f.root, ".crewplane-state"),
+        control: f.directory,
+        root: f.root,
+      };
+      const reviewed = await migrateControl({ ...base, dryRun: true });
+      await migrateControl({
+        ...base,
+        ...(reviewed.digest ? { acceptConfig: reviewed.digest } : {}),
+      });
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            return (await f.load()).instanceHeld === true;
+          } catch {
+            return false;
+          }
+        });
+        await new Promise((r) => setTimeout(r, 1200));
+        expect((await f.load()).instanceHeld).toBe(true);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
   "refuses to start on recorded process groups that could address every process",
   () =>
     withEnv(async () => {

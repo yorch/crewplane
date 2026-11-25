@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -51,9 +55,12 @@ export function controlDirectory(
   primaryRoot: string,
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
+  realpath: (path: string) => string = realpathSync.native,
 ): string {
+  // The native realpath returns the filesystem's own spelling, so a
+  // case-insensitive volume yields one key for every spelling of the root.
   const key = createHash("sha256")
-    .update(realpathSync(primaryRoot))
+    .update(realpath(primaryRoot))
     .digest("hex")
     .slice(0, 24);
   return join(controlStateBase(env, home), "crewplane", "projects", key);
@@ -78,7 +85,10 @@ function chain(path: string): string[] {
     : [path];
 }
 
-function problem(path: string): string | "absent" | null {
+function problem(
+  path: string,
+  expectedUid: number | undefined = process.getuid?.(),
+): string | "absent" | null {
   let info: ReturnType<typeof lstatSync>;
   try {
     info = lstatSync(path);
@@ -88,7 +98,7 @@ function problem(path: string): string | "absent" | null {
   }
   if (info.isSymbolicLink()) return "is a symbolic link";
   if (!info.isDirectory()) return "is not a directory";
-  const uid = process.getuid?.();
+  const uid = expectedUid;
   if (uid === undefined)
     throw new Error(
       "The private control directory is unsupported on this platform (no POSIX ownership checks)",
@@ -104,10 +114,13 @@ function problem(path: string): string | "absent" | null {
  * it does not exist yet; throws when it exists and is unsafe (symlink, wrong
  * owner, group/world writable). Readers call this before trusting any file.
  */
-export function checkControlDirectory(path: string): boolean {
+export function checkControlDirectory(
+  path: string,
+  options: { uid?: number } = {},
+): boolean {
   let present = false;
   for (const entry of chain(path)) {
-    const found = problem(entry);
+    const found = problem(entry, options.uid ?? process.getuid?.());
     if (found === "absent") return false;
     if (found !== null)
       throw new Error(`Unsafe control directory: ${printable(entry)} ${found}`);
@@ -150,14 +163,48 @@ export interface BindingIdentity {
 }
 const markerPath = (store: string) => join(store, "control-binding.json");
 const identityPath = (control: string) => join(control, "identity.json");
-function readBinding(path: string): Record<string, unknown> | null {
+/**
+ * Bounded, non-blocking read of a small binding file: a FIFO, symlink or huge
+ * file is "unreadable" and never hangs the caller.
+ */
+function readBindingFile(
+  path: string,
+): { text: string } | "absent" | "unreadable" {
+  let fd: number | undefined;
   try {
-    const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    fd = openSync(
+      path,
+      constants.O_RDONLY |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK |
+        constants.O_NOCTTY,
+    );
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > 65536) return "unreadable";
+    return { text: readFileSync(fd, "utf8") };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? "absent"
+      : "unreadable";
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+/** Strict: unreadable or invalid content is an error. Lenient: it is absent. */
+function readBinding(
+  path: string,
+  lenient = false,
+): Record<string, unknown> | null {
+  const read = readBindingFile(path);
+  if (read === "absent") return null;
+  try {
+    if (read === "unreadable") throw new Error("unreadable");
+    const value = JSON.parse(read.text) as unknown;
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error("not an object");
     return value as Record<string, unknown>;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+  } catch {
+    if (lenient) return null;
     throw new Error(`Invalid ${printable(path)}; inspect it before continuing`);
   }
 }
@@ -167,7 +214,10 @@ export function checkBinding(
   identity: BindingIdentity,
   options: { narrowing?: boolean } = {},
 ): void {
-  const marker = readBinding(markerPath(store));
+  // The store marker is agent-writable: on the narrowing path an unreadable
+  // or invalid one counts as absent, and identity.json in the private
+  // directory is the authority.
+  const marker = readBinding(markerPath(store), options.narrowing === true);
   const present = existsSync(control);
   const ident = present ? readBinding(identityPath(control)) : null;
   const populated =
@@ -203,8 +253,12 @@ export async function bindControl(
   checkBinding(store, control, identity, options);
   // A narrowing write into an already bound directory records nothing.
   if (options.narrowing && readBinding(identityPath(control))) return;
-  let marker = readBinding(markerPath(store));
-  if (!marker) {
+  let marker = readBinding(markerPath(store), options.narrowing === true);
+  if (!marker && options.narrowing && existsSync(markerPath(store))) {
+    // A damaged marker is left for the operator (`migrate --rebind`); the
+    // identity is still recorded so the halt can proceed.
+    marker = { id: randomUUID() };
+  } else if (!marker) {
     marker = {
       version: 1,
       id: randomUUID(),
@@ -216,7 +270,7 @@ export async function bindControl(
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       },
     );
-    marker = readBinding(markerPath(store));
+    marker = readBinding(markerPath(store), options.narrowing === true);
   }
   if (!readBinding(identityPath(control)))
     await publishJson(identityPath(control), {
@@ -227,7 +281,7 @@ export async function bindControl(
         ? {}
         : { gitCommon: identity.gitCommon }),
     });
-  checkBinding(store, control, identity);
+  checkBinding(store, control, identity, options);
 }
 
 /**
@@ -254,7 +308,7 @@ export async function rebindControl(
     throw new Error(
       "The control directory is bound to a different project identity; refusing to rebind",
     );
-  const marker = readBinding(markerPath(store));
+  const marker = readBinding(markerPath(store), true);
   if (marker && marker.id === ident.bindingId) return "unchanged";
   await publishJson(markerPath(store), {
     version: 1,

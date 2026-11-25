@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -311,3 +312,63 @@ it.runIf(process.getuid?.() !== 0)(
     );
   },
 );
+
+it("treats a garbage or FIFO store marker as absent on the narrowing path only", async () => {
+  const p = bound();
+  await ensureControlDirectory(p.control);
+  await bindControl(p.store, p.control, p.identity);
+  const marker = join(p.store, "control-binding.json");
+  for (const damage of ["garbage", "fifo"]) {
+    rmSync(marker, { force: true });
+    if (damage === "garbage") writeFileSync(marker, "{ not json");
+    else execFileSync("mkfifo", [marker]);
+    // Narrowing never fails or blocks on it; identity.json is the authority.
+    expect(() =>
+      checkBinding(p.store, p.control, p.identity, { narrowing: true }),
+    ).not.toThrow();
+    await bindControl(p.store, p.control, p.identity, { narrowing: true });
+    // Widening verbs and start fail closed (and a FIFO cannot hang them).
+    expect(() => checkBinding(p.store, p.control, p.identity), damage).toThrow(
+      /Invalid|different checkout/,
+    );
+    // The operator can repair it explicitly.
+    rmSync(marker, { force: true });
+    expect(await rebindControl(p.store, p.control, p.identity)).toBe("rebound");
+  }
+  // A damaged marker with no identity yet still lets a halt record one.
+  const fresh = bound();
+  await ensureControlDirectory(fresh.control);
+  writeFileSync(join(fresh.store, "control-binding.json"), "{ not json");
+  await bindControl(fresh.store, fresh.control, fresh.identity, {
+    narrowing: true,
+  });
+  expect(existsSync(join(fresh.control, "identity.json"))).toBe(true);
+});
+
+it("derives one key per root whatever spelling the filesystem accepts", () => {
+  // A case-insensitive volume has one native spelling for both inputs.
+  const native = (path: string) =>
+    path.toLowerCase() === "/users/a/proj" ? "/Users/A/Proj" : path;
+  const env = { CREWPLANE_STATE_DIR: "/state" };
+  expect(controlDirectory("/users/a/proj", env, "/h", native)).toBe(
+    controlDirectory("/Users/A/Proj", env, "/h", native),
+  );
+  expect(controlDirectory("/users/a/other", env, "/h", native)).not.toBe(
+    controlDirectory("/Users/A/Proj", env, "/h", native),
+  );
+});
+
+it("refuses a control directory owned by another user (injected owner, any uid)", async () => {
+  const base = temp();
+  const project = join(base, "p");
+  mkdirSync(project);
+  const directory = controlDirectory(project, {
+    CREWPLANE_STATE_DIR: join(base, "state"),
+  });
+  await ensureControlDirectory(directory);
+  const me = process.getuid?.() ?? 0;
+  expect(() => checkControlDirectory(directory, { uid: me })).not.toThrow();
+  expect(() => checkControlDirectory(directory, { uid: me + 1 })).toThrow(
+    "not owned by the current user",
+  );
+});

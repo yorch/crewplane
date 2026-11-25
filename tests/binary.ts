@@ -1019,7 +1019,7 @@ try {
       records: {},
     }),
   );
-  const refusedLegacy = legacyRun("pause", "--all", "true");
+  const refusedLegacy = legacyRun("resume", "--all", "true");
   assert.equal(refusedLegacy.status, 1);
   assert.equal(refusedLegacy.stdout, "");
   assert.match(refusedLegacy.stderr, /run `crewplane migrate`/);

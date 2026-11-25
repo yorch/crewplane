@@ -15,6 +15,7 @@ export type DoctorProblemCode =
   | "INSTRUCTIONS_INVALID"
   | "RELEASES_ROOT_INVALID"
   | "CACHE_DIR_INVALID"
+  | "LEGACY_LAYOUT"
   | "INSTRUCTIONS_GLOBAL_UNAVAILABLE";
 
 export interface DoctorProblem {
