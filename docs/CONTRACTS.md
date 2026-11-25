@@ -45,31 +45,43 @@ order is (tasks and messages are sorted, lanes follow configuration order).
 
 **Exit codes.** `0` success, including a queued control without `--wait` and an
 `applied` or `noop` `--wait` outcome; `1` operational failure, invalid local
-input, unconfigured project or release-pin mismatch; `2` a supervisor
+input, unconfigured project (except `doctor`, see below) or release-pin
+mismatch; `2` a supervisor
 `refused` or `invalid` outcome under `--wait`, or, for `doctor`, a diagnosed
-problem (the JSON report is still printed to stdout); `3` a `stale` outcome under
+problem (the JSON report is still printed to stdout). The meaning of `2` depends
+on the command; `doctor` on an unconfigured project exits `2` with
+`CONFIG_MISSING` (it used to exit `0`); `3` a `stale` outcome under
 `--wait`; `124` a `--wait` timeout, where the command remains queued and may
 still apply.
 
 **Doctor.** `doctor` never aborts on a failed check: each failure becomes an
 entry in `problems` (`{code, lane?, message}`), `ok` is `problems.length === 0`,
 and the exit code is `0` when `ok` and `2` otherwise, with the report on stdout
-either way. `code` is a closed set: `CONFIG_MISSING` (not configured),
-`CONFIG_INVALID` (unreadable or invalid configuration, or a lane that cannot be
-described), `BINARY_MISSING` (no binary configured, or the path does not
-exist), `BINARY_INVALID` (relative path, or not a regular file),
-`BINARY_NOT_EXECUTABLE`, `INSTRUCTIONS_INVALID` (a lane's, or without `lane`
-the global, instruction file), `RELEASES_ROOT_INVALID` (relative
-`CREWPLANE_RELEASES_DIR`/`XDG_DATA_HOME`) and `GIT_UNAVAILABLE`. Binary problems
-carry the `lane`. Each lane's effective binary is the harness's `binaries` entry,
-or the top-level `binary` for Codex; it is probed (absolute, regular file,
-executable by the current user) and never executed. Lane `binary` is
-`{path, ok, problem?}`; top-level `defaultBinary` is the same shape or `null`.
-`config` is `valid`, `invalid` or `not-configured`; `runtime` is `compiled` for
-a standalone executable and `bun` otherwise; `git` is `null` when git cannot
-run. Credentials and provider operation are not probed. Pin mismatches and
-unsafe stores are still refused before `doctor` runs, as for any project
-command.
+either way. `message` is a fixed validation message, never raw engine text.
+`code` is a closed set: `CONFIG_MISSING` (not configured), `CONFIG_INVALID`
+(unreadable or invalid configuration, or a lane that is not a plain object or
+names an unsupported harness), `BINARY_MISSING` (no binary configured, or the
+path does not exist), `BINARY_INVALID` (not a string, relative, or not a regular
+file), `BINARY_NOT_EXECUTABLE`, `INSTRUCTIONS_INVALID` (a lane's instruction
+file), `RELEASES_ROOT_INVALID` (relative `CREWPLANE_RELEASES_DIR` or
+`XDG_DATA_HOME`) and `CACHE_DIR_INVALID` (relative `CREWPLANE_CACHE_DIR`).
+Configuration is validated without the binary-existence check, so a missing
+binary never hides another configuration error; binaries are reported only by
+the probes, and `config` is `valid` when only binaries fail. Each lane's
+effective binary is the harness's `binaries` entry, or the top-level `binary`
+for Codex; it is probed (absolute, regular file, executable by the current user)
+and never executed. The executability check is POSIX-only: on Windows `X_OK`
+behaves like `F_OK`, so `.cmd`/`.ps1` shims count as regular files. Lane
+`binary` is `{path, ok, problem?}`. Top-level `defaultBinary` probes the
+configuration's top-level `binary` itself (same shape, or `null` when unset),
+independent of `binaries.codex`; its failure is reported without a `lane`
+unless a lane already reported the same path. `warnings` has the same shape but
+never affects `ok` or the exit code: `INSTRUCTIONS_GLOBAL_UNAVAILABLE` reports
+a missing or unusable global instructions file. `config` is `valid`, `invalid`
+or `not-configured`; `runtime` is `compiled` for a standalone executable and
+`bun` otherwise. Credentials and provider operation are not probed. Pin
+mismatches, unsafe stores and a non-repository or missing `git` are refused
+before `doctor` runs, as for any project command (exit 1, nothing on stdout).
 
 **Errors.** Errors go to stderr, never stdout. The first line is
 `crewplane: MESSAGE`; continuation lines are indented and carry recovery

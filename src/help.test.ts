@@ -111,6 +111,6 @@ it("documents the dashboard controls opt-in and the agents help pointer", () => 
 });
 
 it("documents what doctor probes and its exit code", () => {
-  expect(help).toMatch(/doctor\s+Diagnose config, harness binaries/);
+  expect(help).toMatch(/doctor\s+Diagnose config and harness binaries/);
   expect(help).toContain("exit 2 on problems");
 });

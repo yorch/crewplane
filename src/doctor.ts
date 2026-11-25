@@ -14,7 +14,8 @@ export type DoctorProblemCode =
   | "BINARY_NOT_EXECUTABLE"
   | "INSTRUCTIONS_INVALID"
   | "RELEASES_ROOT_INVALID"
-  | "GIT_UNAVAILABLE";
+  | "CACHE_DIR_INVALID"
+  | "INSTRUCTIONS_GLOBAL_UNAVAILABLE";
 
 export interface DoctorProblem {
   code: DoctorProblemCode;
@@ -52,11 +53,13 @@ export async function probeBinary(
   harness: string,
 ): Promise<{ probe: BinaryProbe; code?: DoctorProblemCode }> {
   const fail = (code: DoctorProblemCode, problem: string) => ({
-    probe: { path: path ?? null, ok: false, problem },
+    probe: { path: typeof path === "string" ? path : null, ok: false, problem },
     code,
   });
-  if (typeof path !== "string" || path === "")
+  if (path === undefined || path === "")
     return fail("BINARY_MISSING", `no ${harness} binary is configured`);
+  if (typeof path !== "string")
+    return fail("BINARY_INVALID", `${harness} binary path must be a string`);
   if (!isAbsolute(path))
     return fail("BINARY_INVALID", `${harness} binary path must be absolute`);
   let info: Awaited<ReturnType<typeof stat>>;
@@ -68,6 +71,7 @@ export async function probeBinary(
   if (!info.isFile())
     return fail("BINARY_INVALID", `${harness} binary is not a regular file`);
   try {
+    // POSIX only: on Windows X_OK behaves like F_OK.
     await access(path, constants.X_OK);
   } catch {
     return fail(
@@ -78,6 +82,14 @@ export async function probeBinary(
   return { probe: { path, ok: true } };
 }
 
-/** The message of a failure, never a stack or an object dump. */
+/**
+ * The message of a deliberate validation failure (a plain Error). Anything else
+ * (TypeError, RangeError, ...) is an engine fault whose text may echo
+ * configuration, so it gets the generic fallback.
+ */
 export const failureMessage = (error: unknown, fallback: string) =>
-  error instanceof Error && error.message ? error.message : fallback;
+  error instanceof Error &&
+  Object.getPrototypeOf(error) === Error.prototype &&
+  error.message
+    ? error.message
+    : fallback;

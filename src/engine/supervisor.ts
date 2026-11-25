@@ -76,15 +76,18 @@ async function read<T>(path: string, fallback: T): Promise<T> {
   }
 }
 const atomic = publishJson;
-export function validateConfig(value: Config) {
+export function validateConfig(
+  value: Config,
+  options: { checkBinary?: boolean } = {},
+) {
+  const checkBinary = options.checkBinary !== false;
   if (
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
     value.version !== 1 ||
     !isAbsolute(value.root) ||
-    !isAbsolute(value.binary) ||
-    !existsSync(value.binary)
+    (checkBinary && (!isAbsolute(value.binary) || !existsSync(value.binary)))
   )
     throw new Error(
       "Configuration requires an existing absolute CLI binary and repository root",
@@ -133,7 +136,7 @@ export function validateConfig(value: Config) {
     for (const key of Object.keys(lane))
       if (key !== "enabled" && !laneKeys.has(key))
         throw new Error(`Unknown lane field: ${key}`);
-    validateHarness(value, lane);
+    validateHarness(value, lane, { checkBinary });
     if (
       lane.maxRunsPerHour !== undefined &&
       lane.maxRunsPerHour > value.maxRunsPerHour

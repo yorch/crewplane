@@ -27,6 +27,7 @@ import { createEvidenceStore } from "./engine/evidence/store.ts";
 import {
   harnessCapabilities,
   instructionFileProblem,
+  validHarness,
 } from "./engine/harness.ts";
 import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
@@ -525,14 +526,16 @@ async function main() {
     }
     if (config) {
       try {
-        validateConfig(config);
+        // Binaries are probed per lane below, so a missing one must not hide
+        // the first other configuration error.
+        validateConfig(config, { checkBinary: false });
         configState = "valid";
       } catch (error) {
         configState = "invalid";
-        const message = failureMessage(error, "Configuration is invalid");
-        // Binary failures are reported precisely, per lane, below.
-        if (!/^Missing absolute \w+ binary$/.test(message))
-          problems.push({ code: "CONFIG_INVALID", message });
+        problems.push({
+          code: "CONFIG_INVALID",
+          message: failureMessage(error, "Configuration is invalid"),
+        });
       }
     } else if (configState === "not-configured")
       problems.push({
@@ -542,9 +545,17 @@ async function main() {
       });
     // Retention failures only reach the update cache; surface them here, since a
     // silently stalled self-update is otherwise invisible.
-    const updateCache = await readUpdateCache(
-      updateCachePath(process.env),
-    ).catch(() => ({}) as Awaited<ReturnType<typeof readUpdateCache>>);
+    let updateCache: Awaited<ReturnType<typeof readUpdateCache>> = {
+      version: 1,
+    };
+    try {
+      updateCache = await readUpdateCache(updateCachePath(process.env));
+    } catch (error) {
+      problems.push({
+        code: "CACHE_DIR_INVALID",
+        message: failureMessage(error, "Update cache directory is invalid"),
+      });
+    }
     let releases: string;
     try {
       releases = printablePath(releasesRoot());
@@ -559,31 +570,29 @@ async function main() {
     try {
       git = execFileSync("git", ["--version"], { encoding: "utf8" }).trim();
     } catch {
-      problems.push({
-        code: "GIT_UNAVAILABLE",
-        message: "git is not runnable",
-      });
+      // Project discovery already ran git, so this is not expected to fail.
     }
-    const reportedHarnesses = new Set<string>();
-    const probeFor = async (harness: string, lane?: string) => {
-      const { probe, code } = await probeBinary(
-        effectiveBinary(config ?? {}, harness),
-        harness,
-      );
-      if (code && (lane !== undefined || !reportedHarnesses.has(harness)))
+    const reportedPaths = new Set<string>();
+    const probeFor = async (harness: string, path?: string, lane?: string) => {
+      const { probe, code } = await probeBinary(path, harness);
+      if (code && !(probe.path !== null && reportedPaths.has(probe.path))) {
         problems.push({
           code,
           ...(lane === undefined ? {} : { lane }),
           message: probe.problem ?? "binary unusable",
         });
-      if (code && lane !== undefined) reportedHarnesses.add(harness);
+        if (probe.path !== null) reportedPaths.add(probe.path);
+      }
       return probe;
     };
     const harnesses: unknown[] = [];
     if (config && typeof config.lanes === "object" && config.lanes)
       for (const [id, lane] of Object.entries(config.lanes)) {
         try {
+          if (typeof lane !== "object" || lane === null || Array.isArray(lane))
+            throw new Error("Lane is invalid");
           const harness = lane.harness ?? "codex";
+          if (!validHarness(harness)) throw new Error("Unsupported harness");
           const instructions = lane.instructionsPath
             ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
             : "none";
@@ -596,7 +605,11 @@ async function main() {
           harnesses.push({
             id,
             harness,
-            binary: await probeFor(harness, id),
+            binary: await probeFor(
+              harness,
+              effectiveBinary(config ?? {}, harness),
+              id,
+            ),
             capabilities: harnessCapabilities[harness],
             permissions: lanePermissions(lane),
             model: lane.piModel ?? lane.model ?? null,
@@ -633,17 +646,22 @@ async function main() {
           });
         }
       }
-    // The default (Codex) binary is reported even when no lane uses it; a
-    // failure is a problem only if a lane did not already report it.
-    const defaultBinary = config?.binary ? await probeFor("codex") : null;
+    // The top-level binary is probed itself, even when no lane resolves to it;
+    // a failure already reported for the same path by a lane is not repeated.
+    const defaultBinary = config?.binary
+      ? await probeFor("default", config.binary)
+      : null;
     const globalProblem = instructionFileProblem(root, policy.instructionsPath);
-    if (globalProblem)
-      problems.push({ code: "INSTRUCTIONS_INVALID", message: globalProblem });
+    // A missing global file is reported at prompt time, not a hard failure.
+    const warnings: DoctorProblem[] = globalProblem
+      ? [{ code: "INSTRUCTIONS_GLOBAL_UNAVAILABLE", message: globalProblem }]
+      : [];
     process.exitCode = problems.length ? 2 : 0;
     return output({
       version: 1,
       ok: problems.length === 0,
       problems,
+      warnings,
       update: {
         latest: updateCache.latest ?? null,
         lastAttemptAt: updateCache.lastAttemptAt ?? null,

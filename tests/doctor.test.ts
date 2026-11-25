@@ -13,12 +13,23 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const bin = resolve("dist/crewplane");
-const baseEnv = {
-  ...process.env,
-  CREWPLANE_COORD_DIR: "",
-  CREWPLANE_NO_AUTO_UPDATE: "1",
-};
 const cleanup: string[] = [];
+/** A hermetic environment: no real HOME, caches, or inherited git context. */
+const isolatedEnv = (outer: string): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env))
+    if (value !== undefined && !key.startsWith("GIT_")) env[key] = value;
+  return {
+    ...env,
+    HOME: join(outer, "home"),
+    XDG_CACHE_HOME: join(outer, "xdg-cache"),
+    XDG_DATA_HOME: join(outer, "xdg-data"),
+    CREWPLANE_CACHE_DIR: join(outer, "cache"),
+    CREWPLANE_RELEASES_DIR: join(outer, "rel"),
+    CREWPLANE_COORD_DIR: "",
+    CREWPLANE_NO_AUTO_UPDATE: "1",
+  };
+};
 afterEach(() => {
   for (const path of cleanup.splice(0))
     rmSync(path, { recursive: true, force: true });
@@ -29,6 +40,7 @@ interface Report {
   runtime: string;
   config: string;
   problems: Array<{ code: string; lane?: string; message: string }>;
+  warnings: Array<{ code: string; lane?: string; message: string }>;
   defaultBinary: { path: string | null; ok: boolean; problem?: string } | null;
   globalInstructions: string;
   update: { retainedReleases: string };
@@ -40,7 +52,7 @@ interface Report {
   }>;
 }
 
-function project(options: { configure?: boolean; agentsFile?: boolean } = {}) {
+function project() {
   const outer = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-doctor-")));
   cleanup.push(outer);
   const root = join(outer, "project");
@@ -50,8 +62,6 @@ function project(options: { configure?: boolean; agentsFile?: boolean } = {}) {
   git("init", "-q", "--initial-branch=main");
   git("config", "user.name", "Synthetic");
   git("config", "user.email", "fixture@example.invalid");
-  if (options.agentsFile !== false)
-    writeFileSync(join(root, "AGENTS.md"), "Synthetic guidance.\n");
   writeFileSync(join(root, "seed.txt"), "seed\n");
   git("add", ".");
   git("commit", "-qm", "test: seed");
@@ -66,7 +76,13 @@ function project(options: { configure?: boolean; agentsFile?: boolean } = {}) {
   const run = (args: string[], env: Record<string, string> = {}) =>
     spawnSync(bin, ["--project", root, ...args], {
       cwd: root,
-      env: { ...baseEnv, CREWPLANE_RELEASES_DIR: join(outer, "rel"), ...env },
+      env: { ...isolatedEnv(outer), ...env },
+      encoding: "utf8",
+    });
+  const runSource = (env: Record<string, string> = {}) =>
+    spawnSync("bun", [resolve("src/cli.ts"), "--project", root, "doctor"], {
+      cwd: root,
+      env: { ...isolatedEnv(outer), ...env },
       encoding: "utf8",
     });
   const config = (binary: string, lanes: Record<string, unknown>) => ({
@@ -100,6 +116,7 @@ function project(options: { configure?: boolean; agentsFile?: boolean } = {}) {
     };
   };
   return {
+    runSource,
     outer,
     root,
     tools,
@@ -125,6 +142,10 @@ describe("crewplane doctor", () => {
     expect(status).toBe(0);
     expect(report.ok).toBe(true);
     expect(report.problems).toEqual([]);
+    // A missing global instructions file is a warning, never a failure.
+    expect(report.warnings.map((item) => item.code)).toEqual([
+      "INSTRUCTIONS_GLOBAL_UNAVAILABLE",
+    ]);
     expect(report.runtime).toBe("compiled");
     expect(report.config).toBe("valid");
     expect(report.defaultBinary).toEqual({ path: good, ok: true });
@@ -154,7 +175,6 @@ describe("crewplane doctor", () => {
     const good = p.fake("good");
     p.configure(
       p.config(good, {
-        ok: { enabled: true },
         gone: { enabled: true },
         plain: { enabled: true },
         folder: { enabled: true },
@@ -171,13 +191,22 @@ describe("crewplane doctor", () => {
     writeFileSync(good, `#!/bin/sh\ntouch ${marker}\n`);
     chmodSync(good, 0o755);
     stored.lanes.gone.harness = "claude";
+    stored.lanes.gone.model = "sonnet";
+    stored.lanes.gone.claudePermissionMode = "plan";
+    stored.lanes.gone.claudeMcp = "strict";
+    stored.lanes.gone.claudeSettingSources = ["project"];
     stored.lanes.plain.harness = "opencode";
-    stored.lanes.folder.harness = "pi";
-    stored.binaries = { claude: missing, opencode: plain, pi: dir };
+    stored.lanes.plain.model = "anthropic/claude-sonnet-4";
+    stored.lanes.folder.harness = "codex";
+    stored.binaries = { claude: missing, opencode: plain, codex: dir };
     writeFileSync(path, JSON.stringify(stored));
     const { status, report } = p.doctor();
     expect(status).toBe(2);
     expect(report.ok).toBe(false);
+    expect(report.config).toBe("valid");
+    expect(report.problems.map((item) => item.code)).not.toContain(
+      "CONFIG_INVALID",
+    );
     const byLane = Object.fromEntries(
       report.problems.map((item) => [item.lane ?? "-", item.code]),
     );
@@ -187,7 +216,6 @@ describe("crewplane doctor", () => {
       folder: "BINARY_INVALID",
     });
     const lanes = Object.fromEntries(report.harnesses.map((h) => [h.id, h]));
-    expect(lanes.ok?.binary).toEqual({ path: good, ok: true });
     expect(lanes.gone?.binary).toMatchObject({ path: missing, ok: false });
     expect(lanes.gone?.binary.problem).toContain("does not exist");
     expect(lanes.plain?.binary.ok).toBe(false);
@@ -212,14 +240,19 @@ describe("crewplane doctor", () => {
       message: "codex binary path must be absolute",
     });
     expect(report.harnesses[0]?.binary.path).toBe("relative/codex");
-    // The per-lane failure is not repeated for the shared default binary.
-    expect(
-      report.problems.filter((item) => item.code === "BINARY_INVALID"),
-    ).toHaveLength(1);
+    // The top-level binary is probed itself, not through binaries.codex.
+    expect(report.defaultBinary).toMatchObject({
+      path: "also-relative",
+      ok: false,
+    });
+    expect(report.problems).toContainEqual({
+      code: "BINARY_INVALID",
+      message: "default binary path must be absolute",
+    });
   });
 
   it("reports unusable instruction files per lane and globally", () => {
-    const p = project({ agentsFile: false });
+    const p = project();
     const good = p.fake("good");
     writeFileSync(join(p.root, "lane.md"), "lane guidance\n");
     p.configure(
@@ -230,15 +263,12 @@ describe("crewplane doctor", () => {
     rmSync(join(p.root, "lane.md"));
     const { status, report } = p.doctor();
     expect(status).toBe(2);
-    const instructions = report.problems.filter(
-      (item) => item.code === "INSTRUCTIONS_INVALID",
-    );
-    expect(instructions.map((item) => item.lane)).toEqual([
-      "builder",
-      undefined,
-    ]);
+    expect(
+      report.problems.filter((item) => item.code === "INSTRUCTIONS_INVALID"),
+    ).toEqual([expect.objectContaining({ lane: "builder" })]);
     expect(report.harnesses[0]?.instructions).not.toBe("ok");
     expect(report.globalInstructions).not.toBe("ok");
+    expect(report.warnings).toHaveLength(1);
   });
 
   it("turns an invalid releases directory into a problem instead of aborting", () => {
@@ -267,5 +297,92 @@ describe("crewplane doctor", () => {
     expect(report.problems.map((item) => item.code)).toEqual([
       "CONFIG_INVALID",
     ]);
+  });
+
+  it("reports a missing binary together with other configuration errors", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(
+      p.config(good, { builder: { enabled: true }, other: { enabled: true } }),
+    );
+    const path = p.storedConfig();
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    stored.lanes.builder.harness = "claude";
+    stored.binaries = { claude: join(p.tools, "missing") };
+    stored.lanes.other.maxRunsPerHour = 21;
+    writeFileSync(path, JSON.stringify(stored));
+    const { status, report } = p.doctor();
+    expect(status).toBe(2);
+    expect(report.config).toBe("invalid");
+    const codes = report.problems.map((item) => item.code);
+    expect(codes).toContain("BINARY_MISSING");
+    expect(codes).toContain("CONFIG_INVALID");
+  });
+
+  it("probes the top-level binary even when binaries.codex is valid", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(p.config(good, { builder: { enabled: true } }));
+    const path = p.storedConfig();
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    stored.binaries = { codex: good };
+    stored.binary = join(p.tools, "gone");
+    stored.lanes = {};
+    writeFileSync(path, JSON.stringify(stored));
+    const { status, report } = p.doctor();
+    expect(status).toBe(2);
+    expect(report.defaultBinary).toMatchObject({ ok: false });
+    expect(report.problems).toEqual([
+      expect.objectContaining({ code: "BINARY_MISSING" }),
+    ]);
+    expect(report.problems[0]?.lane).toBeUndefined();
+  });
+
+  it("neither leaks engine errors nor aborts on a malformed lane", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(p.config(good, { a: { enabled: true }, b: { enabled: true } }));
+    const path = p.storedConfig();
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    stored.lanes.a = null;
+    stored.lanes.b.harness = "constructor";
+    writeFileSync(path, JSON.stringify(stored));
+    const result = p.run(["doctor"]);
+    expect(result.status).toBe(2);
+    const report = JSON.parse(result.stdout) as Report;
+    expect(report.problems).toContainEqual({
+      code: "CONFIG_INVALID",
+      lane: "a",
+      message: "Lane is invalid",
+    });
+    expect(report.problems).toContainEqual({
+      code: "CONFIG_INVALID",
+      lane: "b",
+      message: "Unsupported harness",
+    });
+    expect(result.stdout).not.toContain("evaluating");
+    expect(result.stdout).not.toContain("BINARY_MISSING");
+  });
+
+  it("turns an invalid cache directory into a problem", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(p.config(good, { builder: { enabled: true } }));
+    const { status, report } = p.doctor({ CREWPLANE_CACHE_DIR: "relative" });
+    expect(status).toBe(2);
+    expect(report.problems).toEqual([
+      expect.objectContaining({ code: "CACHE_DIR_INVALID" }),
+    ]);
+  });
+
+  it("reports runtime bun when run from source", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(p.config(good, { builder: { enabled: true } }));
+    const result = p.runSource();
+    expect(result.status, result.stderr).toBe(0);
+    const report = JSON.parse(result.stdout) as Report;
+    expect(report.runtime).toBe("bun");
+    expect(report.ok).toBe(true);
   });
 });
