@@ -7,11 +7,21 @@ import {
 } from "./engine/read-model.ts";
 import type { PlanParser } from "./ports.ts";
 import { planParsers } from "./profiles/index.ts";
+import { projectPolicy } from "./project.ts";
 
-export const snapshot = (
-  root: string,
-  options: SnapshotOptions = { planParsers },
-) => readSnapshot(root, options);
+/** Reject a well-formed but unregistered roadmap format with an actionable error. */
+export function assertRoadmapFormat(format: string | undefined) {
+  const name = format ?? "none";
+  if (name !== "none" && !Object.hasOwn(planParsers, name))
+    throw new Error(
+      `Unsupported roadmapFormat "${name}"; use "none" or one of: ${Object.keys(planParsers).join(", ")}`,
+    );
+}
+
+export async function snapshot(root: string, options: SnapshotOptions = {}) {
+  assertRoadmapFormat(projectPolicy(root).roadmapFormat);
+  return readSnapshot(root, { planParsers, ...options });
+}
 
 /** Placeholder cards for a roadmap format registered in the profile registry (default `relay`). */
 export function plannedTasks(
