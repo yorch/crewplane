@@ -254,6 +254,37 @@ it("treats a young empty lock as another starter's publication in progress", asy
   }
 });
 
+it("treats a young half-written lock as another starter's publication in progress", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "relay-watch-partial-"));
+  try {
+    const path = join(directory, "watcher.lock");
+    // A reader can observe a non-empty prefix of the JSON before the writer finishes.
+    await writeFile(path, '{"pid":');
+    setTimeout(() => {
+      void writeFile(
+        path,
+        JSON.stringify({ pid: process.pid, token: "live-owner" }),
+      );
+    }, 200);
+    await expect(acquire(directory)).rejects.toThrow("already owns");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("still reports an old half-written lock for manual inspection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "relay-watch-oldpartial-"));
+  try {
+    const path = join(directory, "watcher.lock");
+    await writeFile(path, '{"pid":');
+    const old = new Date(Date.now() - 60_000);
+    await utimes(path, old, old);
+    await expect(acquire(directory)).rejects.toThrow("inspect it manually");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 it("reports torn locks and interrupted recovery with a clear manual-inspection error", async () => {
   const directory = await mkdtemp(join(tmpdir(), "relay-watch-torn-"));
   try {
