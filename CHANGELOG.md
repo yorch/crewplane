@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.0](https://github.com/yorch/crewplane/compare/v0.6.1...v0.7.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **security:** move the supervisor control plane to a private per-user directory ([#24](https://github.com/yorch/crewplane/issues/24))
+
+### Features
+
+* **dashboard:** accessibility, touch and clarity polish ([#21](https://github.com/yorch/crewplane/issues/21)) ([e05c547](https://github.com/yorch/crewplane/commit/e05c54788d1252f3fadb9d30157ce9e6feeedc48))
+* **doctor:** probe harness binaries and exit non-zero on problems ([#20](https://github.com/yorch/crewplane/issues/20)) ([b28765e](https://github.com/yorch/crewplane/commit/b28765ea9520a03df34bd7aa8b137001eaf16cc1))
+* **security:** Ed25519 release signatures for self-update and installer ([#23](https://github.com/yorch/crewplane/issues/23)) ([8634752](https://github.com/yorch/crewplane/commit/86347529734c035c2619f451b8833a5c168df284))
+* **security:** move the supervisor control plane to a private per-user directory ([#24](https://github.com/yorch/crewplane/issues/24)) ([25751b1](https://github.com/yorch/crewplane/commit/25751b1d8fed6876901388f3165233f0610d36c5))
+
+
+### Bug Fixes
+
+* **security:** require a per-launch session for dashboard data reads ([#19](https://github.com/yorch/crewplane/issues/19)) ([7e49440](https://github.com/yorch/crewplane/commit/7e4944065283837d27bbd5e8e323531d6747fcc5))
+* **watch:** wait for a half-written young lock instead of declaring it corrupt ([#25](https://github.com/yorch/crewplane/issues/25)) ([9f25112](https://github.com/yorch/crewplane/commit/9f25112d62fea4622695bb358a91319b7ca12958))
+
 ## [0.6.1](https://github.com/yorch/crewplane/compare/v0.6.0...v0.6.1) (2026-11-25)
 
 
