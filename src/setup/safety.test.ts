@@ -92,6 +92,9 @@ it.skipIf(!canChown)(
 it("refuses a group-writable directory unless it is ours with our own group", async () => {
   const dir = join(base(), "mine");
   const path = executable(dir);
+  // Directories inherit their parent's group on some systems (macOS /tmp is
+  // wheel), so state the group explicitly: ours, then group-writable.
+  chownSync(dir, process.getuid?.() ?? 0, process.getgid?.() ?? 0);
   chmodSync(dir, 0o775);
   // The directory is owned by us with our primary group: accepted.
   expect(await binarySafetyProblem(path)).toBeNull();
@@ -156,6 +159,13 @@ const asUser = (uid: number, gid: number, ...groups: number[]): Identity => ({
   groups: [gid, ...groups],
 });
 const root = asUser(0, 0);
+// The identity of whoever runs the tests: the directories these tests create
+// are owned by it, which is root locally but an ordinary user in CI.
+const me: Identity = {
+  uid: process.getuid?.() ?? 0,
+  gid: process.getgid?.() ?? 0,
+  groups: process.getgroups?.() ?? [],
+};
 
 it.skipIf(!canChown)(
   "refuses a foreign symlinked directory in the path as named (sticky tmp/evil -> bin)",
@@ -217,7 +227,7 @@ it("refuses a symlink loop without hanging", async () => {
   const r = base();
   symlinkSync(join(r, "b"), join(r, "a"));
   symlinkSync(join(r, "a"), join(r, "b"));
-  expect(await binarySafetyProblem(join(r, "a", "codex"), root)).toMatch(
+  expect(await binarySafetyProblem(join(r, "a", "codex"), me)).toMatch(
     /too long or loops/,
   );
 });
@@ -230,9 +240,9 @@ it("follows .. the way the kernel does (through a symlinked directory)", async (
   symlinkSync(join(real, "deep"), join(r, "to-deep"));
   // The link's target to-deep/../bin/codex is real/bin/codex, not r/bin/codex.
   symlinkSync("to-deep/../bin/codex", join(r, "lnk"));
-  expect(await binarySafetyProblem(join(r, "lnk"), root)).toBeNull();
+  expect(await binarySafetyProblem(join(r, "lnk"), me)).toBeNull();
   chmodSync(real, 0o777);
-  expect(await binarySafetyProblem(join(r, "lnk"), root)).toMatch(
+  expect(await binarySafetyProblem(join(r, "lnk"), me)).toMatch(
     /world-writable/,
   );
   expect(path).toBeTruthy();
