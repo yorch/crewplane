@@ -3,18 +3,27 @@ import {
   chmodSync,
   chownSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, expect, it } from "vitest";
-import { checkOut, gitLimits } from "./out.ts";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  checkOut,
+  gitLimits,
+  prepareOut,
+  staleTempAgeMs,
+  sweepStaleOut,
+} from "./out.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -180,4 +189,191 @@ it("removes the hidden temporary file when the process exits before commit", () 
   });
   expect(result.status).toBe(3);
   expect(leftovers(dir)).toEqual([]);
+});
+
+describe("stale temporary file sweep", () => {
+  const hex = "0123456789ab";
+  const tempName = (target = "x.json", id = hex) => `.${target}.${id}.tmp`;
+  const plant = (dir: string, name: string, mode = 0o600) => {
+    const file = join(dir, name);
+    writeFileSync(file, "{}");
+    chmodSync(file, mode);
+    return file;
+  };
+  // Files are created now; "later" is the injected clock, since ctime cannot be set.
+  const later = () => Date.now() + 2 * staleTempAgeMs;
+  const names = (dir: string) => readdirSync(dir).sort();
+
+  it("removes an old matching 0600 regular file and reports it", async () => {
+    const dir = base();
+    plant(dir, tempName());
+    const removed = await sweepStaleOut(join(dir, "x.json"), { now: later });
+    expect(removed).toEqual([tempName()]);
+    expect(names(dir)).toEqual([]);
+  });
+
+  it("keeps a young file, including at exactly the age, and a clock before the file", async () => {
+    const dir = base();
+    const file = plant(dir, tempName());
+    const born = Math.max(statSync(file).mtimeMs, statSync(file).ctimeMs);
+    for (const at of [born, born + staleTempAgeMs, born - 10 * staleTempAgeMs])
+      expect(
+        await sweepStaleOut(join(dir, "x.json"), { now: () => at }),
+      ).toEqual([]);
+    expect(names(dir)).toEqual([tempName()]);
+    // The age is configurable.
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), {
+        now: () => born + 11,
+        maxAgeMs: 10,
+      }),
+    ).toEqual([tempName()]);
+  });
+
+  it("never removes a live concurrent setup's temp file through prepareOut", async () => {
+    const dir = base();
+    const live = await prepareOut(join(dir, "x.json"), "{}", []);
+    const second = await prepareOut(join(dir, "x.json"), "{}", []);
+    expect(names(dir)).toHaveLength(2);
+    await live.discard();
+    await second.discard();
+    expect(names(dir)).toEqual([]);
+  });
+
+  it("keeps everything that is not exactly this target's own temp file", async () => {
+    const dir = base();
+    const keep: string[] = [];
+    const add = (name: string, mode?: number) => {
+      plant(dir, name, mode);
+      keep.push(name);
+    };
+    add(tempName("y.json")); // different basename
+    add(tempName("x.json", "0123456789AB")); // upper-case hex
+    add(tempName("x.json", "0123456789a")); // short id
+    add(tempName("x.json", "0123456789abc")); // long id
+    add(`${tempName()}.bak`);
+    add(`x${tempName()}`);
+    add("x.json.0123456789ab.tmp"); // not hidden
+    add(`.x.json.${hex}`); // no suffix
+    add(`..x.json.${hex}.tmp`); // extra dot
+    add(`.x.json.${hex}.tmp`.replace("x.json", "x.jsonn")); // longer basename
+    add(".x.json..tmp");
+    add(tempName("x.json", "1111111111ab"), 0o644);
+    add(tempName("x.json", "2222222222ab"), 0o400);
+    add(tempName("x.json", "3333333333ab"), 0o700);
+    add(tempName("x.json", "4444444444ab"), 0o660);
+    // A directory with a matching name, with content that must survive.
+    mkdirSync(join(dir, tempName("x.json", "5555555555ab")));
+    writeFileSync(join(dir, tempName("x.json", "5555555555ab"), "inner"), "i");
+    // A symlink with a matching name to an old 0600 file elsewhere.
+    const outside = base();
+    const victim = plant(outside, "victim", 0o600);
+    symlinkSync(victim, join(dir, tempName("x.json", "6666666666ab")));
+    // A dangling symlink.
+    symlinkSync(
+      join(outside, "gone"),
+      join(dir, tempName("x.json", "7777777777ab")),
+    );
+    // A hard-linked file (a commit in progress has two names).
+    const linked = plant(dir, tempName("x.json", "8888888888ab"));
+    linkSync(linked, join(outside, "second-name"));
+    const before = names(dir);
+    const removed = await sweepStaleOut(join(dir, "x.json"), { now: later });
+    expect(removed).toEqual([]);
+    expect(names(dir)).toEqual(before);
+    expect(existsSync(victim)).toBe(true);
+    expect(
+      existsSync(join(dir, tempName("x.json", "5555555555ab"), "inner")),
+    ).toBe(true);
+    for (const name of keep) expect(existsSync(join(dir, name))).toBe(true);
+  });
+
+  it("sweeps only the target's directory, not subdirectories or other directories", async () => {
+    const dir = base();
+    mkdirSync(join(dir, "sub"));
+    plant(join(dir, "sub"), tempName());
+    const other = base();
+    plant(other, tempName());
+    plant(dir, tempName());
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), { now: later }),
+    ).toHaveLength(1);
+    expect(names(join(dir, "sub"))).toEqual([tempName()]);
+    expect(names(other)).toEqual([tempName()]);
+  });
+
+  it.skipIf(!canChown)("keeps an old file owned by another user", async () => {
+    const dir = base();
+    const file = plant(dir, tempName());
+    chownSync(file, 65534, 65534);
+    expect(await sweepStaleOut(join(dir, "x.json"), { now: later })).toEqual(
+      [],
+    );
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("ignores failures: a missing directory, a throwing clock and an unreadable directory", async () => {
+    const dir = base();
+    expect(
+      await sweepStaleOut(join(dir, "missing", "x.json"), { now: later }),
+    ).toEqual([]);
+    plant(dir, tempName());
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), {
+        now: () => {
+          throw new Error("clock");
+        },
+      }),
+    ).toEqual([]);
+    expect(names(dir)).toEqual([tempName()]);
+  });
+
+  it("a failing sweep does not fail preparing --out, and a working one sweeps then writes", async () => {
+    const dir = base();
+    plant(dir, tempName());
+    const failing = await prepareOut(join(dir, "x.json"), '{"a":1}', [], {
+      now: () => {
+        throw new Error("clock");
+      },
+    });
+    await failing.commit();
+    expect(readFileSync(join(dir, "x.json"), "utf8")).toBe('{"a":1}');
+    expect(names(dir)).toEqual([tempName(), "x.json"]);
+    const other = base();
+    plant(other, tempName());
+    const plan = await prepareOut(join(other, "x.json"), "{}", [], {
+      now: later,
+    });
+    // The stale file is gone and only this run's own hidden file exists.
+    expect(names(other)).toHaveLength(1);
+    expect(names(other)[0]).not.toBe(tempName());
+    await plan.commit();
+    expect(names(other)).toEqual(["x.json"]);
+  });
+
+  it("never sweeps for a refused path", async () => {
+    const dir = base();
+    plant(dir, tempName());
+    writeFileSync(join(dir, "x.json"), "existing");
+    await expect(
+      prepareOut(join(dir, "x.json"), "{}", [], { now: later }),
+    ).rejects.toThrow(/Refusing to overwrite/);
+    await expect(
+      prepareOut(join(dir, "x.json"), "{}", [dir], { now: later }),
+    ).rejects.toThrow();
+    const guarded = base();
+    plant(guarded, tempName("y.json"));
+    await expect(
+      prepareOut(join(guarded, "y.json"), "{}", [guarded], { now: later }),
+    ).rejects.toThrow(/control or state directory/);
+    const git = join(base(), ".git");
+    mkdirSync(git);
+    plant(git, tempName());
+    await expect(
+      prepareOut(join(git, "x.json"), "{}", [], { now: later }),
+    ).rejects.toThrow();
+    expect(names(dir)).toEqual([tempName(), "x.json"]);
+    expect(names(guarded)).toEqual([tempName("y.json")]);
+    expect(names(git)).toEqual([tempName()]);
+  });
 });
