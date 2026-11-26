@@ -632,6 +632,8 @@ it("pages retained runs beyond two pages and keeps incremental events unique dur
     async () => (await page.locator("#run-history .run-row").count()) === 41,
     "third run page",
   );
+  // The automatically selected newest run is reflected in the URL.
+  expect(await hash(page)).toContain(`run=${ids[0]}`);
   expect(requests).toContain(ids[19]);
   expect(requests).toContain(ids[39]);
   expect(await page.locator("#run-more").isDisabled()).toBe(true);
@@ -640,6 +642,13 @@ it("pages retained runs beyond two pages and keeps incremental events unique dur
   expect(await page.locator("#run-events").textContent()).toContain(
     "Synthetic run completed",
   );
+  // Timeline times come from the shared formatter and carry a machine value.
+  const shared = (await page.evaluate(
+    "window.crewplane.formatTime('2026-11-08T00:00:01Z')",
+  )) as string;
+  const stamp = page.locator("#run-events time").first();
+  expect(await stamp.textContent()).toBe(shared);
+  expect(await stamp.getAttribute("datetime")).toBe("2026-11-08T00:00:01.000Z");
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
@@ -670,3 +679,220 @@ it("adopts a fresh session fragment in the same tab, in every accepted form, wit
   }
   await page.close();
 });
+
+it("uses plain status labels with stable filter values and readable exact times", async () => {
+  const { page, errors } = await open("#/tasks");
+  await title(page, "Tasks");
+  const options = await page
+    .locator("#state option")
+    .evaluateAll((nodes) =>
+      nodes.map((node) => [
+        (node as HTMLOptionElement).value,
+        node.textContent,
+      ]),
+    );
+  expect(options).toContainEqual(["attention", "Blocked or awaiting review"]);
+  expect(options).toContainEqual(["review", "Awaiting review"]);
+  expect(options).toContainEqual(["completed", "Completed"]);
+  expect(JSON.stringify(options)).not.toMatch(/Needs decision|disposition/);
+  await page.goto(`${base}#/overview`);
+  await title(page, "Overview");
+  expect(await page.locator("#view-overview").textContent()).toContain(
+    "Blocked or awaiting review",
+  );
+  // Exact time is real text, not only a tooltip.
+  await page.goto(`${base}#/tasks?task=WEB-1`);
+  await page.locator("#task-detail time .time-exact").first().waitFor({
+    state: "attached",
+  });
+  const [text, iso] = await page
+    .locator("#task-detail time")
+    .first()
+    .evaluate((node) => [node.textContent, node.getAttribute("datetime")]);
+  expect(iso).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  expect(text).toMatch(/\(.*\d.*\)/);
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("reports an unknown run id and describes broadcast filtering without renaming the control", async () => {
+  const { page, errors } = await open("#/runs?run=not-a-run");
+  await page.locator('#run-events:has-text("Unknown run id")').waitFor();
+  await page.goto(`${base}#/messages`);
+  await title(page, "Messages");
+  // The accessible name stays "Agent"; the broadcast note is a description.
+  expect(
+    await page.getByRole("combobox", { name: "Agent", exact: true }).count(),
+  ).toBeGreaterThan(0);
+  const described = await page.locator("#message-agent").evaluate((select) => {
+    const id = select.getAttribute("aria-describedby") ?? "";
+    return document.getElementById(id)?.textContent ?? "";
+  });
+  expect(described).toContain("Also shows messages sent to everyone");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("resets the older-messages limit when message filters change", async () => {
+  const { page, errors } = await open("#/messages?filter=all");
+  await page.route("**/api/snapshot", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const template = body.messages[0];
+    for (let index = 0; index < 250; index++)
+      body.messages.push({
+        ...template,
+        id: `bulk-${index}`,
+        text: `bulkmessage ${index}`,
+        task: null,
+      });
+    await route.fulfill({ response, json: body });
+  });
+  await page.locator("#refresh").click();
+  const rows = () => page.locator("#messages .message-row").count();
+  await until(async () => (await rows()) === 100, "first 100 rows");
+  await page.getByRole("button", { name: "Show older messages" }).click();
+  await until(async () => (await rows()) === 200, "200 rows after show more");
+  await page.locator("#message-search").fill("bulkmessage");
+  await until(async () => (await rows()) === 100, "limit reset to 100");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("does not turn the detail pane into a nested scroll box below 1100px", async () => {
+  const { page, errors } = await open("#/tasks?task=WEB-2", 1000);
+  await page.locator("#task-detail").waitFor({ state: "visible" });
+  const pane = await page.locator("#task-detail").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return {
+      maxHeight: style.maxHeight,
+      position: style.position,
+      overflows: node.scrollHeight > node.clientHeight + 1,
+    };
+  });
+  expect(pane.maxHeight).toBe("none");
+  expect(pane.position).toBe("static");
+  expect(pane.overflows).toBe(false);
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+it("keeps selected state visible in forced colors and meets coarse-pointer target sizes without overflow", async () => {
+  const { page, errors } = await open("#/tasks?task=WEB-2&layout=board");
+  await page.locator("#tasks .card.is-selected").waitFor();
+  await page.emulateMedia({ forcedColors: "active" });
+  const outline = await page
+    .locator("#tasks .card.is-selected")
+    .evaluate((node) => getComputedStyle(node).outlineStyle);
+  expect(outline).not.toBe("none");
+  await page.close();
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 800 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const touch = await context.newPage();
+  const touchErrors: string[] = [];
+  touch.on("pageerror", (error) => touchErrors.push(error.message));
+  touch.on("console", (message) => {
+    if (message.type() === "error" && /Content Security/.test(message.text()))
+      touchErrors.push(message.text());
+  });
+  // A new context has no sessionStorage: adopt the per-launch session first.
+  const sessionToken = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1] ?? "";
+  await touch.goto(`${base}#token=${sessionToken}`);
+  await touch.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  const titles: Record<string, string> = {
+    overview: "Overview",
+    tasks: "Tasks",
+    agents: "Agents",
+    messages: "Messages",
+    runs: "Runs",
+    relationships: "Relationships",
+    system: "System",
+  };
+  const targets =
+    "button, select, input:not([type=checkbox]), a.shortcut, .skip-link, .primary-nav a, .close-link, .panel-link, .legend-link";
+  const smallTargets = () =>
+    touch.locator(targets).evaluateAll((nodes) =>
+      nodes
+        .map((node) => ({
+          name: node.id || node.className || node.tagName,
+          box: node.getBoundingClientRect(),
+        }))
+        .filter(({ box }) => box.width > 0 && box.height > 0)
+        .filter(({ box }) => box.height < 43.5)
+        .map(({ name }) => String(name)),
+    );
+  for (const width of [320, 390, 1024, 1440]) {
+    await touch.setViewportSize({ width, height: 900 });
+    for (const view of views) {
+      await touch.goto(`${base}#/${view}`);
+      await touch
+        .locator("#view-title")
+        .filter({ hasText: titles[view] ?? view })
+        .waitFor();
+      await touch.locator(`#view-${view}:not([hidden])`).waitFor();
+      expect(await noOverflow(touch), `${view} at ${width}`).toBe(true);
+      if (width === 390) {
+        if (await touch.locator("#nav-toggle").isVisible())
+          await touch.locator("#nav-toggle").click();
+        expect(await smallTargets(), `small targets in ${view}`).toEqual([]);
+      }
+    }
+  }
+  expect(touchErrors).toEqual([]);
+  await context.close();
+  expect(errors).toEqual([]);
+}, 60000);
+
+it("does not rewrite the URL back to Runs when another view was already navigated to", async () => {
+  const { page, errors } = await open("#/overview");
+  const id = "1794100000500-00000000-0000-4000-8000-000000000001";
+  let release: () => void = () => {};
+  const gate = new Promise<void>((done) => {
+    release = done;
+  });
+  const meta = {
+    version: 1,
+    runId: id,
+    lane: "custom-builder",
+    task: "WEB-1",
+    harness: "codex",
+    sessionId: null,
+    startedAt: "2026-11-08T00:00:00Z",
+    status: "finished",
+    events: 0,
+    bytes: 0,
+    truncated: false,
+    omitted: 0,
+    finalState: "waiting",
+  };
+  await page.route("**/api/runs**", async (route) => {
+    const url = new URL(route.request().url());
+    await gate;
+    await route.fulfill({
+      json:
+        url.pathname === "/api/runs"
+          ? { runs: [meta], nextCursor: null, incomplete: false }
+          : { meta, events: [], nextCursor: 0, incomplete: false },
+    });
+  });
+  await page.goto(`${base}#/runs`);
+  await page.locator("#view-runs:not([hidden])").waitFor();
+  // The browser has committed the new fragment but hashchange has not run yet.
+  await page.evaluate(() => history.pushState(null, "", "#/relationships"));
+  release();
+  await page
+    .locator("#runs-status")
+    .filter({ hasText: "Incremental private metadata" })
+    .waitFor();
+  expect(await hash(page)).toBe("#/relationships");
+  await page.evaluate(() =>
+    window.dispatchEvent(new HashChangeEvent("hashchange")),
+  );
+  await page.locator("#view-relationships:not([hidden])").waitFor();
+  expect(await hash(page)).toBe("#/relationships");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);

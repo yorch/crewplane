@@ -111,7 +111,12 @@ h2:focus {
   font-family: var(--font-mono);
   font-size: 0.93em;
 }
-.sr-only {
+html {
+  --topbar-height: 60px;
+  scroll-padding-top: 16px;
+}
+.sr-only,
+.time-exact {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -381,6 +386,11 @@ h2:focus {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+}
+.field-help {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
 }
 .badge {
   display: inline-flex;
@@ -681,10 +691,18 @@ details.info p {
 }
 .stack-segment {
   display: block;
-  min-width: 3px;
+  min-width: 4px;
+}
+.stack-segment + .stack-segment {
+  border-left: 1px solid var(--surface);
 }
 .stack-segment.tone-neutral {
-  background: #b9c2cf;
+  border: 1px solid #6b7585;
+  background: #e3e8ef;
+}
+.stack-segment.tone-neutral + .stack-segment,
+.stack-segment + .stack-segment.tone-neutral {
+  border-left: 1px solid #6b7585;
 }
 .stack-segment.tone-info {
   background: #5a84e6;
@@ -883,6 +901,15 @@ details.info p {
 }
 .card-link {
   color: var(--text);
+}
+@supports selector(:has(*)) {
+  .card:has(.card-link:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .card-link:focus-visible {
+    outline: none;
+  }
 }
 .card-link::after {
   content: "";
@@ -1241,6 +1268,10 @@ details.info p {
 }
 
 @media (max-width: 860px) {
+  html {
+    /* The sticky top bar must not cover focused or scrolled-to elements. */
+    scroll-padding-top: calc(var(--topbar-height) + 12px);
+  }
   .app {
     display: block;
   }
@@ -1385,12 +1416,118 @@ details.info p {
 
 @media (forced-colors: active) {
   .badge,
-  .metric,
-  .segmented button[aria-pressed="true"] {
+  .metric {
     border: 1px solid CanvasText;
   }
   .primary-nav a[aria-current="page"] {
     outline: 2px solid Highlight;
+  }
+  /* Background and box-shadow selection cues vanish here, so select with an
+     outline; :not(:focus-visible) keeps the focus ring visible on top. */
+  .segmented button[aria-pressed="true"],
+  .run-row[aria-pressed="true"] {
+    border: 2px solid Highlight;
+  }
+  .card.is-selected,
+  .message-row.is-selected:not(:focus-visible),
+  .agents-table tr.is-selected {
+    outline: 3px solid Highlight;
+    outline-offset: -3px;
+  }
+  .stack .stack-segment,
+  .stack .stack-segment + .stack-segment,
+  .stack .stack-segment.tone-neutral + .stack-segment,
+  .stack .stack-segment + .stack-segment.tone-neutral {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+  .connection-dot {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}
+
+@media (pointer: coarse) {
+  button,
+  input:not([type="checkbox"]),
+  select {
+    min-height: 44px;
+  }
+  button {
+    min-width: 44px;
+  }
+  .icon-button {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+  .skip-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .check {
+    min-height: 44px;
+  }
+  .check input {
+    width: 24px;
+    height: 24px;
+  }
+  .close-link,
+  .panel-link,
+  .shortcut,
+  .legend-link,
+  .primary-nav a {
+    display: inline-flex;
+    align-items: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .shortcut,
+  .legend-link {
+    display: flex;
+  }
+  .primary-nav a {
+    display: flex;
+  }
+  .time {
+    white-space: normal;
+  }
+}
+
+/* Touch has no hover tooltip: show the exact time as visible text. */
+@media (hover: none) {
+  .time-exact {
+    position: static;
+    display: block;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+    font-size: 11px;
+  }
+}
+
+/* dvh follows the visible viewport on mobile browsers; vh above is the fallback. */
+@supports (height: 100dvh) {
+  .app {
+    min-height: 100dvh;
+  }
+  .sidebar {
+    height: 100dvh;
+  }
+  /* Only the sticky side pane is height-capped; below 1100px it is static. */
+  @media (min-width: 1101px) {
+    .detail-pane {
+      max-height: calc(100dvh - 32px);
+    }
+  }
+  @media (max-width: 860px) {
+    .sidebar {
+      height: auto;
+      max-height: 100dvh;
+    }
   }
 }
 

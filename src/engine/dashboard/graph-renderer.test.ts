@@ -96,10 +96,25 @@ test("synthetic graph: bounded fanout, cycles, hostile text, missing references,
     }, snapshot);
     expect(await page.locator("img").count()).toBe(0);
     expect(await page.locator("tbody tr").count()).toBe(3);
+    // The live region stays short; coverage detail is static, not live.
+    expect(await page.locator('[role="status"]').textContent()).toBe(
+      "3 nodes, 3 relationships",
+    );
+    expect(await page.locator(".relay-graph-detail").getAttribute("role")).toBe(
+      null,
+    );
     await expectText(
-      page.locator('[role="status"]'),
+      page.locator(".relay-graph-detail"),
       "Missing-reference relationships: 1",
     );
+    // The filter input is linked to the static detail, which is not a live region.
+    const describedBy = await page
+      .locator(".relay-graph input")
+      .getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    expect(
+      await page.locator(`[id="${describedBy}"]`).getAttribute("class"),
+    ).toBe("relay-graph-detail");
     const first = page.locator(".relay-graph-nodes button").first();
     await first.focus();
     await page.keyboard.press("Enter");
@@ -239,8 +254,11 @@ test("synthetic graph: bounded fanout, cycles, hostile text, missing references,
     expect(await page.locator(".relay-graph-nodes button").count()).toBe(50);
     expect(await page.locator("tbody tr").count()).toBe(100);
     await expectText(
-      page.locator('[role="status"]'),
+      page.locator(".relay-graph-detail"),
       "Truncated: 5 nodes, 5 edges",
+    );
+    expect(await page.locator('[role="status"]').textContent()).toBe(
+      "50 nodes, 100 relationships",
     );
     await page.getByRole("combobox").selectOption("task");
     expect(await page.locator(".relay-graph-nodes button").count()).toBe(0);
@@ -249,6 +267,46 @@ test("synthetic graph: bounded fanout, cycles, hostile text, missing references,
       (window as unknown as { graph: { destroy: () => void } }).graph.destroy();
     });
     expect(await page.locator("#host").textContent()).toBe("");
+  } finally {
+    await browser.close();
+  }
+}, 30000);
+
+test("relationship table uses the supplied shared time formatter instead of raw ISO text", async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<main id="host"></main>');
+    await page.addScriptTag({
+      type: "module",
+      content: `${source}\nwindow.renderGraph = renderGraph;`,
+    });
+    await page.waitForFunction("typeof window.renderGraph === 'function'");
+    await page.evaluate(
+      (data) => {
+        const render = (
+          window as unknown as {
+            renderGraph: (...args: unknown[]) => unknown;
+          }
+        ).renderGraph;
+        render(document, document.querySelector("#host"), data, {
+          formatTime: (value: string) => `formatted<${value.slice(0, 4)}>`,
+        });
+      },
+      {
+        version: 1,
+        view: "communication",
+        nodes: [node("A"), node("B")],
+        edges: [{ ...edge("q", "A", "B"), at: "2026-01-02T03:04:05.000Z" }],
+        hidden: { nodes: 0, edges: 0 },
+      },
+    );
+    const row = await page.locator("tbody tr").textContent();
+    expect(row).toContain("Recorded: formatted<2026>");
+    expect(row).not.toContain("T03:04:05");
   } finally {
     await browser.close();
   }
