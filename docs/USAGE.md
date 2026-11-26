@@ -240,7 +240,7 @@ The supervisor refuses to start a lane whose harness differs from its latest rec
 
 Beyond being an absolute executable regular file, a binary that setup records must not be replaceable by other users:
 
-The path is resolved the way the kernel does, one component at a time from `/`, and each step is inspected with `lstat` without being executed. That covers every directory entered (as named, through each symlink, and the ancestors of those) and every symlink followed, including links in the middle of the path and relative `..` in link targets (hop limit 40; a loop is refused). The path as named is what gets recorded, and only when this whole walk passes.
+The path is resolved the way the kernel does, one component at a time from `/`, and each step is inspected with `lstat` without being executed. That covers every directory entered (as named, through each symlink, and the ancestors of those) and every symlink followed, including links in the middle of the path and relative `..` in link targets (hop limit 40; a loop is refused). Anything under `/proc` is refused, because its magic links read back as text that is not their real target. The path as named is what gets recorded, and only when this whole walk passes.
 
 Checked (POSIX; ownership and group checks are skipped where there is no uid):
 

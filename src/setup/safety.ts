@@ -108,6 +108,9 @@ export const binarySafetyProblem = async (
       continue;
     }
     const full = join(current, name);
+    // /proc magic links read back as text that is not their real target.
+    if (full === "/proc" || full.startsWith("/proc/"))
+      return "it is under /proc, whose links do not name their real target";
     let info: Stats;
     try {
       info = await lstat(full);
@@ -128,6 +131,7 @@ export const binarySafetyProblem = async (
       continue;
     }
     if (queue.length === 0) {
+      if (!info.isFile()) return "it is not a regular file";
       if (!trusted(info, who)) return "it is owned by another user";
       if ((info.mode & 0o022) !== 0) return "it is group- or world-writable";
       return null;

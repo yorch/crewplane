@@ -278,3 +278,15 @@ it("defaults the identity to the process's own", async () => {
   const path = executable(join(base(), "bin"));
   expect(await binarySafetyProblem(path)).toBeNull();
 });
+
+it("refuses a directory as the final component", async () => {
+  const dir = base();
+  executable(join(dir, "bin"));
+  expect(await binarySafetyProblem(join(dir, "bin"))).toMatch(
+    /not a regular file/,
+  );
+});
+
+it("refuses paths under /proc", async () => {
+  expect(await binarySafetyProblem("/proc/self/exe")).toMatch(/\/proc/);
+});
