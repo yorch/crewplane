@@ -25,7 +25,7 @@ import {
   type DoctorProblem,
   effectiveBinary,
   failureMessage,
-  probeBinary,
+  inspectBinary,
 } from "./doctor.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
@@ -775,7 +775,7 @@ async function main() {
     }
     const reportedPaths = new Set<string>();
     const probeFor = async (harness: string, path?: string, lane?: string) => {
-      const { probe, code } = await probeBinary(path, harness);
+      const { probe, code } = await inspectBinary(path, harness);
       if (code && !(probe.path !== null && reportedPaths.has(probe.path))) {
         problems.push({
           code,

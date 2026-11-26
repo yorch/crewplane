@@ -1,7 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lstatSync, unlinkSync } from "node:fs";
-import { link, lstat, open, realpath, stat, unlink } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  open,
+  readdir,
+  realpath,
+  stat,
+  unlink,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { printablePath } from "../project.ts";
 
@@ -156,6 +164,72 @@ export async function checkOut(
   if (problem) throw new Error(`--out refused: ${problem}: ${shown}`);
 }
 
+/** A temporary file younger than this may belong to a live concurrent setup. */
+export const staleTempAgeMs = 60 * 60 * 1000;
+
+export interface SweepOptions {
+  /** Clock in epoch milliseconds; injectable for tests. */
+  now?: () => number;
+  /** Minimum age before a leftover temporary file is removed. */
+  maxAgeMs?: number;
+  /** Called with the full path of each removed file (the CLI writes it to stderr). */
+  onRemoved?: (path: string) => void;
+  /** File system primitives; injectable so tests can make them fail on any account. */
+  fs?: Pick<typeof import("node:fs/promises"), "readdir" | "lstat" | "unlink">;
+}
+
+const tempHex = /^[0-9a-f]{12}$/;
+
+/**
+ * Remove temporary files that an earlier `--out` to the SAME target left
+ * behind after SIGKILL or power loss. Only entries in the target's directory
+ * named exactly `.BASENAME.<12 hex>.tmp` qualify, and only when lstat reports
+ * a regular file (never a followed symlink) owned by the current user with
+ * mode exactly 0600, a single link (a mid-commit file has two), and neither
+ * mtime nor ctime within `maxAgeMs` (a live concurrent setup's file is young).
+ * Every error is ignored: sweeping never fails setup. Returns the removed names.
+ */
+export async function sweepStaleOut(
+  path: string,
+  options: SweepOptions = {},
+): Promise<string[]> {
+  const removed: string[] = [];
+  try {
+    const now = (options.now ?? Date.now)();
+    const maxAgeMs = options.maxAgeMs ?? staleTempAgeMs;
+    const uid = process.getuid?.();
+    if (uid === undefined) return removed; // ownership cannot be proven
+    const fs = options.fs ?? { readdir, lstat, unlink };
+    const directory = dirname(path);
+    const prefix = `.${basename(path)}.`;
+    for (const name of await fs.readdir(directory)) {
+      if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+      if (!tempHex.test(name.slice(prefix.length, -".tmp".length))) continue;
+      try {
+        const file = join(directory, name);
+        const info = await fs.lstat(file);
+        if (!info.isFile() || info.isSymbolicLink()) continue;
+        if (info.uid !== uid || (info.mode & 0o7777) !== 0o600) continue;
+        if (info.nlink !== 1) continue;
+        const newest = Math.max(info.mtimeMs, info.ctimeMs);
+        if (!(now - newest > maxAgeMs)) continue;
+        await fs.unlink(file);
+        removed.push(name);
+        try {
+          options.onRemoved?.(file);
+        } catch {
+          // Reporting never fails the sweep.
+        }
+      } catch {
+        // Ignore this entry.
+      }
+    }
+  } catch {
+    // Sweeping is best effort.
+  }
+  return removed;
+}
+
 /**
  * Prepare an atomic, never-overwriting write: the content goes to a 0600
  * temporary file in the same directory and is fsynced; `commit` links it to the
@@ -166,14 +240,18 @@ export async function prepareOut(
   path: string,
   text: string,
   protectedPaths: readonly string[],
+  sweep: SweepOptions = {},
 ): Promise<OutPlan> {
   await checkOut(path, protectedPaths);
+  // After every refusal (so never inside a refused path), before the new file.
+  await sweepStaleOut(path, sweep);
   const temp = join(
     dirname(path),
     `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`,
   );
   // SIGINT/SIGTERM/exit between here and commit/discard must not leave the
-  // hidden temporary file behind. SIGKILL and power loss still can.
+  // hidden temporary file behind. SIGKILL and power loss still can;
+  // sweepStaleOut removes such a leftover on a later run once it is old.
   const removeTemp = () => {
     try {
       unlinkSync(temp);

@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { binarySafetyProblem, type SafetyCheck } from "./binary-safety.ts";
 
 /**
  * Closed set of `doctor` problem codes. Scripts may gate on these; adding a
@@ -12,6 +13,7 @@ export type DoctorProblemCode =
   | "BINARY_MISSING"
   | "BINARY_INVALID"
   | "BINARY_NOT_EXECUTABLE"
+  | "BINARY_UNSAFE"
   | "INSTRUCTIONS_INVALID"
   | "RELEASES_ROOT_INVALID"
   | "CACHE_DIR_INVALID"
@@ -81,6 +83,31 @@ export async function probeBinary(
     );
   }
   return { probe: { path, ok: true } };
+}
+
+/**
+ * `probeBinary`, then the binary safety walk (src/binary-safety.ts) when the
+ * probe passed: a binary that users outside the current user's groups could
+ * replace, or whose path they could redirect, fails as `BINARY_UNSAFE`. The
+ * binary is never run. `safety` is injectable for tests.
+ */
+export async function inspectBinary(
+  path: string | undefined,
+  harness: string,
+  safety: SafetyCheck = binarySafetyProblem,
+): Promise<{ probe: BinaryProbe; code?: DoctorProblemCode }> {
+  const result = await probeBinary(path, harness);
+  if (result.code !== undefined || result.probe.path === null) return result;
+  const reason = await safety(result.probe.path);
+  if (reason === null) return result;
+  return {
+    probe: {
+      path: result.probe.path,
+      ok: false,
+      problem: `${harness} binary refused: ${reason}`,
+    },
+    code: "BINARY_UNSAFE",
+  };
 }
 
 /**

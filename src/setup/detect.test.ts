@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { binarySafetyProblem } from "../binary-safety.ts";
 import {
   acceptBinary,
   describeRejection,
@@ -17,7 +18,6 @@ import {
   findOnPath,
   type Rejection,
 } from "./detect.ts";
-import { binarySafetyProblem } from "./safety.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -109,7 +109,7 @@ it("skips group/world-writable files and unsafe directories, listing each reason
     loose = temp(),
     wide = temp();
   fake(good, "codex");
-  fake(loose, "codex", 0o775);
+  fake(loose, "codex", 0o757);
   fake(wide, "codex");
   chmodSync(wide, 0o777);
   const rejected: Rejection[] = [];
