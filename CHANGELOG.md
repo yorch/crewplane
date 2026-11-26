@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/yorch/crewplane/compare/v0.7.0...v0.8.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **doctor:** apply the binary-safety check and add real-terminal setup tests ([#29](https://github.com/yorch/crewplane/issues/29))
+
+### Features
+
+* **doctor:** apply the binary-safety check and add real-terminal setup tests ([#29](https://github.com/yorch/crewplane/issues/29)) ([cccbe1a](https://github.com/yorch/crewplane/commit/cccbe1a9be434fbea329c14f622f1267a4f1d499))
+* **setup:** guided setup command with wizard and templates ([#27](https://github.com/yorch/crewplane/issues/27)) ([85629aa](https://github.com/yorch/crewplane/commit/85629aa5264cdd794f04daa8a6b9443a355b1615))
+
 ## [0.7.0](https://github.com/yorch/crewplane/compare/v0.6.1...v0.7.0) (2026-11-26)
 
 
