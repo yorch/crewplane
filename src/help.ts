@@ -9,6 +9,17 @@ Usage: crewplane [--project PATH] COMMAND
   pin --confirm true           Point the project's version pin at this release
   doctor                       Diagnose config and harness binaries (exit 2 on problems)
   configure --file PATH        Validate and install an explicit supervisor config
+  setup                        Guided setup wizard (needs a terminal; prints, never installs by default)
+  setup --non-interactive true --template codex|claude|opencode|mixed
+        [--binary PATH] [--claude-binary PATH] [--opencode-binary PATH] [--pi-binary PATH]
+        [--model ID] [--reviewer-model ID] [--reviewer-harness opencode|pi] [--pi-model PROVIDER/MODEL]
+        [--tasks ID,ID] [--implementers ID,ID] [--confirm-stopped true]
+        [--claude-permission-mode MODE] [--claude-mcp strict|inherit]
+        [--claude-setting-sources user,project,local] [--max-cost-usd N]
+        [--max-parallel N] [--interval-seconds N] [--max-run-minutes N] [--max-runs-per-hour N]
+        [--out PATH] [--install true]
+                               Generate a runtime config; --out writes a new 0600 file,
+                               --install true installs it like configure
   agents COMMAND [OPTIONS]     Task and message coordination; see crewplane agents help
   task list                    Show durable tasks and messages
   agent list                   Show configured agents and observed process state
