@@ -100,7 +100,7 @@ export interface SetupAnswers {
   confirmedStoppedAt?: string;
   /** Pi lanes require a fresh explicit epoch. */
   sessionEpoch?: string;
-  /** Lane id -> epoch for non-Pi lanes that switch harness or keep a prior epoch. */
+  /** Lane id -> epoch for lanes that switch harness or keep a prior epoch (Pi lanes included). */
   laneEpochs?: Record<string, string>;
 }
 
@@ -243,7 +243,7 @@ export function laneFor(
         enabled,
         harness,
         piPermissions: "no-tools",
-        sessionEpoch: answers.sessionEpoch as string,
+        sessionEpoch: (epoch ?? answers.sessionEpoch) as string,
         ...(answers.piModel ? { piModel: answers.piModel } : {}),
       };
   }

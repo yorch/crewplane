@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { controlDirectory } from "../src/control.ts";
+import { assertSwitch } from "../src/engine/harness.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -438,7 +439,7 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
       expect(everything).not.toContain(value);
   });
 
-  it("a rerun with a different harness installs lanes `serve` accepts via a fresh sessionEpoch", () => {
+  it("a rerun with a different harness installs lanes that pass the engine's assertSwitch via a fresh sessionEpoch", () => {
     const p = project();
     p.run(runner, ["init"]);
     const install = [
@@ -471,7 +472,7 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
       }),
     );
     const claude = join(p.base, "tools", "claude");
-    writeFileSync(claude, "#!/bin/sh\nexit 0\n");
+    writeFileSync(claude, `#!/bin/sh\ntouch '${p.ranMarker}'\nexit 0\n`);
     chmodSync(claude, 0o755);
     const switched = p.run(runner, [
       "setup",
@@ -501,6 +502,24 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
       /^setup-[0-9a-f]{12}$/,
     );
     expect(stored.lanes.coordinator.harness).toBe("claude");
+    // The supervisor's own switch check (what `serve` applies) on the drained
+    // idle codex record: accepted for the new lane, refused for a bare one.
+    const previous = { harness: "codex", status: "idle" } as never;
+    expect(() =>
+      assertSwitch(stored.lanes.coordinator, previous, false),
+    ).not.toThrow();
+    expect(() =>
+      assertSwitch(
+        { ...stored.lanes.coordinator, sessionEpoch: undefined },
+        previous,
+        false,
+      ),
+    ).toThrow(/fresh explicit sessionEpoch/);
+    // Printed once on stderr, not again by a second reporter.
+    expect(
+      switched.stderr.match(/lane coordinator switches harness/g),
+    ).toHaveLength(1);
+    expect(existsSync(p.ranMarker)).toBe(false);
     expect(p.run(runner, ["doctor"]).status).toBe(0);
   });
 });

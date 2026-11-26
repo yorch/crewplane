@@ -466,7 +466,8 @@ export async function runSetup(
       template = result.template;
       install = result.install;
       out = result.out;
-      notes.push(...result.notes);
+      // The wizard already showed the epoch notes (once, before the review
+      // prompt); repeating them in the report would print them again.
     } finally {
       io.close?.();
     }
@@ -482,6 +483,9 @@ export async function runSetup(
       confirmedStoppedAt: answers.confirmedStoppedAt ?? now().toISOString(),
     },
     { root: deps.root, policy: deps.policy },
+    // The binary is checked below by the same probe doctor uses, so a missing or
+    // unusable one becomes a BINARY_* problem (exit 2), not a thrown error.
+    { checkBinary: false },
   );
   const problems = await checkGenerated(decoded, safety);
   const text = `${JSON.stringify(built.config, null, 2)}\n`;

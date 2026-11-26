@@ -19,7 +19,7 @@ bun run verify
 
 ## Use in a project
 
-Recommended: generate the runtime configuration with the guided setup, which needs a terminal. The wizard offers to install only after you confirm the supervisor is stopped, and setup refuses that confirmation while the control state or liveness evidence says a supervisor is running. Setup records only executables that other users cannot replace. Otherwise it can write the JSON to a file, which you install later with `configure --file` once the stop is recorded.
+Recommended: generate the runtime configuration with the guided setup, which needs a terminal. The wizard offers to install only after you confirm the supervisor is stopped, and setup refuses that confirmation while the control state or liveness evidence says a supervisor is running. Setup records only executables that other users cannot replace (it checks owner, write bits and directories along the file's symlink chain and ancestors; `doctor` does not apply this, and the exact rules are in [Binary safety checks](docs/USAGE.md#binary-safety-checks)). Otherwise it can write the JSON to a file, which you install later with `configure --file` once the stop is recorded.
 
 ```sh
 crewplane --project /path/to/repo init

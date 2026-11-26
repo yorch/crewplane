@@ -29,8 +29,11 @@ import type { WizardIO } from "./wizard.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
+  // Fake harnesses write a marker if executed; setup must never run them.
+  const ran = scratch.filter((path) => existsSync(join(path, "harness-ran")));
   for (const path of scratch.splice(0))
     rmSync(path, { recursive: true, force: true });
+  expect(ran).toEqual([]);
 });
 const policy: ProjectPolicy = {
   ...defaultPolicy,
@@ -65,7 +68,10 @@ function fixture(
   mkdirSync(bin);
   const fake = (name: string, mode = 0o755) => {
     const path = join(bin, name);
-    writeFileSync(path, "#!/bin/sh\nexit 9\n");
+    writeFileSync(
+      path,
+      `#!/bin/sh\ntouch '${join(base, "harness-ran")}'\nexit 9\n`,
+    );
     chmodSync(path, mode);
     return path;
   };
@@ -905,6 +911,45 @@ describe("interactive gate", () => {
       lanes: { a: { enabled: true } },
     } as unknown as Config);
     expect(gone.map((p) => p.code)).toEqual(["BINARY_MISSING"]);
+  });
+
+  it("a binary removed before the final check is a BINARY_MISSING problem (exit 2), not a thrown error", async () => {
+    const { deps, bin, base, installed } = fixture({ tty: true });
+    const target = join(bin, "codex");
+    mkdirSync(join(base, "o"));
+    const script = scripted(
+      [...wizardAnswers("yes").slice(0, 11), "yes", join(base, "o", "x.json")],
+      (prompt) => {
+        if (prompt.startsWith("Looks right")) rmSync(target);
+      },
+    );
+    deps.makeIO = () => script.io;
+    const report = await runSetup([], deps);
+    expect(report.problems.map((p) => p.code)).toEqual(["BINARY_MISSING"]);
+    expect(report).toMatchObject({ installed: false, written: null });
+    expect(installed).toEqual([]);
+    expect(readdirSync(join(base, "o"))).toEqual([]);
+  });
+
+  it("prints a harness-switch epoch note exactly once in an interactive run", async () => {
+    const script = scripted(wizardAnswers("no"));
+    const { deps } = fixture({
+      tty: true,
+      makeIO: () => script.io,
+      prior: async () => ({
+        config: {},
+        records: { captain: { harness: "claude", busy: false } },
+      }),
+    });
+    const report = await runSetup([], deps);
+    const shown = script.stderr
+      .join("")
+      .match(/lane captain switches harness/g);
+    expect(shown).toHaveLength(1);
+    // The CLI echoes report.notes to stderr, so none may repeat the wizard's.
+    expect(
+      report.notes.filter((n) => /lane captain switches harness/.test(n)),
+    ).toEqual([]);
   });
 
   it("never prints environment values while prompting either", async () => {

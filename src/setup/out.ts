@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { lstatSync, unlinkSync } from "node:fs";
 import { link, lstat, open, realpath, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { printablePath } from "../project.ts";
@@ -31,27 +32,75 @@ const realOrResolved = async (path: string) => {
 const within = (path: string, directory: string) =>
   path === directory || path.startsWith(directory + sep);
 
-function gitIgnoreProblem(parent: string, target: string): string | null {
+/** Mutable only so tests can shorten the spawn timeout. */
+export const gitLimits = { timeoutMs: 10_000 };
+/** The only answer that means "outside every repository" (C locale, see gitEnv). */
+const notARepository = /not a git repository \(or any (?:of the )?parent/;
+
+/** No inherited GIT_* configuration, no prompts, no index refresh writes. */
+function gitEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env))
     if (value !== undefined && !key.startsWith("GIT_")) env[key] = value;
-  const top = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-    cwd: parent,
-    env,
-    encoding: "utf8",
-  });
+  return {
+    ...env,
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+    LC_ALL: "C",
+    LANG: "C",
+  };
+}
+// A repository's own configuration must never run code during setup:
+// core.fsmonitor is executed by index-reading commands, hooks never apply.
+const gitArgs = (...args: string[]) => [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  ...args,
+];
+
+/** True when `.git` (directory or file) exists in `start` or any ancestor. */
+function gitMarkerAbove(start: string): boolean | "unreadable" {
+  for (let directory = start; ; directory = dirname(directory)) {
+    try {
+      lstatSync(join(directory, ".git"));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        return "unreadable";
+    }
+    if (dirname(directory) === directory) return false;
+  }
+}
+
+function gitIgnoreProblem(parent: string, target: string): string | null {
+  const env = gitEnv();
+  const run = (cwd: string, ...args: string[]) =>
+    spawnSync("git", gitArgs(...args), {
+      cwd,
+      env,
+      encoding: "utf8",
+      timeout: gitLimits.timeoutMs,
+      killSignal: "SIGKILL",
+    });
+  const top = run(parent, "rev-parse", "--show-toplevel");
   if (top.error)
-    return "git could not be run to check whether the path is ignored";
-  // 128: not inside a work tree, so nothing is tracked here.
-  if (top.status === 128) return null;
+    return (top.error as NodeJS.ErrnoException).code === "ETIMEDOUT"
+      ? "git timed out while checking whether the path is ignored"
+      : "git could not be run to check whether the path is ignored";
+  if (top.status === 128 && notARepository.test(top.stderr ?? "")) {
+    // Genuinely outside a repository, as far as git can tell. Do not trust
+    // that alone: any `.git` above the target means a repository git could not
+    // use (broken gitdir, unreadable, other filesystem), so refuse.
+    const marker = gitMarkerAbove(parent);
+    if (marker === false) return null;
+    return "a .git entry exists above the path but git cannot use it as a repository";
+  }
   if (top.status !== 0 || !top.stdout.trim())
-    return "git could not report the work tree for the path";
+    return "git could not report the work tree for the path (broken, unreadable or differently owned repository?)";
   const tree = top.stdout.trim();
-  const ignored = spawnSync("git", ["check-ignore", "-q", "--", target], {
-    cwd: tree,
-    env,
-    encoding: "utf8",
-  });
+  const ignored = run(tree, "check-ignore", "-q", "--", target);
   if (ignored.error || (ignored.status !== 0 && ignored.status !== 1))
     return "git could not check whether the path is ignored";
   if (ignored.status === 1)
@@ -123,17 +172,46 @@ export async function prepareOut(
     dirname(path),
     `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`,
   );
-  const handle = await open(temp, "wx", 0o600).catch((error) => {
+  // SIGINT/SIGTERM/exit between here and commit/discard must not leave the
+  // hidden temporary file behind. SIGKILL and power loss still can.
+  const removeTemp = () => {
+    try {
+      unlinkSync(temp);
+    } catch {
+      // Already gone.
+    }
+  };
+  const onSignal = (signal: NodeJS.Signals) => {
+    removeTemp();
+    release();
+    process.kill(process.pid, signal);
+  };
+  const onInt = () => onSignal("SIGINT");
+  const onTerm = () => onSignal("SIGTERM");
+  function release() {
+    process.off("SIGINT", onInt);
+    process.off("SIGTERM", onTerm);
+    process.off("exit", removeTemp);
+  }
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
+  process.on("exit", removeTemp);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(temp, "wx", 0o600);
+  } catch (error) {
+    release();
     throw new Error(
       `--out could not create a temporary file: ${(error as NodeJS.ErrnoException).code ?? "error"}`,
     );
-  });
+  }
   try {
     await handle.writeFile(text);
     await handle.sync();
   } catch (error) {
     await handle.close().catch(() => {});
     await unlink(temp).catch(() => {});
+    release();
     throw error;
   }
   await handle.close();
@@ -152,6 +230,7 @@ export async function prepareOut(
         throw error;
       } finally {
         await unlink(temp).catch(() => {});
+        release();
       }
       // Best effort: make the new directory entry durable.
       const directory = await open(dirname(path), "r").catch(() => null);
@@ -160,6 +239,7 @@ export async function prepareOut(
     },
     discard: async () => {
       await unlink(temp).catch(() => {});
+      release();
       if (created && (await exists(path))) await unlink(path).catch(() => {});
       created = false;
     },

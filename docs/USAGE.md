@@ -221,12 +221,12 @@ Claude flags are rejected unless the template uses Claude. Flags for a harness t
 
 A run without `--out` or `--install` writes no configuration. Like every project command, the first run also creates the board store `.crewplane-state/` if it is missing. It does not create the control directory.
 
-`--out` writes a new file atomically: the content goes to a 0600 temporary file in the same directory, is fsynced, and is then linked to the final name, which cannot replace anything that exists. The temporary file is removed on every failure. Every refusal is checked before anything is written, with exit 1:
+`--out` writes a new file atomically: the content goes to a 0600 temporary file in the same directory, is fsynced, and is then linked to the final name, which cannot replace anything that exists. The temporary file is removed on every failure and on SIGINT, SIGTERM or process exit before the file is published; a SIGKILL or power loss in that window can still leave the hidden `.NAME.<hex>.tmp` file (0600, safe to delete). Every refusal is checked before anything is written, with exit 1:
 
 - the path names a directory, or an existing file or symlink (no overwrite);
 - the parent directory does not exist or is not a directory;
 - the path is inside the private control directory, the Crewplane store (`.crewplane-state`, including a `CREWPLANE_COORD_DIR` store) or `.crewplane-local`, or inside a `.git` directory;
-- the path is inside a git work tree and is not git-ignored (`git check-ignore`; a nested repository's own rules decide). If git cannot answer, the path is refused. A path outside any work tree is fine; inside one, add the file to `.gitignore` (or `.git/info/exclude`) first.
+- the path is inside a git work tree and is not git-ignored (`git check-ignore`; a nested repository's own rules decide). Only git's genuine "not a git repository" answer, with no `.git` entry (directory or file) in the target's directory or any ancestor, counts as outside a repository. Any other git failure refuses the path: a repository owned by another user (dubious ownership), a `.git` file pointing to a missing gitdir, an unreadable `.git`, a bare repository, a `.git` above a filesystem boundary, a missing `git`, or a 10 second timeout. Git runs with `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, a C locale and no inherited `GIT_*` variables, so repository configuration cannot run code. Inside a work tree, add the file to `.gitignore` (or `.git/info/exclude`) first.
 
 The file can be given to `configure --file` once you add `confirmedStoppedAt`, or once you rerun with `--confirm-stopped true`. The report's `next` hint shell-quotes the path.
 
@@ -234,14 +234,20 @@ The file can be given to `configure --file` once you add `confirmedStoppedAt`, o
 
 ### Rerunning with a different harness
 
-The supervisor refuses to start a lane whose harness differs from its latest recorded run unless the lane carries a fresh explicit `sessionEpoch`. `sessionEpoch` is accepted for every harness, so setup reads the installed `config.json` and `state.json` (read-only) and writes a fresh `sessionEpoch` for every lane whose harness differs from the installed configuration or its latest state record. A lane whose harness is unchanged keeps an epoch it already has. Each switch is reported as a note naming the lane, and another note appears when the lane's latest record is not idle. The supervisor still only accepts the switch when the lane is drained and idle, and it keeps the prior records; stop and drain first. An unreadable `config.json` or `state.json` fails setup closed.
+The supervisor refuses to start a lane whose harness differs from its latest recorded run unless the lane carries a fresh explicit `sessionEpoch`. `sessionEpoch` is accepted for every harness, so setup reads the installed `config.json` and `state.json` (read-only). The supervisor compares a lane only with its latest state record, so setup does too: when the lane has a record, an unchanged harness reuses that record's `sessionEpoch` (or none, if the record has none) and a changed harness gets a fresh one; the installed configuration is consulted only for a lane with no record at all. This keeps a codex, then claude (never served), then codex sequence from inventing an epoch the crashed codex record lacks. Pi lanes are planned the same way as every other lane (a rerun of an unchanged Pi lane keeps its recorded epoch instead of minting a new one). Each switch is reported as a note naming the lane, printed once on stderr (in the wizard, before the review prompt), and another note appears when the lane's latest record is not idle. The supervisor still only accepts the switch when the lane is drained and idle, and it keeps the prior records; stop and drain first. An unreadable `config.json` or `state.json` fails setup closed.
 
 ### Binary safety checks
 
 Beyond being an absolute executable regular file, a binary that setup records must not be replaceable by other users:
 
-- The file is refused when group- or world-writable.
-- Its directory (and the directory of a symlink as named) is refused when world-writable without the sticky bit, or when owned by a user other than the current user or root.
+Checked (POSIX; ownership checks are skipped where there is no uid):
+
+- Every hop of the symlink chain (each link, then the final file) is refused when owned by a user other than the current user or root, even inside a directory you own or a sticky directory.
+- The final file is refused when group- or world-writable.
+- The directory holding each hop is refused when world-writable without the sticky bit, owned by a user other than the current user or root, or group-writable unless it is owned by the current user and its group is the current user's primary group (so a `2775 root:staff` directory is refused, a private `775` user-and-primary-group directory is accepted).
+- Every directory on the way to each hop, and each of their ancestors up to `/`, is refused when world-writable without the sticky bit or owned by a user other than the current user or root. Group-writable ancestors are not refused (for example `/usr/local` on Debian).
+
+Not checked: ACLs, extended attributes, mounts (a read-write bind or network mount), capabilities, or anything that changes after the check; the file may still be replaced between setup and launch.
 
 PATH candidates that fail are skipped and listed as `rejected /full/path/to/binary: reason` (in the wizard's listing and in the notes on stderr), and the next PATH entry is tried; if none passes, the error lists the rejected ones. An explicit `--binary` style flag or wizard answer that fails is refused. This check is part of setup only: `doctor` does not apply it, so it still accepts a binary setup would refuse, and it is not a sandbox (a same-user attacker is out of scope). The final verification also repeats it.
 
@@ -269,18 +275,18 @@ The report has these fields:
 - `written`: the absolute `--out` path, or `null`.
 - `installed`: whether the configuration was installed.
 - `problems`: verification findings as `{code, lane?, message}`. Empty when valid.
-- `notes`: advice, such as disabled reviewers or the Pi no-tools reminder.
+- `notes`: advice, such as disabled reviewers or the Pi no-tools reminder. Harness-switch epoch notes appear here in non-interactive runs; the wizard prints them once before the review prompt and does not repeat them.
 - `next`: the suggested next commands.
 
 Exit codes:
 
 - `0`: the report was printed and verification found no problems. This includes a plain preview.
 - `1`: nothing on stdout. Causes include invalid or conflicting flags or answers, a missing `--tasks`, no usable or an unsafe executable, no terminal, headless refusal, a cancelled wizard, a refused `--out` path, a refused stop confirmation, a refused install and a failed install.
-- `2`: the report was printed with `problems`, and nothing was written or installed. Verification repeats the binary and instruction-file checks on the final configuration, so it only happens when something changed after an answer was accepted: typically a wizard session where the binary was replaced, removed or made writable while the review prompt waited.
+- `2`: the report was printed with `problems`, and nothing was written or installed. Verification repeats the binary and instruction-file checks on the final configuration, so it only happens when something changed after an answer was accepted: typically a wizard session where the binary was replaced, removed or made writable while the review prompt waited (a removed binary is reported as `BINARY_MISSING`).
 
 ### Pi reviewers
 
-Pi appears only as a reviewer, never as coordinator or implementer. Pi lanes are no-tools: `piPermissions` is `no-tools`, each setup run gets a fresh `sessionEpoch` (a lane that switches harness gets one too; see above), and each turn ends as a paused advisory decision for operator relay. Pi is also available in the wizard's `custom` template, with the same reviewer-only limit.
+Pi appears only as a reviewer, never as coordinator or implementer. Pi lanes are no-tools: `piPermissions` is `no-tools`, a Pi lane gets a fresh `sessionEpoch` on the first setup run and whenever its harness switches, and keeps its recorded epoch on a rerun (see above), and each turn ends as a paused advisory decision for operator relay. Pi is also available in the wizard's `custom` template, with the same reviewer-only limit.
 
 ### Headless agents
 

@@ -101,9 +101,16 @@ it("plans a fresh epoch only for lanes whose harness changed and keeps prior epo
     },
     mint,
   );
-  // pi lanes are never planned here; unknown lanes need nothing.
-  expect(plan.epochs).toEqual({ captain: "e1", builder: "keep-1" });
-  expect(plan.notes).toHaveLength(2);
+  // Pi lanes are planned like any other; unknown lanes need nothing.
+  expect(plan.epochs).toEqual({
+    captain: "e1",
+    builder: "keep-1",
+    inspector: "e2",
+  });
+  expect(plan.notes).toHaveLength(3);
+  expect(plan.notes[2]).toMatch(
+    /lane inspector switches harness from claude to pi/,
+  );
   expect(plan.notes[0]).toMatch(
     /lane captain switches harness from codex to claude/,
   );
@@ -166,4 +173,135 @@ it("a rerun with a different harness yields lanes the supervisor's own switch ch
       ),
     ).toThrow(/fresh explicit sessionEpoch/);
   }
+});
+
+const rec = (harness: Harness, sessionEpoch?: string, status = "idle") =>
+  ({
+    harness,
+    status,
+    ...(sessionEpoch ? { sessionEpoch } : {}),
+  }) as never;
+const laneOf = (harness: Harness, sessionEpoch?: string) =>
+  ({ harness, ...(sessionEpoch ? { sessionEpoch } : {}) }) as never;
+
+it("compares only against the latest record: codex -> claude (never served) -> codex after a crashed run", () => {
+  n = 0;
+  // The installed config says claude with an epoch, but the supervisor only
+  // ever ran codex (no epoch) and that run crashed (status is not idle).
+  const plan = planEpochs(
+    { captain: "codex" },
+    {
+      config: { captain: { harness: "claude", sessionEpoch: "never-served" } },
+      records: { captain: { harness: "codex", busy: true } },
+    },
+    mint,
+  );
+  expect(plan.epochs).toEqual({});
+  expect(plan.notes).toEqual([]);
+  // The engine's own check: same harness, same (absent) epoch, crashed record.
+  expect(() =>
+    assertSwitch(laneOf("codex"), rec("codex", undefined, "failed"), false),
+  ).not.toThrow();
+  // Before the fix a fresh epoch was minted and the very same record refused it.
+  expect(() =>
+    assertSwitch(
+      laneOf("codex", "e-minted"),
+      rec("codex", undefined, "failed"),
+      false,
+    ),
+  ).toThrow(/fresh explicit sessionEpoch/);
+  // With a record that has an epoch, that epoch (not the config's) is reused.
+  const reuse = planEpochs(
+    { captain: "claude" },
+    {
+      config: { captain: { harness: "claude", sessionEpoch: "config-1" } },
+      records: { captain: { harness: "claude", sessionEpoch: "rec-1" } },
+    },
+    mint,
+  );
+  expect(reuse.epochs).toEqual({ captain: "rec-1" });
+  // Without any record the installed config decides.
+  const configOnly = planEpochs(
+    { captain: "codex", other: "claude" },
+    {
+      config: {
+        captain: { harness: "claude", sessionEpoch: "c-1" },
+        other: { harness: "claude", sessionEpoch: "c-2" },
+      },
+      records: {},
+    },
+    mint,
+  );
+  expect(configOnly.epochs).toEqual({ captain: "e1", other: "c-2" });
+});
+
+it("plans Pi lanes: notes and the not-idle note on a switch, no new epoch for an unchanged lane", () => {
+  n = 0;
+  const switched = planEpochs(
+    { inspector: "pi" },
+    { config: {}, records: { inspector: { harness: "codex", busy: true } } },
+    mint,
+  );
+  expect(switched.epochs).toEqual({ inspector: "e1" });
+  expect(switched.notes[0]).toMatch(
+    /lane inspector switches harness from codex to pi/,
+  );
+  expect(switched.notes[1]).toMatch(/not idle/);
+  const unchanged = planEpochs(
+    { inspector: "pi" },
+    {
+      config: { inspector: { harness: "pi", sessionEpoch: "cfg" } },
+      records: {
+        inspector: { harness: "pi", sessionEpoch: "pi-1", busy: true },
+      },
+    },
+    mint,
+  );
+  expect(unchanged.epochs).toEqual({ inspector: "pi-1" });
+  expect(unchanged.notes).toEqual([]);
+});
+
+it("a Pi rerun reuses the record's epoch so serve accepts it even after a crashed run", () => {
+  const answers: SetupAnswers = {
+    roles: roleHarnesses("mixed", "pi"),
+    binaries: { claude: process.execPath, pi: process.execPath },
+    models: { claude: "opus" },
+    claude: { ...defaultClaudeSettings },
+    allowedTasks: ["T-1"],
+    implementers: ["dev"],
+    limits: defaultLimits(),
+    confirmedStoppedAt: "2026-11-08T00:00:00.000Z",
+    sessionEpoch: "fresh-from-answers",
+  };
+  const plan = planEpochs(
+    laneHarnesses(answers, policy),
+    {
+      config: {},
+      records: {
+        inspector: { harness: "pi", sessionEpoch: "pi-1", busy: true },
+      },
+    },
+    mint,
+  );
+  const { config } = buildConfig(
+    { ...answers, laneEpochs: plan.epochs },
+    policy,
+  );
+  const lanes = (config as { lanes: Record<string, { sessionEpoch?: string }> })
+    .lanes;
+  expect(lanes.inspector?.sessionEpoch).toBe("pi-1");
+  expect(() =>
+    assertSwitch(lanes.inspector as never, rec("pi", "pi-1", "failed"), false),
+  ).not.toThrow();
+  // Without the plan the generated fresh epoch is refused for the crashed run.
+  const bare = buildConfig(answers, policy).config as {
+    lanes: Record<string, never>;
+  };
+  expect(() =>
+    assertSwitch(
+      bare.lanes.inspector as never,
+      rec("pi", "pi-1", "failed"),
+      false,
+    ),
+  ).toThrow(/fresh explicit sessionEpoch/);
 });

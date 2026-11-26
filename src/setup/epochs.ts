@@ -81,13 +81,15 @@ export interface EpochPlan {
 
 /**
  * The supervisor refuses to start (`assertSwitch`) when a lane's harness or
- * session epoch differs from its latest state record unless the new lane
- * carries a fresh explicit `sessionEpoch`, and it refuses a lane that dropped
- * an epoch the record still holds. `sessionEpoch` is accepted for every
- * harness, so setup emits a fresh one for each lane whose harness changed
- * (against the installed configuration or the latest record) and reuses the
- * prior epoch for an unchanged lane that already has one. Pi lanes always get
- * a fresh epoch from the answers and are not planned here.
+ * session epoch differs from its latest state record unless the lane is drained
+ * and idle and carries a fresh explicit `sessionEpoch`. `assertSwitch` compares
+ * only against that latest record, so that is all setup compares against when
+ * the lane has one: an unchanged harness reuses the record's epoch (or none),
+ * a changed harness gets a fresh epoch. The installed configuration is
+ * consulted only for a lane with no record at all (nothing has run there yet,
+ * so `serve` has nothing to refuse; the config just keeps the epoch stable).
+ * Pi lanes are planned the same way; a Pi lane that needs no reuse and has no
+ * switch falls back to the fresh Pi epoch from the answers.
  */
 export function planEpochs(
   lanes: Record<string, Harness>,
@@ -96,24 +98,20 @@ export function planEpochs(
 ): EpochPlan {
   const plan: EpochPlan = { epochs: {}, notes: [] };
   for (const [id, harness] of Object.entries(lanes)) {
-    if (harness === "pi") continue;
-    const sources = [prior.records[id], prior.config[id]].filter(
-      (lane): lane is PriorLane => lane !== undefined,
-    );
-    const changed = sources.find((lane) => lane.harness !== harness);
-    if (changed) {
+    const record = prior.records[id];
+    const reference = record ?? prior.config[id];
+    if (reference && reference.harness !== harness) {
       plan.epochs[id] = mint();
       plan.notes.push(
-        `lane ${id} switches harness from ${changed.harness} to ${harness}: a fresh sessionEpoch (${plan.epochs[id]}) was generated; \`serve\` only accepts the switch when the lane is drained and idle and retains the prior records, so stop and drain ${id} before starting the supervisor`,
+        `lane ${id} switches harness from ${reference.harness} to ${harness}: a fresh sessionEpoch (${plan.epochs[id]}) was generated; \`serve\` only accepts the switch when the lane is drained and idle and retains the prior records, so stop and drain ${id} before starting the supervisor`,
       );
-      if (prior.records[id]?.busy)
+      if (record?.busy)
         plan.notes.push(
           `lane ${id} has a prior record that is not idle; \`serve\` will refuse the switch until it is drained`,
         );
       continue;
     }
-    const kept = sources.find((lane) => lane.sessionEpoch)?.sessionEpoch;
-    if (kept) plan.epochs[id] = kept;
+    if (reference?.sessionEpoch) plan.epochs[id] = reference.sessionEpoch;
   }
   return plan;
 }
