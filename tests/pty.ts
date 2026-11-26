@@ -1,4 +1,6 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { lstatSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +28,42 @@ export function ptyUnavailable(): string | null {
   return null;
 }
 
+/**
+ * Remove `crewplane-pty-*` directories that an interrupted earlier run leaked
+ * into `directory`. Only real directories (never symlinks) with exactly that
+ * prefix, owned by the current user and untouched for `maxAgeMs` (a day by
+ * default, so a concurrent run's live directory is never at risk). Best effort.
+ */
+export function removeLeakedPtyDirs(
+  directory = tmpdir(),
+  maxAgeMs = 24 * 60 * 60 * 1000,
+  now = Date.now(),
+): string[] {
+  const removed: string[] = [];
+  const uid = process.getuid?.();
+  if (uid === undefined) return removed;
+  let names: string[];
+  try {
+    names = readdirSync(directory);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!name.startsWith("crewplane-pty-")) continue;
+    try {
+      const path = join(directory, name);
+      const info = lstatSync(path);
+      if (!info.isDirectory() || info.uid !== uid) continue;
+      if (!(now - Math.max(info.mtimeMs, info.ctimeMs) > maxAgeMs)) continue;
+      rmSync(path, { recursive: true, force: true });
+      removed.push(name);
+    } catch {
+      // Ignore this entry.
+    }
+  }
+  return removed;
+}
+
 export interface PtyExit {
   code: number | null;
   signal: number | null;
@@ -36,6 +74,10 @@ export class PtyProcess {
   tty = "";
   /** Everything the child wrote to its stderr pipe. */
   stderr = "";
+  /** The driver's own stderr (a Python traceback, for instance). */
+  driverStderr = "";
+  /** Set when the driver emitted something that is not a JSON event line. */
+  protocolError: string | null = null;
   exit: PtyExit | null = null;
   private child: ChildProcess;
   private buffer = "";
@@ -51,6 +93,11 @@ export class PtyProcess {
       ["-I", driver, JSON.stringify({ argv, ...options })],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
+    this.child.stderr?.setEncoding("utf8");
+    this.child.stderr?.on("data", (chunk: string) => {
+      this.driverStderr += chunk;
+      this.wake();
+    });
     this.child.stdout?.setEncoding("utf8");
     this.child.stdout?.on("data", (chunk: string) => {
       this.buffer += chunk;
@@ -60,12 +107,18 @@ export class PtyProcess {
         this.buffer = this.buffer.slice(newline + 1);
         newline = this.buffer.indexOf("\n");
         if (!line.trim()) continue;
-        const event = JSON.parse(line) as {
+        let event: {
           t: string;
           d?: string;
           code?: number | null;
           signal?: number | null;
         };
+        try {
+          event = JSON.parse(line);
+        } catch {
+          this.protocolError ??= `pty driver wrote a non-JSON line: ${JSON.stringify(line.slice(0, 200))}`;
+          continue;
+        }
         if (event.t === "out") this.tty += event.d ?? "";
         else if (event.t === "err") this.stderr += event.d ?? "";
         else if (event.t === "exit")
@@ -145,14 +198,15 @@ export class PtyProcess {
         done(() =>
           reject(
             new Error(
-              `${why} while waiting for ${what}\n--- stderr ---\n${this.stderr}\n--- tty ---\n${this.tty}`,
+              `${why} while waiting for ${what}\n--- stderr ---\n${this.stderr}\n--- tty ---\n${this.tty}\n--- driver stderr ---\n${this.driverStderr}`,
             ),
           ),
         );
       const check = () => {
         const found = probe();
         if (found !== null) return done(() => resolve(found));
-        if (this.dead) fail("driver ended");
+        if (this.protocolError) fail(this.protocolError);
+        else if (this.dead) fail("driver ended");
         else if (this.exit && !exitIsExpected) fail("process exited");
       };
       const timer = setTimeout(

@@ -69,7 +69,9 @@ def kill_child():
             pass
 
 
-selector = selectors.DefaultSelector()
+# SelectSelector (plain select(2)), not DefaultSelector: the default is kqueue
+# on macOS, which cannot poll pseudo-terminals.
+selector = selectors.SelectSelector()
 selector.register(master, selectors.EVENT_READ, "out")
 selector.register(child.stderr, selectors.EVENT_READ, "err")
 selector.register(sys.stdin, selectors.EVENT_READ, "cmd")
@@ -111,6 +113,26 @@ try:
 finally:
     kill_child()
 code = child.wait()
+
+
+def drain_master():
+    """Read whatever is still buffered on the master after the child is gone.
+
+    macOS may drop unread pty output when the slave closes, so take everything
+    that remains, until EIO/EOF or nothing is pending, before reporting exit.
+    """
+    os.set_blocking(master, False)
+    while True:
+        try:
+            data = os.read(master, 65536)
+        except OSError:  # EIO (slave closed) or EAGAIN (nothing pending)
+            return
+        if not data:
+            return
+        emit({"t": "out", "d": data.decode("utf-8", "replace")})
+
+
+drain_master()
 emit(
     {
         "t": "exit",

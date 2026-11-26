@@ -10,7 +10,12 @@ import {
   inspectBinary,
 } from "../doctor.ts";
 import { type Harness, instructionFileProblem } from "../engine/harness.ts";
-import { type ProjectPolicy, validId, validTaskId } from "../project.ts";
+import {
+  type ProjectPolicy,
+  printablePath,
+  validId,
+  validTaskId,
+} from "../project.ts";
 import {
   acceptBinary,
   type Detection,
@@ -24,7 +29,7 @@ import {
 } from "./detect.ts";
 import { noPrior, type Prior, planEpochs } from "./epochs.ts";
 import { decodeConfig } from "./install.ts";
-import { checkOut, prepareOut } from "./out.ts";
+import { checkOut, prepareOut, type SweepOptions } from "./out.ts";
 import {
   acceptModel,
   acceptPiModel,
@@ -119,6 +124,10 @@ export interface SetupDeps {
   /** Directories `--out` may never point into (control directory, stores). */
   protectedPaths?: string[];
   makeIO: () => WizardIO;
+  /** Where one-line notes about side effects go; stderr by default (never stdout). */
+  warn?: (message: string) => void;
+  /** Stale temporary file sweep settings for `--out` (clock and age, for tests). */
+  sweep?: SweepOptions;
   check?: ExecutableCheck;
   safety?: SafetyCheck;
   now?: () => Date;
@@ -504,7 +513,13 @@ export async function runSetup(
     // name) but publish it only after the install succeeded: a refused install
     // must not leave behind a file that carries a stop confirmation.
     const plan = outPath
-      ? await prepareOut(outPath, text, protectedPaths)
+      ? await prepareOut(outPath, text, protectedPaths, {
+          ...deps.sweep,
+          onRemoved: (removed) =>
+            (deps.warn ?? ((m) => console.error(m)))(
+              `crewplane: removed stale temporary file ${printablePath(removed)}`,
+            ),
+        })
       : null;
     try {
       if (install) {

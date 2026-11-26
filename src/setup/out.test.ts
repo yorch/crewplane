@@ -14,6 +14,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { lstat, readdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -212,6 +213,32 @@ describe("stale temporary file sweep", () => {
     expect(names(dir)).toEqual([]);
   });
 
+  it("reports each removed file through onRemoved with its full path", async () => {
+    const dir = base();
+    plant(dir, tempName());
+    plant(dir, tempName("x.json", "aaaaaaaaaaaa"));
+    plant(dir, tempName("y.json", "bbbbbbbbbbbb"));
+    const seen: string[] = [];
+    await sweepStaleOut(join(dir, "x.json"), {
+      now: later,
+      onRemoved: (path) => seen.push(path),
+    });
+    expect(seen.sort()).toEqual([
+      join(dir, tempName()),
+      join(dir, tempName("x.json", "aaaaaaaaaaaa")),
+    ]);
+    // A throwing callback never fails the sweep or setup.
+    plant(dir, tempName());
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), {
+        now: later,
+        onRemoved: () => {
+          throw new Error("stderr closed");
+        },
+      }),
+    ).toEqual([tempName()]);
+  });
+
   it("keeps a young file, including at exactly the age, and a clock before the file", async () => {
     const dir = base();
     const file = plant(dir, tempName());
@@ -232,12 +259,21 @@ describe("stale temporary file sweep", () => {
 
   it("never removes a live concurrent setup's temp file through prepareOut", async () => {
     const dir = base();
-    const live = await prepareOut(join(dir, "x.json"), "{}", []);
-    const second = await prepareOut(join(dir, "x.json"), "{}", []);
+    const target = join(dir, "x.json");
+    const first = await prepareOut(target, "{}", []);
+    const [liveName] = names(dir);
+    // A second setup a few minutes later (clock injected, inside the age
+    // limit) must leave the first one's temp file alone...
+    const soon = () => Date.now() + staleTempAgeMs / 2;
+    const second = await prepareOut(target, "{}", [], { now: soon });
     expect(names(dir)).toHaveLength(2);
-    await live.discard();
+    expect(names(dir)).toContain(liveName);
+    // ...while with the clock past the age limit it is, by design, stale.
+    const third = await prepareOut(target, "{}", [], { now: later });
+    expect(names(dir)).not.toContain(liveName);
+    await first.discard();
     await second.discard();
-    expect(names(dir)).toEqual([]);
+    await third.discard();
   });
 
   it("keeps everything that is not exactly this target's own temp file", async () => {
@@ -312,7 +348,7 @@ describe("stale temporary file sweep", () => {
     expect(existsSync(file)).toBe(true);
   });
 
-  it("ignores failures: a missing directory, a throwing clock and an unreadable directory", async () => {
+  it("ignores failures: a missing directory and a throwing clock", async () => {
     const dir = base();
     expect(
       await sweepStaleOut(join(dir, "missing", "x.json"), { now: later }),
@@ -323,6 +359,56 @@ describe("stale temporary file sweep", () => {
         now: () => {
           throw new Error("clock");
         },
+      }),
+    ).toEqual([]);
+    expect(names(dir)).toEqual([tempName()]);
+  });
+
+  // root bypasses directory permissions, so the real unreadable directory only
+  // proves something for an ordinary user.
+  it.skipIf(process.getuid?.() === 0)(
+    "ignores an unreadable directory (chmod 000)",
+    async () => {
+      const dir = base();
+      plant(dir, tempName());
+      chmodSync(dir, 0o000);
+      try {
+        expect(
+          await sweepStaleOut(join(dir, "x.json"), { now: later }),
+        ).toEqual([]);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+      expect(names(dir)).toEqual([tempName()]);
+    },
+  );
+
+  it("ignores a readdir failure and a failing unlink on every account", async () => {
+    const dir = base();
+    plant(dir, tempName());
+    const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), {
+        now: later,
+        fs: {
+          readdir: async () => {
+            throw denied;
+          },
+          lstat,
+          unlink,
+        } as never,
+      }),
+    ).toEqual([]);
+    expect(
+      await sweepStaleOut(join(dir, "x.json"), {
+        now: later,
+        fs: {
+          readdir,
+          lstat,
+          unlink: async () => {
+            throw denied;
+          },
+        } as never,
       }),
     ).toEqual([]);
     expect(names(dir)).toEqual([tempName()]);

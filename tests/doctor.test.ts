@@ -440,7 +440,7 @@ describe("crewplane doctor", () => {
     const p = project();
     const good = p.fake("good");
     p.configure(p.config(good, { builder: { enabled: true } }));
-    chmodSync(good, 0o775);
+    chmodSync(good, 0o757);
     const { status, report } = p.doctor();
     expect(status).toBe(2);
     expect(report.problems).toEqual([

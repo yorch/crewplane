@@ -13,11 +13,13 @@ import { printablePath } from "./project.ts";
  * POSIX only (owner and group checks are skipped where there is no uid):
  * - every symlink on the path and the final file is owned by the current user
  *   or root;
- * - the final file is not group- or world-writable;
- * - every directory is not world-writable without the sticky bit, is owned by
- *   the current user or root, and, when group-writable (and not an open sticky
- *   directory like /tmp), has a group the current user belongs to (primary
- *   group included). Members of the user's own groups are inside the trust
+ * - the final file is not world-writable, and not group-writable unless its
+ *   group is one the current user belongs to (umask-002 installs are 0775);
+ * - a sticky directory (/tmp, multi-user Nix /nix/store) is judged by
+ *   ownership only: the current user or root must own it;
+ * - every other directory is not world-writable, is owned by the current user
+ *   or root, and, when group-writable, has a group the current user belongs
+ *   to (primary group included). Members of the user's own groups are inside the trust
  *   boundary; users outside them cannot replace the binary or anything on its
  *   path.
  * Not checked: ACLs, extended attributes, mounts, capabilities, and anything
@@ -92,14 +94,16 @@ function directoryProblem(
   who: Identity,
 ): string | null {
   const name = printablePath(directory);
-  if (worldOpen(info)) {
-    if (!sticky(info))
-      return `a directory on its path (${name}) is world-writable without the sticky bit`;
-    // Open sticky directories (/tmp) are judged by ownership only.
+  if (sticky(info)) {
+    // Only an entry's owner or the directory's owner can rename or remove
+    // entries in a sticky directory, so group/world write bits (/tmp 1777,
+    // multi-user Nix /nix/store 1775 root:nixbld) do not matter: ownership only.
     return trusted(info, who)
       ? null
       : `a directory on its path (${name}) is owned by another user`;
   }
+  if (worldOpen(info))
+    return `a directory on its path (${name}) is world-writable without the sticky bit`;
   if (!trusted(info, who))
     return `a directory on its path (${name}) is owned by another user`;
   if (
@@ -168,7 +172,13 @@ export const binarySafetyProblem = async (
     if (queue.length === 0) {
       if (info.kind !== "file") return "it is not a regular file";
       if (!trusted(info, who)) return "it is owned by another user";
-      if ((info.mode & 0o022) !== 0) return "it is group- or world-writable";
+      if (
+        (info.mode & 0o002) !== 0 ||
+        ((info.mode & 0o020) !== 0 &&
+          who.uid !== null &&
+          !who.groups.includes(info.gid))
+      )
+        return "it is group- or world-writable";
       return null;
     }
     current = full;

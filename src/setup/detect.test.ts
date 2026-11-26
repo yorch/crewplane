@@ -109,7 +109,7 @@ it("skips group/world-writable files and unsafe directories, listing each reason
     loose = temp(),
     wide = temp();
   fake(good, "codex");
-  fake(loose, "codex", 0o775);
+  fake(loose, "codex", 0o757);
   fake(wide, "codex");
   chmodSync(wide, 0o777);
   const rejected: Rejection[] = [];

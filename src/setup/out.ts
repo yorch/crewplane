@@ -172,6 +172,10 @@ export interface SweepOptions {
   now?: () => number;
   /** Minimum age before a leftover temporary file is removed. */
   maxAgeMs?: number;
+  /** Called with the full path of each removed file (the CLI writes it to stderr). */
+  onRemoved?: (path: string) => void;
+  /** File system primitives; injectable so tests can make them fail on any account. */
+  fs?: Pick<typeof import("node:fs/promises"), "readdir" | "lstat" | "unlink">;
 }
 
 const tempHex = /^[0-9a-f]{12}$/;
@@ -195,21 +199,27 @@ export async function sweepStaleOut(
     const maxAgeMs = options.maxAgeMs ?? staleTempAgeMs;
     const uid = process.getuid?.();
     if (uid === undefined) return removed; // ownership cannot be proven
+    const fs = options.fs ?? { readdir, lstat, unlink };
     const directory = dirname(path);
     const prefix = `.${basename(path)}.`;
-    for (const name of await readdir(directory)) {
+    for (const name of await fs.readdir(directory)) {
       if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
       if (!tempHex.test(name.slice(prefix.length, -".tmp".length))) continue;
       try {
         const file = join(directory, name);
-        const info = await lstat(file);
+        const info = await fs.lstat(file);
         if (!info.isFile() || info.isSymbolicLink()) continue;
         if (info.uid !== uid || (info.mode & 0o7777) !== 0o600) continue;
         if (info.nlink !== 1) continue;
         const newest = Math.max(info.mtimeMs, info.ctimeMs);
         if (!(now - newest > maxAgeMs)) continue;
-        await unlink(file);
+        await fs.unlink(file);
         removed.push(name);
+        try {
+          options.onRemoved?.(file);
+        } catch {
+          // Reporting never fails the sweep.
+        }
       } catch {
         // Ignore this entry.
       }

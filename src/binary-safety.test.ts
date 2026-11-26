@@ -387,14 +387,76 @@ it("synthetic: accepts a root-owned file and refuses group- or world-writable fi
   const n = base0();
   n["/home/alice/bin/codex"] = file(0, 0, 0o755);
   expect(await check(n, "/home/alice/bin/codex")).toBeNull();
-  n["/home/alice/bin/codex"] = file(1000, 1000, 0o775);
-  expect(await check(n, "/home/alice/bin/codex")).toBe(
-    "it is group- or world-writable",
-  );
   n["/home/alice/bin/codex"] = file(1000, 1000, 0o757);
   expect(await check(n, "/home/alice/bin/codex")).toBe(
     "it is group- or world-writable",
   );
+  n["/home/alice/bin/codex"] = file(1000, 1000, 0o777);
+  expect(await check(n, "/home/alice/bin/codex")).toBe(
+    "it is group- or world-writable",
+  );
+});
+
+it("synthetic: a group-writable file is refused only when its group is not the user's", async () => {
+  const n = base0();
+  // umask 002 installs (npm, cargo): 0775 alice:alice is the user's own group.
+  n["/home/alice/bin/codex"] = file(1000, 1000, 0o775);
+  expect(await check(n, "/home/alice/bin/codex")).toBeNull();
+  // A supplementary group counts too.
+  n["/home/alice/bin/codex"] = file(1000, 80, 0o775);
+  expect(
+    await check(n, "/home/alice/bin/codex", asUser(1000, 1000, 80)),
+  ).toBeNull();
+  // A foreign group does not, for the user's own file or a root-owned one.
+  for (const owner of [1000, 0]) {
+    n["/home/alice/bin/codex"] = file(owner, 4242, 0o775);
+    expect(await check(n, "/home/alice/bin/codex")).toBe(
+      "it is group- or world-writable",
+    );
+  }
+  // World-writable stays refused even in the user's own group.
+  n["/home/alice/bin/codex"] = file(1000, 1000, 0o772);
+  expect(await check(n, "/home/alice/bin/codex")).toBe(
+    "it is group- or world-writable",
+  );
+  // A group-writable file with a foreign group that has no group bit is fine.
+  n["/home/alice/bin/codex"] = file(1000, 4242, 0o755);
+  expect(await check(n, "/home/alice/bin/codex")).toBeNull();
+});
+
+it("synthetic: a sticky group-writable directory is judged by ownership only (multi-user Nix /nix/store 1775 root:nixbld)", async () => {
+  const n: Record<string, Node> = {
+    "/": dir(0, 0, 0o755),
+    "/nix": dir(0, 0, 0o755),
+    "/nix/store": dir(0, 30000, 0o1775),
+    "/nix/store/abc-codex": dir(0, 0, 0o555),
+    "/nix/store/abc-codex/bin": dir(0, 0, 0o555),
+    "/nix/store/abc-codex/bin/codex": file(0, 0, 0o555),
+    "/home": dir(0, 0, 0o755),
+    "/home/alice": dir(1000, 1000, 0o755),
+    "/home/alice/.nix-profile": link("/nix/store/abc-codex"),
+  };
+  expect(
+    await check(n, "/home/alice/.nix-profile/bin/codex", asUser(1000, 1000)),
+  ).toBeNull();
+  // The same sticky directory owned by a foreign user is still refused.
+  n["/nix/store"] = dir(2000, 30000, 0o1775);
+  expect(
+    await check(n, "/home/alice/.nix-profile/bin/codex", asUser(1000, 1000)),
+  ).toMatch(/directory on its path .*store.* is owned by another user/);
+  // Without the sticky bit the group rule still applies to a non-member.
+  n["/nix/store"] = dir(0, 30000, 0o2775);
+  expect(
+    await check(n, "/home/alice/.nix-profile/bin/codex", asUser(1000, 1000)),
+  ).toMatch(/group-writable by a group the current user is not in/);
+  // ...and a member passes.
+  expect(
+    await check(
+      n,
+      "/home/alice/.nix-profile/bin/codex",
+      asUser(1000, 1000, 30000),
+    ),
+  ).toBeNull();
 });
 
 it("synthetic: refuses a foreign-owned file inside a sticky world-writable directory", async () => {

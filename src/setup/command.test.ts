@@ -209,6 +209,46 @@ describe("non-interactive", () => {
     expect(readdirSync(join(base, "out"))).toEqual(["runtime.json"]);
   });
 
+  it("--out reports each swept stale temporary file on the warn channel, not in the report", async () => {
+    const { base, deps } = fixture();
+    const out = join(base, "swept");
+    mkdirSync(out);
+    const stale = join(out, ".runtime.json.0123456789ab.tmp");
+    writeFileSync(stale, "{}", { mode: 0o600 });
+    chmodSync(stale, 0o600);
+    const second = join(out, ".runtime.json.ba9876543210.tmp");
+    writeFileSync(second, "{}", { mode: 0o600 });
+    const lines: string[] = [];
+    // The clock is injected: a file's ctime cannot be backdated.
+    const clock = Date.now() + 2 * 60 * 60 * 1000;
+    const report = await runSetup(
+      ni("--template", "codex", "--out", join(out, "runtime.json")),
+      {
+        ...deps,
+        warn: (line) => lines.push(line),
+        sweep: { now: () => clock },
+      },
+    );
+    // Both are older than an hour on the injected clock (the first is also the lexically smaller).
+    expect(lines.sort()).toEqual([
+      `crewplane: removed stale temporary file ${stale}`,
+      `crewplane: removed stale temporary file ${second}`,
+    ]);
+    expect(JSON.stringify(report)).not.toContain("stale temporary");
+    expect(readdirSync(out)).toEqual(["runtime.json"]);
+    // Nothing is reported when nothing was swept.
+    lines.length = 0;
+    await runSetup(
+      ni("--template", "codex", "--out", join(out, "second.json")),
+      {
+        ...deps,
+        warn: (line) => lines.push(line),
+        sweep: { now: () => clock },
+      },
+    );
+    expect(lines).toEqual([]);
+  });
+
   it("--out refuses a directory, a missing parent and unsafe locations before writing", async () => {
     const { base, root, deps } = fixture({});
     const control = join(base, "control");
@@ -626,7 +666,7 @@ describe("non-interactive", () => {
 
   it("refuses binaries other users could replace", async () => {
     const { base, bin, fake, deps } = fixture();
-    const loose = fake("loose", 0o775);
+    const loose = fake("loose", 0o757);
     const wide = join(base, "wide");
     mkdirSync(wide);
     chmodSync(wide, 0o777);

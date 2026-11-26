@@ -4,9 +4,11 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -14,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { controlDirectory } from "../src/control.ts";
-import { PtyProcess, ptyUnavailable } from "./pty.ts";
+import { PtyProcess, ptyUnavailable, removeLeakedPtyDirs } from "./pty.ts";
 
 /**
  * The real CLI (source and compiled) driven through a genuine pseudo-terminal
@@ -22,10 +24,59 @@ import { PtyProcess, ptyUnavailable } from "./pty.ts";
  * stderr, the one JSON report to stdout. Fake harness binaries write a marker
  * if they are ever executed; every test asserts they never were.
  */
-const skipReason = ptyUnavailable();
-if (skipReason) console.warn(`setup pty tests skipped: ${skipReason}`);
-
 const scratch: string[] = [];
+const skipReason = ptyUnavailable();
+// On CI an unusable pty must fail loudly, not silently drop the coverage;
+// locally the tests skip with a warning.
+const failWithoutPty = skipReason !== null && Boolean(process.env.CI);
+if (skipReason && !failWithoutPty)
+  console.warn(`setup pty tests skipped: ${skipReason}`);
+// Directories leaked by earlier interrupted runs (older than a day).
+if (!skipReason) removeLeakedPtyDirs();
+
+it.runIf(failWithoutPty)("has a usable python3 pty on CI", () => {
+  expect.fail(`pty tests cannot run on CI: ${skipReason}`);
+});
+
+describe("leaked crewplane-pty directory cleanup", () => {
+  it("removes only old real crewplane-pty-* directories we own", () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-cleanup-")));
+    scratch.push(dir);
+    const make = (name: string) => {
+      mkdirSync(join(dir, name));
+      writeFileSync(join(dir, name, "inner"), "x");
+    };
+    for (const name of [
+      "crewplane-pty-old",
+      "crewplane-pty-young",
+      "other-pty-old",
+      "crewplane-out-old",
+    ])
+      make(name);
+    writeFileSync(join(dir, "crewplane-pty-file"), "x");
+    mkdirSync(join(dir, "elsewhere"));
+    symlinkSync(join(dir, "elsewhere"), join(dir, "crewplane-pty-link"));
+    const day = 24 * 60 * 60 * 1000;
+    // The clock is injected for "old": ctime cannot be backdated.
+    const removed = removeLeakedPtyDirs(dir, day, Date.now() + 2 * day);
+    expect(removed.sort()).toEqual([
+      "crewplane-pty-old",
+      "crewplane-pty-young",
+    ]);
+    expect(readdirSync(dir).sort()).toEqual([
+      "crewplane-out-old",
+      "crewplane-pty-file",
+      "crewplane-pty-link",
+      "elsewhere",
+      "other-pty-old",
+    ]);
+    // With the real clock nothing is a day old.
+    make("crewplane-pty-fresh");
+    expect(removeLeakedPtyDirs(dir, day)).toEqual([]);
+    expect(removeLeakedPtyDirs(join(dir, "missing"))).toEqual([]);
+  });
+});
+
 const live: PtyProcess[] = [];
 afterEach(async () => {
   for (const proc of live.splice(0)) await proc.close();
@@ -157,7 +208,7 @@ describe.skipIf(skipReason !== null).each(runners)(
     it.each([
       [
         "an unsafe binary",
-        (p: Project) => chmodSync(p.fake, 0o775),
+        (p: Project) => chmodSync(p.fake, 0o757),
         /^BINARY_INVALID$/,
       ],
       [

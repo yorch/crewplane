@@ -403,7 +403,7 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
   it("rejects an unsafe explicit binary and never carries environment secrets anywhere", () => {
     const p = project();
     p.run(runner, ["init"]);
-    chmodSync(p.fake, 0o775);
+    chmodSync(p.fake, 0o757);
     const refused = p.run(runner, base(p));
     expect(refused.status).toBe(1);
     expect(refused.stderr).toMatch(

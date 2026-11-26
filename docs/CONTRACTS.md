@@ -64,7 +64,7 @@ either way. `message` is a fixed validation message, never raw engine text.
 (unreadable or invalid configuration, or a lane that is not a plain object or
 names an unsupported harness), `BINARY_MISSING` (no binary configured, or the
 path does not exist), `BINARY_INVALID` (not a string, relative, or not a regular
-file), `BINARY_NOT_EXECUTABLE`, `BINARY_UNSAFE` (a binary that passed the probes but that users outside the current user's groups could replace, or whose path they could redirect, by the rules in docs/USAGE.md "Binary safety checks"; `lane` when a lane's binary), `INSTRUCTIONS_INVALID` (a lane's instruction
+file), `BINARY_NOT_EXECUTABLE`, `BINARY_UNSAFE` (a binary that passed the probes but that users outside the current user's groups could replace, or whose path they could redirect, by the rules in docs/USAGE.md "Binary safety checks"; `lane` when a lane's binary; change note: scripts gating on `doctor`'s exit code can now see exit `2` for an existing configuration whose binary is replaceable by other users, which `configure` and `start` still accept), `INSTRUCTIONS_INVALID` (a lane's instruction
 file), `RELEASES_ROOT_INVALID` (relative `CREWPLANE_RELEASES_DIR` or
 `XDG_DATA_HOME`) `CACHE_DIR_INVALID` (relative `CREWPLANE_CACHE_DIR`) and `LEGACY_LAYOUT` (a pre-relocation `<store>/supervisor` holding state; doctor stays exempt from the migration gate but reports it and exits 2).
 Configuration is validated without the binary-existence check, so a missing
