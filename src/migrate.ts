@@ -39,7 +39,9 @@ import { control, validState } from "./engine/control-policy.ts";
 import { validHarness } from "./engine/harness.ts";
 import { validateConfig } from "./engine/supervisor.ts";
 import { acquire } from "./engine/watch.ts";
+import { sha256Hex } from "./hash.ts";
 import { syncDirectory } from "./io.ts";
+import { probeProcess } from "./liveness.ts";
 import { validId, validTaskId } from "./project.ts";
 import { cacheDirectory } from "./update.ts";
 
@@ -129,19 +131,15 @@ const pidOf = (value: unknown) =>
 /** Real child/supervisor identities are never PID 0 or 1. */
 const validPid = (pid: unknown): pid is number =>
   typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1;
-const sha = (data: Buffer | string) =>
-  createHash("sha256").update(data).digest("hex");
+const sha = sha256Hex;
 
 /** Whether a PID is dead, ours, or someone else's (so it cannot be our supervisor). */
 export type Owner = (pid: number) => "dead" | "ours" | "foreign";
 export const processOwner: Owner = (pid) => {
-  try {
-    process.kill(pid, 0);
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH"
-      ? "dead"
-      : "foreign"; // EPERM: a process we may not signal is not ours
-  }
+  const state = probeProcess(pid);
+  if (state === "dead") return "dead";
+  // EPERM (or any other probe failure): a process we may not signal is not ours.
+  if (state === "unknown") return "foreign";
   try {
     // Where /proc exists, the process must also be owned by this user.
     if (statSync(`/proc/${pid}`).uid !== process.getuid?.()) return "foreign";

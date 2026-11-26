@@ -304,13 +304,9 @@ it("shows a lane as stale when its pid probe fails with EPERM instead of claimin
     throw Object.assign(new Error("EPERM"), { code: "EPERM" });
   });
   try {
-    await mkdir(join(root, "supervisor"));
+    await writeFile(join(root, "config.json"), JSON.stringify(config));
     await writeFile(
-      join(root, "supervisor/config.json"),
-      JSON.stringify(config),
-    );
-    await writeFile(
-      join(root, "supervisor/state.json"),
+      join(root, "state.json"),
       JSON.stringify({ ...state, checkedAt: new Date().toISOString() }),
     );
     const result = await readHeadless(root);

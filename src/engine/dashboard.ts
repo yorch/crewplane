@@ -2,12 +2,12 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
+import { plannedTasks, snapshot } from "../board.ts";
 import {
   bindControl,
   controlDirectory,
   ensureControlDirectory,
 } from "../control.ts";
-import { plannedTasks, snapshot } from "../board.ts";
 import { publishJson } from "../io.ts";
 import { discoverProject, validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";

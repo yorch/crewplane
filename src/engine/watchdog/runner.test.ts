@@ -787,10 +787,9 @@ it("reports a supervisor whose pid cannot be probed (EPERM) as unknown, raising 
     throw Object.assign(new Error("EPERM"), { code: "EPERM" });
   });
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
     const now = Date.now();
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: process.pid,
         running: true,
@@ -802,7 +801,7 @@ it("reports a supervisor whose pid cannot be probed (EPERM) as unknown, raising 
       { mode: 0o600 },
     );
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: true }),
       { mode: 0o600 },
     );
