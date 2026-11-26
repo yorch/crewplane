@@ -11,8 +11,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { controlDirectory } from "../control.ts";
+import { type Liveness, probeProcess } from "../liveness.ts";
 import { migrateControl } from "../migrate.ts";
 import { snapshot } from "./dashboard.ts";
 import { type Config, type State, serve } from "./supervisor.ts";
@@ -1353,5 +1354,105 @@ it("keeps supervising when a task carries invalid scheduling metadata", () =>
       controller.abort();
       await running;
       await rm(f.root, { recursive: true, force: true });
+    }
+  }));
+
+/**
+ * A native group that outlives its leader (the run's cleanup could not verify it)
+ * leaves a paused record that still holds pid/processGroupId. The loop-top
+ * recheck clears that identity on ESRCH, and only then may the operator
+ * acknowledge cleanup; until then ownership stays live.
+ */
+async function retainedGroupScenario(
+  f: Awaited<ReturnType<typeof fixture>>,
+  setGroup: (state: "alive" | "dead") => void,
+  options: Parameters<typeof serve>[3],
+) {
+  const controller = new AbortController();
+  const running = serve(f.config, f.directory, controller.signal, {
+    cleanupGraceMs: 40,
+    stdioGraceMs: 40,
+    ...options,
+  });
+  const control = async () => (await f.load()).controlLog?.at(-1)?.code;
+  const record = async () => (await f.load()).records["coordinator:control"];
+  const confirm = async (id: string) =>
+    writeFile(
+      join(f.directory, `commands/${id}.json`),
+      JSON.stringify({
+        action: "retry",
+        lane: "coordinator",
+        confirmCleanup: true,
+        text: "Synthetic operator verified the group is gone",
+        generation: (await f.load()).generation,
+        at: new Date().toISOString(),
+      }),
+    );
+  try {
+    await until(async () => {
+      try {
+        const r = await record();
+        return r?.status === "paused" && !!r.pid && !!r.processGroupId;
+      } catch {
+        return false;
+      }
+    });
+    const generation = (await f.load()).generation;
+    // Live group: neither a plain retry nor a cleanup confirmation is accepted.
+    await f.command("retry");
+    await until(async () => (await control()) === "CLEANUP_UNVERIFIED");
+    await confirm("33333333-3333-4333-8333-333333333333");
+    await until(async () => (await control()) === "LIVE_OWNERSHIP");
+    expect((await record())?.pid).toBeTruthy();
+    expect((await record())?.status).toBe("paused");
+    // The group disappears: identity is cleared by the next loop, not a restart.
+    setGroup("dead");
+    await until(async () => (await record())?.pid === undefined);
+    expect((await record())?.processGroupId).toBeUndefined();
+    const after = await f.load();
+    expect(after.generation).toBe(generation);
+    expect(after.running).toBe(true);
+    expect(after.records["coordinator:control"]?.status).toBe("paused");
+    await confirm("44444444-4444-4444-8444-444444444444");
+    await until(async () => (await control()) === "CLEANUP_ACKNOWLEDGED");
+    await until(async () => (await record())?.status === "idle");
+  } finally {
+    controller.abort();
+    await running;
+    await rm(f.root, { recursive: true, force: true });
+  }
+}
+
+it("clears a retained process group in the loop once it is gone, then accepts cleanup confirmation", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    let group: Liveness = "alive";
+    await retainedGroupScenario(f, (state) => (group = state), {
+      probe: (target) => (target < 0 ? group : probeProcess(target)),
+    });
+  }));
+
+it("treats EPERM from the group probe as not proven dead until ESRCH", () =>
+  withEnv(async () => {
+    const f = await fixture();
+    let code: "EPERM" | "ESRCH" = "EPERM";
+    const kill = process.kill.bind(process);
+    const spy = vi
+      .spyOn(process, "kill")
+      .mockImplementation((pid: number, signal?: string | number) => {
+        if (pid < 0 && signal === 0)
+          throw Object.assign(new Error(code), { code });
+        return kill(pid, signal as NodeJS.Signals);
+      });
+    try {
+      await retainedGroupScenario(
+        f,
+        (state) => {
+          code = state === "dead" ? "ESRCH" : "EPERM";
+        },
+        {},
+      );
+    } finally {
+      spy.mockRestore();
     }
   }));

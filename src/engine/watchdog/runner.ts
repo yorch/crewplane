@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { checkControlDirectory, controlDirectory } from "../../control.ts";
-import { durableMkdir, publishJson } from "../../io.ts";
+import { durableMkdir, publishJson, readPrivateFile } from "../../io.ts";
+import { probeProcess } from "../../liveness.ts";
 import {
   coordinatorOf,
   defaultReviewerRoles,
@@ -13,39 +13,24 @@ import {
 } from "../../project.ts";
 import { schedulingFingerprint } from "../scheduling.ts";
 import { type Config, validateConfig } from "../supervisor.ts";
-import type { Liveness, WatchdogInput, WatchdogSettings } from "./policy.ts";
+import {
+  faultCodes,
+  type Liveness,
+  type WatchdogInput,
+  type WatchdogSettings,
+} from "./policy.ts";
 import { checkWatchdog, startWatchdog } from "./service.ts";
 
 async function privateJson(path: string, maxBytes = 2097152): Promise<unknown> {
   try {
-    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-    try {
-      const stat = await file.stat();
-      if (
-        !stat.isFile() ||
-        stat.size > maxBytes ||
-        (stat.mode & 0o077) !== 0 ||
-        stat.uid !== process.getuid?.()
-      )
-        return null;
-      return JSON.parse(await file.readFile("utf8"));
-    } finally {
-      await file.close();
-    }
+    return JSON.parse(await readPrivateFile(path, maxBytes));
   } catch {
     return null;
   }
 }
 function liveness(pid: number | null): Liveness {
   if (!pid || !Number.isSafeInteger(pid)) return "unknown";
-  try {
-    process.kill(pid, 0);
-    return "alive";
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH"
-      ? "dead"
-      : "unknown";
-  }
+  return probeProcess(pid);
 }
 const time = (value: unknown): number | null =>
   typeof value === "string" && Number.isFinite(Date.parse(value))
@@ -425,24 +410,8 @@ export async function deliverNotice(
   control: string,
   notice: { key: string; codes: string[] },
 ) {
-  const faults = new Set([
-    "supervisor-dead",
-    "supervisor-stale",
-    "supervisor-unknown",
-    "heartbeat-unknown",
-    "config-mismatch",
-    "steering-stalled",
-    "coordinator-long-turn",
-    "pause-failure",
-    "pause-unknown",
-    "operation-stalled",
-    "orphan-or-unknown-child",
-    "task-failed",
-    "review-stalled",
-    "eligible-stalled",
-  ]);
   const codes = [
-    ...new Set(notice.codes.filter((code) => faults.has(code))),
+    ...new Set(notice.codes.filter((code) => faultCodes.has(code))),
   ].sort();
   if (!codes.length) return;
   const safeDirectory = async (path: string) => {

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Config, State } from "../../contracts.ts";
 import { checkControlDirectory } from "../../control.ts";
+import { probeProcess } from "../../liveness.ts";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -233,14 +234,8 @@ export async function readHeadless(
       normalizeState(state),
       Date.now(),
       (pid) => {
-        try {
-          process.kill(pid, 0);
-          return true;
-        } catch (error) {
-          return (error as NodeJS.ErrnoException).code === "ESRCH"
-            ? false
-            : null;
-        }
+        const state = probeProcess(pid);
+        return state === "unknown" ? null : state === "alive";
       },
       knownAgents,
     );

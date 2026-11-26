@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { Config, State } from "../supervisor.ts";
 import { projectHeadless, readHeadless } from "./headless.ts";
 
@@ -296,4 +296,23 @@ it("reports an instance-wide hold on every lane instead of an empty held list", 
   expect(
     laneHeld.lanes.find((lane) => lane.lane === "coordinator")?.status,
   ).toBe("idle");
+});
+
+it("shows a lane as stale when its pid probe fails with EPERM instead of claiming it is running", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-eperm-headless-"));
+  const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+  });
+  try {
+    await writeFile(join(root, "config.json"), JSON.stringify(config));
+    await writeFile(
+      join(root, "state.json"),
+      JSON.stringify({ ...state, checkedAt: new Date().toISOString() }),
+    );
+    const result = await readHeadless(root);
+    expect(result.lanes.find((r) => r.lane === "B")?.status).toBe("stale");
+  } finally {
+    kill.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
 });

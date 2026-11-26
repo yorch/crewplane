@@ -1,10 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
-  open,
   readFile,
   realpath,
   rmdir,
@@ -12,7 +10,13 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { durableMkdir, publishJson } from "../../io.ts";
+import {
+  durableMkdir,
+  PRIVATE_STATE_MAX_BYTES,
+  publishJson,
+  readPrivateFile,
+} from "../../io.ts";
+import { probeDetail } from "../../liveness.ts";
 import { withProcessLock } from "../../process-lock.ts";
 import type {
   WatchdogInput,
@@ -40,29 +44,15 @@ const systemClock = {
     await setTimeout(ms, undefined, { signal });
   },
 };
-async function readPrivate(path: string): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.size > 65536 ||
-      stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o077) !== 0
-    )
-      throw new Error("Invalid watchdog state");
-    return await handle.readFile("utf8");
-  } finally {
-    await handle.close();
-  }
-}
+const readPrivate = (path: string) =>
+  readPrivateFile(path, PRIVATE_STATE_MAX_BYTES, "Invalid watchdog state");
 async function atomic(
   path: string,
   value: unknown,
   directoryRoot?: string,
 ): Promise<void> {
   const data = `${JSON.stringify(value)}\n`;
-  if (Buffer.byteLength(data) > 65536)
+  if (Buffer.byteLength(data) > PRIVATE_STATE_MAX_BYTES)
     throw new Error("Watchdog state too large");
   await publishJson(path, value, directoryRoot ? { directoryRoot } : {});
 }
@@ -119,12 +109,11 @@ async function run(
             typeof previous.identity !== "string"
           )
             throw Error("Watchdog lease unavailable");
-          try {
-            process.kill(previous.pid, 0);
+          const owner = probeDetail(previous.pid);
+          if (owner.state === "alive")
             throw Error("Watchdog lease unavailable");
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-          }
+          if (owner.state === "unknown")
+            throw Error(`Watchdog lease unavailable (${owner.code})`);
           await unlink(ownerPath);
           await rmdir(lease);
           await mkdir(lease, { mode: 0o700 });

@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Config, Lane, State } from "../contracts.ts";
+import { sha256Hex } from "../hash.ts";
 export interface LoadedScheduling {
   fingerprint: string;
   allowedTasks: string[];
@@ -10,19 +10,17 @@ export interface LoadedScheduling {
   intervalSeconds?: number;
 }
 export const schedulingFingerprint = (config: Config) =>
-  createHash("sha256")
-    .update(
-      JSON.stringify(
-        { ...config, allowedTasks: [...new Set(config.allowedTasks)].sort() },
-        (_key, value: unknown) =>
-          value && typeof value === "object" && !Array.isArray(value)
-            ? Object.fromEntries(
-                Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
-              )
-            : value,
-      ),
-    )
-    .digest("hex");
+  sha256Hex(
+    JSON.stringify(
+      { ...config, allowedTasks: [...new Set(config.allowedTasks)].sort() },
+      (_key, value: unknown) =>
+        value && typeof value === "object" && !Array.isArray(value)
+          ? Object.fromEntries(
+              Object.entries(value).sort(([a], [b]) => a.localeCompare(b)),
+            )
+          : value,
+    ),
+  );
 export function loadedScheduling(config: Config): LoadedScheduling {
   return {
     fingerprint: schedulingFingerprint(config),

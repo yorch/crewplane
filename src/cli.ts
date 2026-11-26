@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import pkg from "../package.json" with { type: "json" };
+import { snapshot } from "./board.ts";
 import type { Config, State } from "./contracts.ts";
 import {
   bindControl,
@@ -39,12 +40,13 @@ import {
   instructionFileProblem,
   validHarness,
 } from "./engine/harness.ts";
-import { snapshot } from "./engine/read-model.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { acquire, monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
+import { standaloneBinary } from "./environment.ts";
 import { help } from "./help.ts";
 import { publishJson } from "./io.ts";
+import { isProcessAlive } from "./liveness.ts";
 import {
   describeAdoption,
   escapeJsonText,
@@ -67,7 +69,6 @@ import {
 import {
   compareVersions,
   dispatchTarget,
-  isProcessAlive,
   isReleaseBuild,
   liveSupervisorRegistrations,
   readUpdateCache,
@@ -233,9 +234,6 @@ const pinMismatchBypass = new Set([
 ]);
 /** Why the last pin mismatch could not hand off, for the refusal to explain. */
 let dispatchSkip: string | undefined;
-const standaloneBinary = () =>
-  (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
-    ?.isStandaloneExecutable === true;
 /** The retained-release directory, or why it cannot be determined. */
 const safeRoot = () => {
   try {

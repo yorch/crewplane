@@ -12,6 +12,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { durableMkdir } from "./io.ts";
+import { isProcessAlive } from "./liveness.ts";
 
 interface Owner {
   pid: number;
@@ -43,14 +44,6 @@ async function owner(path: string): Promise<Owner | null> {
     throw error;
   } finally {
     await handle?.close();
-  }
-}
-function alive(pid: number) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 /** Remove temp publications orphaned by a crash; young ones may be in flight. */
@@ -105,13 +98,13 @@ export async function withProcessLock<T>(
     } catch {
       /* A just-created owner file may not be flushed yet. Never remove unverified data. */
     }
-    if (previous && !alive(previous.pid)) {
+    if (previous && !isProcessAlive(previous.pid)) {
       const recovery = `${path}.recovery`;
       let recoveryHandle: Awaited<ReturnType<typeof open>> | undefined;
       try {
         recoveryHandle = await open(recovery, "wx", 0o600);
         const latest = await owner(path);
-        if (latest?.token === previous.token && !alive(latest.pid)) {
+        if (latest?.token === previous.token && !isProcessAlive(latest.pid)) {
           await unlink(path);
           await sweepOrphans(path);
         }

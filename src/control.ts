@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -13,6 +13,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { sha256Hex } from "./hash.ts";
 import { publishJson, syncDirectory } from "./io.ts";
 
 /**
@@ -59,10 +60,7 @@ export function controlDirectory(
 ): string {
   // The native realpath returns the filesystem's own spelling, so a
   // case-insensitive volume yields one key for every spelling of the root.
-  const key = createHash("sha256")
-    .update(realpath(primaryRoot))
-    .digest("hex")
-    .slice(0, 24);
+  const key = sha256Hex(realpath(primaryRoot)).slice(0, 24);
   return join(controlStateBase(env, home), "crewplane", "projects", key);
 }
 

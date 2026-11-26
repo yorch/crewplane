@@ -45,7 +45,12 @@ it("keeps configured roles and document paths explicit and rejects traversal/pro
       { ...valid, coordinator: ["captain"] },
       { ...valid, tasksPath: "../private" },
       { ...valid, statusPath: "/etc/passwd" },
-      { ...valid, roadmapFormat: "execute" },
+      { ...valid, roadmapFormat: "toString" },
+      { ...valid, roadmapFormat: "Relay" },
+      { ...valid, roadmapFormat: "" },
+      { ...valid, roadmapFormat: "a b" },
+      { ...valid, roadmapFormat: "x".repeat(33) },
+      { ...valid, roadmapFormat: 7 },
     ]) {
       writeFileSync(join(root, "crewplane.json"), JSON.stringify(invalid));
       expect(() => projectPolicy(root)).toThrow();

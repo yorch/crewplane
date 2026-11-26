@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
 import {
   access,
@@ -17,7 +17,10 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { standaloneBinary } from "./environment.ts";
+import { sha256Hex } from "./hash.ts";
 import { syncDirectory } from "./io.ts";
+import { isProcessAlive } from "./liveness.ts";
 import { embeddedReleaseTrust } from "./release-keys.ts";
 import {
   type ReleaseTrust,
@@ -153,9 +156,9 @@ async function retainRelease(
  * per platform plus a `<asset>.sha256` line. Nothing here touches project
  * state, the supervisor, holds, budgets or queued controls.
  */
-export const releaseRepository = "yorch/crewplane";
-export const defaultReleaseApi = `https://api.github.com/repos/${releaseRepository}/releases/latest`;
-export const defaultReleaseBase = `https://github.com/${releaseRepository}/releases/download`;
+const releaseRepository = "yorch/crewplane";
+const defaultReleaseApi = `https://api.github.com/repos/${releaseRepository}/releases/latest`;
+const defaultReleaseBase = `https://github.com/${releaseRepository}/releases/download`;
 
 export type UpdateEnvironment = Record<string, string | undefined>;
 export type FetchLike = (input: string, init?: RequestInit) => Promise<unknown>;
@@ -321,10 +324,6 @@ export function assetName(tag: string, target: ReleaseTarget): string {
   return `crewplane-${parseTag(tag)}-${target.os}-${target.arch}`;
 }
 
-export function digest(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 /** Parse a published checksum file and require the expected asset name. */
 export function expectedDigest(value: string, asset: string): string {
   for (const line of value.split(/\r?\n/)) {
@@ -338,12 +337,12 @@ export function expectedDigest(value: string, asset: string): string {
   throw new Error(`Missing SHA-256 checksum for ${asset}`);
 }
 
-export function assertDigest(
+function assertDigest(
   bytes: Uint8Array,
   expected: string,
   asset: string,
 ): void {
-  if (digest(bytes) !== expected)
+  if (sha256Hex(bytes) !== expected)
     throw new Error(`Checksum mismatch for ${asset}`);
 }
 
@@ -530,11 +529,7 @@ export function updateDue(
  * without reading the environment. Local builds keep the runtime lookup.
  */
 export function isReleaseBuild(): boolean {
-  return (
-    process.env.CREWPLANE_RELEASE_BUILD === "1" &&
-    (globalThis as { Bun?: { isStandaloneExecutable?: boolean } }).Bun
-      ?.isStandaloneExecutable === true
-  );
+  return process.env.CREWPLANE_RELEASE_BUILD === "1" && standaloneBinary();
 }
 
 /** Only a compiled, release-marked binary replaces itself, never a retained copy. */
@@ -546,16 +541,6 @@ export function updateTarget(
   if (!releaseMarked || execPath === "") return null;
   if (isRetained(execPath, environment)) return null;
   return execPath;
-}
-
-export function isProcessAlive(pid: number | undefined): boolean {
-  if (pid === undefined || !Number.isSafeInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
 }
 
 export const longRunningCommands = [
@@ -1018,7 +1003,7 @@ export async function downloadRelease(
       keys,
       tag,
       asset,
-      sha256: digest(bytes),
+      sha256: sha256Hex(bytes),
       signatureText,
     });
     return { asset, bytes, integrity: "signed", signingKey: checked.keyId };

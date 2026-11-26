@@ -395,7 +395,7 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
         ],
         { cwd: root, stdio: "pipe" },
       );
-      const { snapshot: readSnapshot } = await import("./read-model.ts");
+      const { snapshot: readSnapshot } = await import("../board.ts");
       const pinned = git("rev-parse", "HEAD").toString().trim();
       running = serve(initial, directory, controller.signal, {
         readBoard: async (root) => {
@@ -1066,7 +1066,7 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
     };
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(join(directory, "config.json"), JSON.stringify(value));
-    const { snapshot: readSnapshot } = await import("./read-model.ts");
+    const { snapshot: readSnapshot } = await import("../board.ts");
     running = serve(value, directory, controller.signal, {
       readBoard: async (projectRoot) => {
         const actual = await readSnapshot(projectRoot);

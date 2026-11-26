@@ -1,5 +1,5 @@
 /** Stable extraction ports. Implementations remain local and explicitly authorized. */
-import type { Board, Config, RecordState, Work } from "./contracts.ts";
+import type { Config } from "./contracts.ts";
 import type {
   FinalOutcome,
   FinalResult,
@@ -11,22 +11,16 @@ import type {
 } from "./engine/harness.ts";
 
 export type { HarnessCapabilities } from "./engine/harness.ts";
-export interface ProjectIdentity {
-  version: 1;
-  root: string;
-  gitCommonDir: string;
-  store: string;
+/** A planning card derived from a roadmap document; never grants execution authority. */
+export interface PlannedCard {
+  id: string;
+  markdown: string;
 }
-export interface CoordinationPort {
-  execute(args: string[], cwd: string): Promise<unknown>;
-}
-export interface BoardReader {
-  snapshot(root: string): Promise<Board>;
-}
-export interface WorkspacePort {
-  prepare(work: Work): Promise<string>;
-  inspect(path: string): Promise<{ commit: string; dirty: boolean }>;
-}
+/** Derives placeholder cards from a plan, skipping ids that already have a card. */
+export type PlanParser = (
+  plan: string,
+  existingIds: Set<string>,
+) => PlannedCard[];
 export interface HarnessAdapter {
   id: Harness;
   capabilities: HarnessCapabilities;
@@ -52,7 +46,4 @@ export interface HarnessAdapter {
   /** Resolve the normalized final result and whether to persist it to the run log. */
   finalize(stream: HarnessStream, output: string): Promise<FinalOutcome>;
   validateResult(value: unknown): value is FinalResult;
-}
-export interface RunObserver {
-  record(run: Readonly<RecordState>): Promise<void>;
 }

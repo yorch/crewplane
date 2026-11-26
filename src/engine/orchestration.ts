@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
+import { sha256Json } from "../hash.ts";
 import { coordinatorOf, reviewersOf } from "../project.ts";
 import {
   evaluateSchedule,
@@ -13,12 +13,10 @@ import type { snapshot } from "./read-model.ts";
 
 type Board = Awaited<ReturnType<typeof snapshot>>;
 
-const digest = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const workKey = (key: string) =>
   /^[A-Za-z0-9][A-Za-z0-9:_./-]{0,199}$/.test(key)
     ? key
-    : `work:${digest(key)}`;
+    : `work:${sha256Json(key)}`;
 const instant = (value: string | undefined, fallback: number) =>
   value && Number.isFinite(Date.parse(value)) ? Date.parse(value) : fallback;
 /** Visible scheduling failure; persisted beside the queue (State.schedulingError). */
@@ -62,7 +60,7 @@ export function evaluateOrchestration(
   // A planning request never authorizes a task or bypasses a phase gate. It is acknowledged
   // once per backlog/acceptance revision, rather than polling the model every interval.
   const planningId = backlog.length
-    ? `planning:${digest({ backlog, accepted: board.tasks.filter((t) => t.live?.accepted).map((t) => [t.id, t.live?.accepted?.commit]) })}`
+    ? `planning:${sha256Json({ backlog, accepted: board.tasks.filter((t) => t.live?.accepted).map((t) => [t.id, t.live?.accepted?.commit]) })}`
     : null;
   const pendingRevision = (
     m: Board["messages"][number],
@@ -430,7 +428,7 @@ export function evaluateOrchestration(
               `assignment:${key}`,
               ...(resumeBlocked
                 ? [
-                    `resume:${digest(active.filter((t) => t.live?.assignment.owner === lane).map((t) => [t.id, t.live?.status?.commit, t.live?.status?.state]))}`,
+                    `resume:${sha256Json(active.filter((t) => t.live?.assignment.owner === lane).map((t) => [t.id, t.live?.status?.commit, t.live?.status?.state]))}`,
                   ]
                 : []),
               ...checkpointRequests.map((m) => `checkpoint:${m.id}`),

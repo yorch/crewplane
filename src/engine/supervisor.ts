@@ -1,10 +1,11 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import pkg from "../../package.json" with { type: "json" };
 import { adapters } from "../adapters.ts";
+import { snapshot } from "../board.ts";
 import type {
   Config,
   ControlLogEntry,
@@ -15,7 +16,9 @@ import type {
 } from "../contracts.ts";
 import { bindControl, ensureControlDirectory } from "../control.ts";
 import { gitEnvironment, harnessEnvironment } from "../environment.ts";
+import { sha256Json } from "../hash.ts";
 import { durableMkdir, publishJson } from "../io.ts";
+import { probeProcess } from "../liveness.ts";
 import type { HarnessAdapter } from "../ports.ts";
 import {
   coordinatorOf,
@@ -49,7 +52,6 @@ import {
   evaluateOrchestration,
   type SchedulingError,
 } from "./orchestration.ts";
-import { snapshot } from "./read-model.ts";
 import { loadedScheduling } from "./scheduling.ts";
 import { evaluateTurnWait } from "./wait-policy.ts";
 import { acquire } from "./watch.ts";
@@ -57,8 +59,6 @@ import { acquire } from "./watch.ts";
 export type { Config, Lane, RecordState, State, Work } from "../contracts.ts";
 
 type Board = Awaited<ReturnType<typeof snapshot>>;
-const hash = (value: unknown) =>
-  createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const taskId = (value: string) => validTaskId(value);
 const git = (root: string, args: string[]) =>
   execFileSync("git", args, {
@@ -223,7 +223,7 @@ async function workdir(work: Work, board: Board, config: Config) {
     ]);
     return live.claim.worktree;
   }
-  const suffix = hash(work.key).slice(0, 8);
+  const suffix = sha256Json(work.key).slice(0, 8);
   const name = `${work.lane}-${work.task}-${suffix}`;
   const path = join(config.root, ".crewplane-local/headless/worktrees", name);
   const branch = `headless/${name}`;
@@ -431,12 +431,12 @@ export async function progress(
     code =
       git(cwd, ["rev-parse", "HEAD"]) +
       git(cwd, ["status", "--porcelain"]) +
-      hash(git(cwd, ["diff", "--no-ext-diff", "--no-textconv"])) +
-      hash(changes);
+      sha256Json(git(cwd, ["diff", "--no-ext-diff", "--no-textconv"])) +
+      sha256Json(changes);
   } catch {
     /* review control may not be a Git checkout */
   }
-  return hash({
+  return sha256Json({
     tasks: board.tasks
       .filter(
         (t) => t.live && (work.lane === coordinator || t.id === work.task),
@@ -476,8 +476,11 @@ export async function serve(
     runTimeoutMs?: number;
     cleanupGraceMs?: number;
     stdioGraceMs?: number;
+    /** Liveness probe for retained child pids and (negative) process groups. */
+    probe?: typeof probeProcess;
   } = {},
 ) {
+  const probe = options.probe ?? probeProcess;
   const startedAt = new Date().toISOString();
   const readBoard = options.readBoard ?? snapshot;
   let config = validateConfig(initialConfig);
@@ -589,18 +592,13 @@ export async function serve(
           "Prior run has no child identity; inspect and retry explicitly";
         continue;
       }
-      let alive = true;
-      try {
-        process.kill(
+      if (
+        probe(
           process.platform === "win32"
             ? record.pid
             : -(record.processGroupId ?? record.pid),
-          0,
-        );
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-      }
-      if (alive)
+        ) !== "dead"
+      )
         throw new Error(
           `Prior lane PID ${record.pid} may still be running; do not start overlapping writers`,
         );
@@ -666,18 +664,15 @@ export async function serve(
           (!record.pid && !record.processGroupId)
         )
           continue;
-        try {
-          process.kill(
+        if (
+          probe(
             process.platform === "win32"
               ? (record.pid as number)
               : -(record.processGroupId ?? (record.pid as number)),
-            0,
-          );
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-            delete record.pid;
-            delete record.processGroupId;
-          }
+          ) === "dead"
+        ) {
+          delete record.pid;
+          delete record.processGroupId;
         }
       }
       const pendingCommands = await Promise.all(
@@ -1549,17 +1544,13 @@ export async function serve(
           });
           const groupAlive = () => {
             if (!record.pid) return false;
-            try {
-              process.kill(
+            return (
+              probe(
                 process.platform === "win32"
                   ? record.pid
                   : -(record.processGroupId ?? record.pid),
-                0,
-              );
-              return true;
-            } catch (error) {
-              return (error as NodeJS.ErrnoException).code !== "ESRCH";
-            }
+              ) !== "dead"
+            );
           };
           const killGroup = (signal: NodeJS.Signals) => {
             if (!record.pid) return;

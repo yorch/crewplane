@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { evaluateWatchdog } from "./policy.ts";
 import { readHealth, settings } from "./runner.ts";
 import { checkWatchdog } from "./service.ts";
@@ -777,6 +777,47 @@ it("orders unverified children before plain retained ones and signals truncation
     expect(result.codes).toContain("orphan-or-unknown-child");
     expect(result.recovery).not.toBe("request-restart");
   } finally {
+    await rm(store, { recursive: true, force: true });
+  }
+});
+
+it("reports a supervisor whose pid cannot be probed (EPERM) as unknown, raising supervisor-unknown", async () => {
+  const store = await mkdtemp(join(tmpdir(), "relay-eperm-health-"));
+  const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+  });
+  try {
+    const now = Date.now();
+    await writeFile(
+      join(store, "state.json"),
+      JSON.stringify({
+        pid: process.pid,
+        running: true,
+        checkedAt: new Date(now).toISOString(),
+        held: [],
+        notices: {},
+        records: {},
+      }),
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(store, "desired.json"),
+      JSON.stringify({ desiredRunning: true }),
+      { mode: 0o600 },
+    );
+    const input = await readHealth(store, now);
+    expect(input.supervisor.alive).toBe("unknown");
+    const first = evaluateWatchdog(input, null, settings);
+    const later = evaluateWatchdog(
+      { ...input, now: now + 3600000 },
+      first.state,
+      settings,
+    );
+    expect(later.observations.map((o) => o.code)).toContain(
+      "supervisor-unknown",
+    );
+  } finally {
+    kill.mockRestore();
     await rm(store, { recursive: true, force: true });
   }
 });

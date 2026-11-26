@@ -9,9 +9,10 @@
 // skipped with a notice. If it lists keys, a missing secret is an error, and
 // every signature is verified against the listed keys before this exits, so a
 // secret that does not match a published public key fails the release.
-import { createHash, type KeyObject } from "node:crypto";
+import type { KeyObject } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
+import { sha256Hex } from "../src/hash.ts";
 import {
   parsePrivateKey,
   parseReleaseTrust,
@@ -43,8 +44,7 @@ for (let i = 0; i < args.length; i++) {
 if (!/^v\d+\.\d+\.\d+/.test(tag)) fail("--tag vX.Y.Z is required");
 if (files.length === 0) fail("no asset files given");
 const keys = parseReleaseTrust(JSON.parse(readFileSync(keysPath, "utf8"))).keys;
-const sha256 = (file: string) =>
-  createHash("sha256").update(readFileSync(file)).digest("hex");
+const sha256 = (file: string) => sha256Hex(readFileSync(file));
 
 function check(file: string): string {
   return verifyReleaseSignature({

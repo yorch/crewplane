@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   mkdir,
   readdir,
@@ -8,10 +8,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
+import { snapshot } from "../board.ts";
+import { sha256Json } from "../hash.ts";
 import { publishJson } from "../io.ts";
+import { probeProcess } from "../liveness.ts";
 import { coordinatorOf } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
-import { monitorStatus, snapshot } from "./read-model.ts";
+import { monitorStatus } from "./read-model.ts";
 
 type Snapshot = Awaited<ReturnType<typeof snapshot>>;
 interface Settings {
@@ -111,16 +114,12 @@ export function summarize(data: Snapshot, settings: Settings, now: Date) {
   return {
     activeTasks,
     alerts,
-    snapshotHash: createHash("sha256")
-      .update(
-        JSON.stringify({
-          tasks: data.tasks,
-          messages: data.messages,
-          unanswered: data.unanswered,
-          milestoneStatus: data.milestoneStatus,
-        }),
-      )
-      .digest("hex"),
+    snapshotHash: sha256Json({
+      tasks: data.tasks,
+      messages: data.messages,
+      unanswered: data.unanswered,
+      milestoneStatus: data.milestoneStatus,
+    }),
     messageIds: data.messages.map((message) => message.id),
     messageCount: data.messages.length,
     unansweredCount: data.unanswered.length,
@@ -207,13 +206,7 @@ export async function acquire(directory: string) {
       try {
         const current = await lockJson<{ pid: number; token: string }>(path);
         if (current?.token !== lock.token) continue;
-        let alive = true;
-        try {
-          process.kill(current.pid, 0);
-        } catch (e) {
-          if ((e as NodeJS.ErrnoException).code === "ESRCH") alive = false;
-        }
-        if (alive)
+        if (probeProcess(current.pid) !== "dead")
           throw new Error(
             `Watcher already owns this store (PID ${current.pid})`,
           );
