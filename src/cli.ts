@@ -41,7 +41,7 @@ import {
   validHarness,
 } from "./engine/harness.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
-import { acquire, monitorMain } from "./engine/watch.ts";
+import { monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { standaloneBinary } from "./environment.ts";
 import { help } from "./help.ts";
@@ -66,6 +66,9 @@ import {
   projectPolicy,
   writeProjectPin,
 } from "./project.ts";
+import { runSetup, terminalIO } from "./setup/command.ts";
+import { loadPrior } from "./setup/epochs.ts";
+import { installConfig, stoppedProblem } from "./setup/install.ts";
 import {
   compareVersions,
   dispatchTarget,
@@ -164,6 +167,7 @@ const knownCommands = new Set([
   "init",
   "doctor",
   "configure",
+  "setup",
   "agents",
   "task",
   "agent",
@@ -444,6 +448,16 @@ async function main() {
   const controlDir = command === "init" ? "" : controlDirectory(root);
   const identity = { primaryRoot: root, gitCommon: common };
   const halting = ["status", "stop", "pause", "cancel"].includes(command);
+  // Resolved lazily: `directory` is only final after the control-target gate.
+  const installTarget = {
+    root,
+    policy,
+    store: ctx.store,
+    get directory() {
+      return directory;
+    },
+    identity,
+  };
   let directory = controlDir;
   let also: string[] = [];
   let unverifiedLegacyDirectory: string | undefined;
@@ -651,42 +665,41 @@ async function main() {
     } catch {
       throw new Error("Configuration file is not valid JSON");
     }
-    // SAFETY: validateConfig is the runtime decoder for untrusted JSON input.
-    const config = validateConfig({
-      ...value,
-      root,
-      coordinator: policy.coordinator,
-      reviewers: policy.reviewers,
-      reviewerRoles: policy.reviewerRoles,
-    } as unknown as Config);
-    for (const [laneId, lane] of Object.entries(config.lanes)) {
-      if (!lane.instructionsPath) continue;
-      const problem = instructionFileProblem(
-        config.root,
-        lane.instructionsPath,
-      );
-      if (problem)
-        throw new Error(`Lane ${laneId} instructions unavailable: ${problem}`);
-    }
-    await ensureControlDirectory(directory);
-    await bindControl(ctx.store, directory, identity);
-    const release = await acquire(directory);
-    try {
-      const state = await optional(join(directory, "state.json"));
-      if (state?.running)
-        throw new Error(
-          "Stop and inspect the existing supervisor before replacing configuration",
-        );
-      await publishJson(join(directory, "config.json"), config);
-    } finally {
-      await release();
-    }
-
+    const config = await installConfig(value, installTarget);
     return output({
       configured: true,
       started: false,
       agents: Object.keys(config.lanes),
     });
+  }
+  if (command === "setup") {
+    const report = await runSetup(rest, {
+      requested,
+      root,
+      policy,
+      env: process.env,
+      tty: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      options,
+      install: (value) =>
+        installConfig(value, installTarget, { requireStopped: true }),
+      stopped: () => stoppedProblem(directory),
+      prior: () => loadPrior(directory),
+      protectedPaths: [
+        directory,
+        controlDir,
+        ctx.store,
+        join(root, ".crewplane-state"),
+        join(root, ".crewplane-local"),
+      ],
+      makeIO: () => terminalIO(process.stdin, process.stderr),
+    });
+    for (const problem of report.problems)
+      console.error(
+        `crewplane: ${problem.code}${problem.lane ? ` (${problem.lane})` : ""}: ${problem.message}`,
+      );
+    for (const note of report.notes) console.error(`crewplane: note: ${note}`);
+    if (report.problems.length) process.exitCode = 2;
+    return output(report);
   }
   if (command === "doctor") {
     if (rest.length) throw new Error("doctor takes no options");

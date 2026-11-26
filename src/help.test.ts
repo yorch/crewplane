@@ -1,6 +1,7 @@
 import { expect, it } from "vitest";
 import { control } from "./engine/control-policy.ts";
 import { help } from "./help.ts";
+import { setupOptions } from "./setup/command.ts";
 
 /**
  * Every control form printed by --help, with the option set the CLI builds for
@@ -113,4 +114,57 @@ it("documents the dashboard controls opt-in and the agents help pointer", () => 
 it("documents what doctor probes and its exit code", () => {
   expect(help).toMatch(/doctor\s+Diagnose config and harness binaries/);
   expect(help).toContain("exit 2 on problems");
+});
+
+it("documents the setup grammar and accepts every flag it prints", () => {
+  expect(help).toMatch(/\n {2}setup {2,}Guided setup wizard/);
+  expect(help).toContain(
+    "setup --non-interactive true --template codex|claude|opencode|mixed",
+  );
+  const block = help.slice(
+    help.indexOf("  setup --non-interactive"),
+    help.indexOf("  agents COMMAND"),
+  );
+  const printed = new Set(block.match(/--[a-z-]+/g));
+  // Every flag printed in the setup block is one the command parses, and vice versa.
+  expect([...printed].sort()).toEqual([...setupOptions].sort());
+  // Boolean flags are documented with an explicit true.
+  for (const flag of [
+    "--non-interactive true",
+    "--confirm-stopped true",
+    "--install true",
+  ])
+    expect(help, flag).toContain(flag);
+  // Each documented form parses without error under the command's own grammar.
+  const forms: string[][] = [
+    ["--non-interactive", "true", "--template", "codex"],
+    [
+      "--non-interactive",
+      "true",
+      "--template",
+      "mixed",
+      "--binary",
+      "/a",
+      "--claude-binary",
+      "/b",
+      "--opencode-binary",
+      "/c",
+      "--pi-binary",
+      "/d",
+      "--model",
+      "opus",
+      "--tasks",
+      "A-1,B-2",
+      "--out",
+      "/o.json",
+      "--install",
+      "true",
+      "--confirm-stopped",
+      "true",
+    ],
+  ];
+  const allowed = new Set(setupOptions);
+  for (const form of forms)
+    for (let i = 0; i < form.length; i += 2)
+      expect(allowed.has(form[i] as string), form[i]).toBe(true);
 });

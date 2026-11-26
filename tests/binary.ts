@@ -190,6 +190,74 @@ try {
   };
   const configFile = join(temp, "runtime.json");
   writeFileSync(configFile, JSON.stringify(config));
+  // Guided setup: generate and install a codex configuration, then diagnose it.
+  // Lane names come from policy (captain, inspector) and --implementers; the
+  // allowed tasks come only from --tasks (cards on disk are never trusted). The
+  // fixture is the codex binary and is never run here.
+  const noTasks = spawnSync(
+    bin,
+    [
+      "--project",
+      root,
+      "setup",
+      "--non-interactive",
+      "true",
+      "--template",
+      "codex",
+      "--binary",
+      fixture,
+    ],
+    {
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+    },
+  );
+  assert.equal(noTasks.status, 1);
+  assert.equal(noTasks.stdout, "");
+  assert.match(noTasks.stderr, /requires --tasks/);
+  const generated = json(
+    "setup",
+    "--non-interactive",
+    "true",
+    "--template",
+    "codex",
+    "--binary",
+    fixture,
+    "--tasks",
+    "CP-101,CP-102",
+    "--implementers",
+    "builder,designer",
+    "--confirm-stopped",
+    "true",
+    "--install",
+    "true",
+  );
+  assert.equal(generated.installed, true);
+  assert.deepEqual(generated.problems, []);
+  assert.deepEqual(generated.config.allowedTasks, ["CP-101", "CP-102"]);
+  assert.deepEqual(Object.keys(generated.config.lanes), [
+    "captain",
+    "builder",
+    "designer",
+    "inspector",
+  ]);
+  const setupDoctor = json("doctor");
+  assert.equal(setupDoctor.ok, true);
+  assert.equal(setupDoctor.config, "valid");
+  assert.equal(setupDoctor.runtime, "compiled");
+  assert.equal(setupDoctor.defaultBinary.path, fixture);
+  const noTerminal = spawnSync(bin, ["--project", root, "setup"], {
+    env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 15000,
+  });
+  assert.equal(noTerminal.status, 1);
+  assert.equal(noTerminal.stdout, "");
+  assert.match(noTerminal.stderr, /needs an interactive terminal/);
+  // The hand-written configuration used by the rest of the scenario replaces it.
   json("configure", "--file", configFile);
   const doctor = json("doctor");
   assert.equal(doctor.config, "valid");

@@ -146,7 +146,184 @@ Agent IDs are safe identifiers, not fixed letters; prototype-property names are 
 
 `examples/relay/crewplane.json` is an optional mapping for Relay documents and agent IDs. Copying this profile does not migrate state, authorize adoption, or start services.
 
+## Guided setup
+
+`crewplane setup` generates the runtime configuration that `configure --file` installs, so you do not have to write the JSON by hand. Run `init` first. Then use the wizard in a terminal, or pass flags from a script.
+
+Setup never starts a harness and never runs a harness executable: each binary is only checked to be an absolute, executable regular file that users outside your own groups cannot replace, nor any directory or link on its path (ACLs, mounts, attributes, capabilities and check-to-use races are not covered; `doctor` does not apply this; see [Binary safety checks](#binary-safety-checks)).
+
+By default it writes no configuration. See [Default runs and files](#default-runs-and-files) for the exact effects.
+
+### Interactive wizard
+
+Run `crewplane --project /path/to/repo setup` in a terminal. Both stdin and stdout must be terminals; otherwise setup fails with exit 1 and suggests `--non-interactive true`.
+
+- Prompts and echoed text go to stderr. The final JSON report goes to stdout, so it appears on the terminal too.
+- The wizard lists the executables it found on PATH (and any candidates it rejected, with the reason), then asks for a template, binaries, models, Claude safety fields, implementer lane IDs, allowed task IDs and the four limits.
+- `custom` (wizard only) chooses a harness for the coordinator, the implementers and the reviewers separately. Pi is offered only for reviewers.
+- An invalid answer is re-asked up to three times, then setup stops with exit 1.
+- Ctrl+C or end of input aborts with `Setup cancelled; nothing was written`.
+- The review asks `yes` or `no`. Answering `no` aborts with nothing written. Anything else is re-asked, up to the same three attempts.
+- Installing is offered only if you answer `yes` to "Is the supervisor stopped?". A `yes` is refused with exit 1 (nothing is written) when the control state says a supervisor is running or supervisor liveness evidence says one is live. An optional `--out` path is offered last; a path that would be refused (see [Default runs and files](#default-runs-and-files)) is re-asked.
+- Task cards on disk only seed the defaults for implementer lane IDs (from `Owner:` lines) and allowed task IDs. Cards whose `Status:` says done, complete(d), closed, cancelled, abandoned, accepted or merged are skipped, at most 200 cards are read, and every ID is validated. You must confirm or edit the defaults; nothing is authorized without your answer.
+- A bad Pi model is re-asked, because it is checked by the same engine validator as every other lane field.
+
+### Non-interactive mode
+
+Scripts and automation use `--non-interactive true` (the value must be exactly `true`) with `--template` and `--tasks`. Passing any other option without it is an error. `--tasks` is required: task cards on disk are never trusted to decide which tasks may run, so without `--tasks` setup fails with exit 1 and writes nothing.
+
+```sh
+crewplane --project /path/to/repo setup --non-interactive true --template codex --binary /usr/local/bin/codex --tasks CP-101
+```
+
+Templates produce these configurations. Every template's output is accepted by the same validator `configure` uses.
+
+- `codex`: every lane runs Codex. The executable goes in the top-level `binary` field only, with no `binaries` map. `--model` is optional.
+- `claude`: every lane runs Claude Code, with `binaries.claude`. `--model` is required. Lanes carry explicit `claudePermissionMode`, `claudeMcp`, `claudeSettingSources` and `maxCostUsdPerRun`.
+- `opencode`: every lane runs OpenCode, with `binaries.opencode`. `--model` is required, as `provider/model` or `provider/model#variant`.
+- `mixed`: the coordinator and implementers run Claude Code. Reviewers run OpenCode, or Pi with `--reviewer-harness pi`. It needs `--model` for Claude, and `--reviewer-model` for OpenCode reviewers. The top-level `binary` is the Claude executable.
+
+Lane IDs come from the committed `crewplane.json`. By default the coordinator is `coordinator`, and the reviewers are `reviewer` and `visual`. Implementer IDs come only from `--implementers`, or default to the single ID `implementer`; `Owner:` lines in task cards are not read in non-interactive mode. The `visual` reviewer starts disabled (`"enabled": false`); the notes say so.
+
+Coordinator and reviewer lanes always use Claude's `plan` mode. Only implementer lanes take `--claude-permission-mode`. Bypass and manual modes are not offered.
+
+### Flags
+
+| Flag                              | Applies to                                  | Meaning and default                                                                                                                                                                                                                  |
+| --------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--non-interactive true`          | all                                         | Required for scripts. The value must be `true`.                                                                                                                                                                                      |
+| `--template NAME`                 | all                                         | `codex`, `claude`, `opencode` or `mixed`. Required in non-interactive mode.                                                                                                                                                          |
+| `--binary PATH`                   | `codex`                                     | Absolute Codex executable. Default: `codex` on PATH. Rejected for other templates.                                                                                                                                                   |
+| `--claude-binary PATH`            | `claude`, `mixed`                           | Absolute Claude executable. Default: `claude` on PATH.                                                                                                                                                                               |
+| `--opencode-binary PATH`          | `opencode`, `mixed` with OpenCode reviewers | Absolute OpenCode executable. Default: `opencode` on PATH.                                                                                                                                                                           |
+| `--pi-binary PATH`                | `mixed` with Pi reviewers                   | Absolute Pi executable. Default: `pi` on PATH.                                                                                                                                                                                       |
+| `--model ID`                      | `claude`, `opencode`, `mixed`, `codex`      | Required for Claude and OpenCode. Omitted for Codex means the harness default. For `mixed`, it sets the Claude model.                                                                                                                |
+| `--reviewer-model ID`             | `mixed` with OpenCode reviewers             | Required OpenCode model for reviewers.                                                                                                                                                                                               |
+| `--reviewer-harness opencode\|pi` | `mixed`                                     | Reviewer harness. Default `opencode`.                                                                                                                                                                                                |
+| `--pi-model PROVIDER/MODEL`       | `mixed` with Pi reviewers                   | Optional. Omitted means Pi's own default.                                                                                                                                                                                            |
+| `--tasks ID,ID`                   | all                                         | Task IDs that may ever run. Required in non-interactive mode; there is no default.                                                                                                                                                   |
+| `--implementers ID,ID`            | all                                         | Implementer lane IDs. Default: the single ID `implementer`. Must not match the coordinator or a reviewer.                                                                                                                            |
+| `--confirm-stopped true`          | all                                         | Records the current UTC time as `confirmedStoppedAt`. Refused while a supervisor is running or live. See below.                                                                                                                      |
+| `--install true`                  | all                                         | Installs the configuration as `configure` does. Requires `--confirm-stopped true`.                                                                                                                                                   |
+| `--out PATH`                      | all                                         | Writes the JSON to a new file with mode 0600, atomically, never overwriting. Relative paths resolve from the `--project` directory when you pass `--project`, otherwise from the current directory. See below for refused locations. |
+| `--claude-permission-mode MODE`   | Claude lanes                                | Implementer mode: `acceptEdits` (default), `auto`, `dontAsk` or `plan`.                                                                                                                                                              |
+| `--claude-mcp strict\|inherit`    | Claude lanes                                | Default `strict`.                                                                                                                                                                                                                    |
+| `--claude-setting-sources LIST`   | Claude lanes                                | Comma list of `user`, `project`, `local`. Default `project`.                                                                                                                                                                         |
+| `--max-cost-usd N`                | Claude lanes                                | Cap per Claude invocation: 0.01 to 100, at most two decimals. Default `2`.                                                                                                                                                           |
+| `--max-parallel N`                | all                                         | 1 to 4. Default `2`.                                                                                                                                                                                                                 |
+| `--interval-seconds N`            | all                                         | 1 to 60. Default `10`.                                                                                                                                                                                                               |
+| `--max-run-minutes N`             | all                                         | 1 to 60. Default `25`.                                                                                                                                                                                                               |
+| `--max-runs-per-hour N`           | all                                         | 1 to 60. Default `20`.                                                                                                                                                                                                               |
+
+Claude flags are rejected unless the template uses Claude. Flags for a harness the template does not use are rejected too.
+
+### Default runs and files
+
+A run without `--out` or `--install` writes no configuration. Like every project command, the first run also creates the board store `.crewplane-state/` if it is missing. It does not create the control directory.
+
+`--out` writes a new file atomically: the content goes to a 0600 temporary file in the same directory, is fsynced, and is then linked to the final name, which cannot replace anything that exists. The temporary file is removed on every failure and on SIGINT, SIGTERM or process exit before the file is published; a SIGKILL or power loss in that window can still leave the hidden `.NAME.<hex>.tmp` file (0600, safe to delete). Every refusal is checked before anything is written, with exit 1:
+
+- the path names a directory, or an existing file or symlink (no overwrite);
+- the parent directory does not exist or is not a directory;
+- the path is inside the private control directory, the Crewplane store (`.crewplane-state`, including a `CREWPLANE_COORD_DIR` store) or `.crewplane-local`, or inside a `.git` directory;
+- the path is inside a git work tree and is not git-ignored (`git check-ignore`; a nested repository's own rules decide). Only git's genuine "not a git repository" answer, with no `.git` entry (directory or file) in the target's directory or any ancestor, counts as outside a repository. Any other git failure refuses the path: a repository owned by another user (dubious ownership), a `.git` file pointing to a missing gitdir, an unreadable `.git`, a bare repository, a `.git` above a filesystem boundary, a missing `git`, or a 10 second timeout. Git runs with `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, a C locale and no inherited `GIT_*` variables, so repository configuration cannot run code. Inside a work tree, add the file to `.gitignore` (or `.git/info/exclude`) first.
+
+The file can be given to `configure --file` once you add `confirmedStoppedAt`, or once you rerun with `--confirm-stopped true`. The report's `next` hint shell-quotes the path.
+
+`--install true` runs the same install path as `configure`, plus one extra refusal: under the install lock it also refuses when supervisor liveness evidence says one is live, not only when the state records `running`. With `--install` and `--out`, the file is prepared first but published only after the install succeeds, so a refused install leaves no file. If the install succeeded and publishing the file then fails (for example the name appeared meanwhile), the command exits 1 saying the configuration was installed but `--out` was not written; no file is created.
+
+### Rerunning with a different harness
+
+The supervisor refuses to start a lane whose harness differs from its latest recorded run unless the lane carries a fresh explicit `sessionEpoch`. `sessionEpoch` is accepted for every harness, so setup reads the installed `config.json` and `state.json` (read-only). The supervisor compares a lane only with its latest state record, so setup does too: when the lane has a record, an unchanged harness reuses that record's `sessionEpoch` (or none, if the record has none) and a changed harness gets a fresh one; the installed configuration is consulted only for a lane with no record at all. This keeps a codex, then claude (never served), then codex sequence from inventing an epoch the crashed codex record lacks. Pi lanes are planned the same way as every other lane (a rerun of an unchanged Pi lane keeps its recorded epoch instead of minting a new one). When an unchanged lane's installed configuration carries a `sessionEpoch` that its latest record lacks or differs from, that epoch is discarded and a note names the lane and says `serve` will resume the recorded session. Each switch is reported as a note naming the lane, printed once on stderr (in the wizard, before the review prompt), and another note appears when the lane's latest record is not idle. The supervisor still only accepts the switch when the lane is drained and idle, and it keeps the prior records; stop and drain first. An unreadable `config.json` or `state.json` fails setup closed.
+
+### Binary safety checks
+
+Beyond being an absolute executable regular file, a binary that setup records must not be replaceable by other users:
+
+The path is resolved the way the kernel does, one component at a time from `/`, and each step is inspected with `lstat` without being executed. That covers every directory entered (as named, through each symlink, and the ancestors of those) and every symlink followed, including links in the middle of the path and relative `..` in link targets (hop limit 40; a loop is refused). Anything under `/proc` is refused, because its magic links read back as text that is not their real target. The path as named is what gets recorded, and only when this whole walk passes.
+
+Checked (POSIX; ownership and group checks are skipped where there is no uid):
+
+- Every symlink on the path and the final file is refused when owned by a user other than the current user or root, even inside a directory you own or a sticky directory.
+- The final file is refused when group- or world-writable.
+- Every directory (the one holding the binary, each directory or link holding a symlink, and every ancestor up to `/`) is refused when world-writable without the sticky bit, or owned by a user other than the current user or root, or group-writable by a group the current user is not in. Group membership is the user's primary group plus supplementary groups, so a `user:admin 775` Homebrew directory is accepted for a member of `admin` and refused otherwise, and a `root:staff 2775` `/usr/local/bin` is accepted for a member of `staff` and refused otherwise. A world-writable directory with the sticky bit (`/tmp`) is accepted when owned by the current user or root, and the group rule is not applied to it.
+
+Trust boundary: other members of your own groups are inside it. The guarantee is only that users outside your own groups cannot replace the binary or any directory or link on its path.
+
+Not checked: ACLs, extended attributes, mounts (a read-write bind or network mount), capabilities, or anything that changes after the check (check-to-use races): the file may still be replaced between setup and launch.
+
+PATH candidates that fail are skipped and listed as `rejected /full/path/to/binary: reason` (in the wizard's listing and in the notes on stderr), and the next PATH entry is tried; if none passes, the error lists the rejected ones. An explicit `--binary` style flag or wizard answer that fails is refused. This check is part of setup only: `doctor` does not apply it, so it still accepts a binary setup would refuse, and it is not a sandbox (a same-user attacker is out of scope). The final verification also repeats it.
+
+### Stopped confirmation
+
+`confirmedStoppedAt` is an operator assertion. Setup does not prove that old harnesses or supervisors have stopped.
+
+- In the wizard, answer `yes` only after everything is stopped. The time is then recorded.
+- In non-interactive mode, `--confirm-stopped true` records the time the command runs. Use it only after stopping.
+- Without it, the field is omitted, a note explains what to do, and `configure` rejects the file until the field is added.
+- `--install true` cannot run without it.
+- Setup refuses to record it, with exit 1 and nothing written, while the control state says a supervisor is running or supervisor liveness evidence (the check `pin` uses) says one is live. This applies to `--confirm-stopped true` and to a wizard `yes`. It cannot prove that unrelated harnesses are stopped.
+
+### Report and exit codes
+
+Stdout is one JSON report on success. Notes and problems go to stderr as `crewplane: note: ...` and `crewplane: CODE (lane): message`.
+
+The report has these fields:
+
+- `version`: always `1`.
+- `mode`: `interactive` or `non-interactive`.
+- `template`: the template, or `custom` in the wizard.
+- `config`: the runtime JSON `configure --file` accepts. It has no `root` or roles, which come from the project.
+- `confirmedStopped`: whether `config` contains `confirmedStoppedAt`.
+- `written`: the absolute `--out` path, or `null`.
+- `installed`: whether the configuration was installed.
+- `problems`: verification findings as `{code, lane?, message}`. Empty when valid.
+- `notes`: advice, such as disabled reviewers or the Pi no-tools reminder. Harness-switch epoch notes appear here in non-interactive runs; the wizard prints them once before the review prompt and does not repeat them.
+- `next`: the suggested next commands.
+
+Exit codes:
+
+- `0`: the report was printed and verification found no problems. This includes a plain preview.
+- `1`: nothing on stdout. Causes include invalid or conflicting flags or answers, a missing `--tasks`, no usable or an unsafe executable, no terminal, headless refusal, a cancelled wizard, a refused `--out` path, a refused stop confirmation, a refused install and a failed install.
+- `2`: the report was printed with `problems`, and nothing was written or installed. Verification repeats the binary and instruction-file checks on the final configuration, so it only happens when something changed after an answer was accepted: typically a wizard session where the binary was replaced, removed or made writable while the review prompt waited (a removed binary is reported as `BINARY_MISSING`).
+
+### Pi reviewers
+
+Pi appears only as a reviewer, never as coordinator or implementer. Pi lanes are no-tools: `piPermissions` is `no-tools`, a Pi lane gets a fresh `sessionEpoch` on the first setup run and whenever its harness switches, and keeps its recorded epoch on a rerun (see above), and each turn ends as a paused advisory decision for operator relay. Pi is also available in the wizard's `custom` template, with the same reviewer-only limit.
+
+### Headless agents
+
+A supervised child (`CREWPLANE_HEADLESS_LANE` set) cannot run `setup`. Both modes fail with exit 1 before anything is read, including `--install true`.
+
+### Examples
+
+Wizard, with a report on the terminal:
+
+```sh
+crewplane --project /path/to/repo setup
+```
+
+Preview a mixed configuration. Nothing is written:
+
+```sh
+crewplane --project /path/to/repo setup --non-interactive true --template mixed \
+  --model opus --reviewer-model opencode-go/claude-haiku-5-5 \
+  --claude-binary /usr/local/bin/claude --opencode-binary /usr/local/bin/opencode \
+  --tasks CP-101,CP-102 > preview.json
+```
+
+Install a Claude configuration after stopping everything. This is the only form that changes the control directory:
+
+```sh
+crewplane --project /path/to/repo setup --non-interactive true --template claude \
+  --model opus --claude-binary /usr/local/bin/claude --tasks CP-101 \
+  --confirm-stopped true --install true
+crewplane --project /path/to/repo doctor
+```
+
 ## Configure explicit execution
+
+`crewplane setup` can generate this file; see [Guided setup](#guided-setup). The hand-written shape below is still accepted by `configure --file`.
 
 Create a private JSON file with this shape; replace the executable and stopped-confirmation timestamp with values you have actually verified:
 
