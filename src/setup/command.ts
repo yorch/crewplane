@@ -2,8 +2,13 @@ import { randomBytes } from "node:crypto";
 import { lstat, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import type { SafetyCheck } from "../binary-safety.ts";
 import type { Config } from "../contracts.ts";
-import { type DoctorProblem, effectiveBinary, probeBinary } from "../doctor.ts";
+import {
+  type DoctorProblem,
+  effectiveBinary,
+  inspectBinary,
+} from "../doctor.ts";
 import { type Harness, instructionFileProblem } from "../engine/harness.ts";
 import { type ProjectPolicy, validId, validTaskId } from "../project.ts";
 import {
@@ -20,7 +25,6 @@ import {
 import { noPrior, type Prior, planEpochs } from "./epochs.ts";
 import { decodeConfig } from "./install.ts";
 import { checkOut, prepareOut } from "./out.ts";
-import type { SafetyCheck } from "./safety.ts";
 import {
   acceptModel,
   acceptPiModel,
@@ -179,8 +183,8 @@ export async function discoverTasks(
 /**
  * Doctor-equivalent verification of a generated configuration using the same
  * primitives doctor uses (validateConfig without the binary check, then
- * probeBinary per lane and the instruction-file check), plus setup's own
- * binary safety probe. Nothing is executed.
+ * inspectBinary per lane, which includes the binary safety check, and the
+ * instruction-file check). Nothing is executed.
  */
 export async function checkGenerated(
   config: Config,
@@ -190,17 +194,17 @@ export async function checkGenerated(
   const reported = new Set<string>();
   for (const [id, lane] of Object.entries(config.lanes)) {
     const harness = lane.harness ?? "codex";
-    const { probe, code } = await probeBinary(
+    const { probe, code } = await inspectBinary(
       effectiveBinary(config, harness),
       harness,
+      safety,
     );
-    // The unsafe-binary probe is setup policy; doctor never applies it.
-    const unsafe = !code && probe.path ? await safety(probe.path) : null;
-    if ((code || unsafe) && !(probe.path && reported.has(probe.path))) {
+    if (code && !(probe.path && reported.has(probe.path))) {
       problems.push({
-        code: code ?? "BINARY_INVALID",
+        // Setup reports an unsafe binary as invalid, as it always has.
+        code: code === "BINARY_UNSAFE" ? "BINARY_INVALID" : code,
         lane: id,
-        message: probe.problem ?? `${harness} binary refused: ${unsafe}`,
+        message: probe.problem ?? "binary unusable",
       });
       if (probe.path) reported.add(probe.path);
     }

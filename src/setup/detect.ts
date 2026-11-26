@@ -1,8 +1,12 @@
 import { delimiter, isAbsolute, join, normalize } from "node:path";
+import {
+  binarySafetyProblem,
+  noSafety,
+  type SafetyCheck,
+} from "../binary-safety.ts";
 import { probeBinary } from "../doctor.ts";
 import { harnesses as allHarnesses, type Harness } from "../engine/harness.ts";
 import { printablePath } from "../project.ts";
-import { binarySafetyProblem, noSafety, type SafetyCheck } from "./safety.ts";
 
 /**
  * Reports whether `path` is an absolute regular file the current user may

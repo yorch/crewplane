@@ -1,13 +1,11 @@
-import type { Stats } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { printablePath } from "../project.ts";
+import { printablePath } from "./project.ts";
 
 /**
  * Reports why an executable must not be recorded in a generated configuration,
- * or null when it looks safe. Nothing is executed. This is setup-only policy:
- * `doctor` (probeBinary) deliberately does not apply it, so a configuration
- * written by hand keeps its documented behaviour.
+ * or null when it looks safe. Nothing is executed. Shared by `setup` (which
+ * only records safe binaries) and `doctor` (which reports `BINARY_UNSAFE`).
  *
  * The path is resolved the way the kernel does, one component at a time from
  * `/`: every directory entered (as named, through symlinks, and the ancestors
@@ -28,6 +26,42 @@ import { printablePath } from "../project.ts";
  */
 export type SafetyCheck = (path: string) => Promise<string | null>;
 
+/** What the walk needs to know about one path component (an lstat result). */
+export interface Entry {
+  kind: "file" | "directory" | "symlink" | "other";
+  uid: number;
+  gid: number;
+  mode: number;
+}
+
+/**
+ * The file system primitives the walk uses. The default is the real one;
+ * tests inject synthetic entries so ownership cases need no chown or root.
+ */
+export interface SafetyFs {
+  lstat(path: string): Promise<Entry>;
+  readlink(path: string): Promise<string>;
+}
+
+export const realFs: SafetyFs = {
+  async lstat(path) {
+    const info = await lstat(path);
+    return {
+      kind: info.isSymbolicLink()
+        ? "symlink"
+        : info.isDirectory()
+          ? "directory"
+          : info.isFile()
+            ? "file"
+            : "other",
+      uid: info.uid,
+      gid: info.gid,
+      mode: info.mode,
+    };
+  },
+  readlink: (path) => readlink(path),
+};
+
 /** The identity the probe judges ownership and group membership against. */
 export interface Identity {
   uid: number | null;
@@ -47,14 +81,14 @@ export function currentIdentity(): Identity {
 
 const maxHops = 40;
 
-const trusted = (info: Stats, who: Identity) =>
+const trusted = (info: Entry, who: Identity) =>
   who.uid === null || info.uid === who.uid || info.uid === 0;
-const worldOpen = (info: Stats) => (info.mode & 0o002) !== 0;
-const sticky = (info: Stats) => (info.mode & 0o1000) !== 0;
+const worldOpen = (info: Entry) => (info.mode & 0o002) !== 0;
+const sticky = (info: Entry) => (info.mode & 0o1000) !== 0;
 
 function directoryProblem(
   directory: string,
-  info: Stats,
+  info: Entry,
   who: Identity,
 ): string | null {
   const name = printablePath(directory);
@@ -80,19 +114,20 @@ function directoryProblem(
 export const binarySafetyProblem = async (
   path: string,
   who: Identity = currentIdentity(),
+  fs: SafetyFs = realFs,
 ): Promise<string | null> => {
   const queue = resolve(path).split("/").filter(Boolean);
   let current = "/";
   const checked = new Set<string>();
   const enter = async (directory: string): Promise<string | null> => {
     if (checked.has(directory)) return null;
-    let info: Stats;
+    let info: Entry;
     try {
-      info = await lstat(directory);
+      info = await fs.lstat(directory);
     } catch {
       return "its directory cannot be inspected";
     }
-    if (!info.isDirectory()) return "its directory cannot be inspected";
+    if (info.kind !== "directory") return "its directory cannot be inspected";
     const problem = directoryProblem(directory, info, who);
     if (problem === null) checked.add(directory);
     return problem;
@@ -111,18 +146,18 @@ export const binarySafetyProblem = async (
     // /proc magic links read back as text that is not their real target.
     if (full === "/proc" || full.startsWith("/proc/"))
       return "it is under /proc, whose links do not name their real target";
-    let info: Stats;
+    let info: Entry;
     try {
-      info = await lstat(full);
+      info = await fs.lstat(full);
     } catch {
       return "it cannot be inspected";
     }
-    if (info.isSymbolicLink()) {
+    if (info.kind === "symlink") {
       if (!trusted(info, who)) return "it is owned by another user";
       if (++hops > maxHops) return "its symlink chain is too long or loops";
       let target: string;
       try {
-        target = await readlink(full);
+        target = await fs.readlink(full);
       } catch {
         return "it cannot be inspected";
       }
@@ -131,7 +166,7 @@ export const binarySafetyProblem = async (
       continue;
     }
     if (queue.length === 0) {
-      if (!info.isFile()) return "it is not a regular file";
+      if (info.kind !== "file") return "it is not a regular file";
       if (!trusted(info, who)) return "it is owned by another user";
       if ((info.mode & 0o022) !== 0) return "it is group- or world-writable";
       return null;

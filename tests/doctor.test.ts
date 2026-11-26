@@ -376,6 +376,101 @@ describe("crewplane doctor", () => {
     ]);
   });
 
+  it("reports BINARY_UNSAFE per lane for a binary others could replace, never running it", () => {
+    const p = project();
+    const marker = join(p.outer, "ran");
+    const good = p.fake("good");
+    const open = join(p.outer, "open");
+    mkdirSync(open);
+    const risky = join(open, "risky");
+    writeFileSync(risky, `#!/bin/sh\ntouch ${marker}\n`);
+    chmodSync(risky, 0o755);
+    // World-writable without the sticky bit: any user could swap the file.
+    chmodSync(open, 0o777);
+    p.configure(
+      p.config(good, { builder: { enabled: true }, safe: { enabled: true } }),
+    );
+    const path = p.storedConfig();
+    const stored = JSON.parse(readFileSync(path, "utf8"));
+    stored.lanes.safe.harness = "claude";
+    stored.lanes.safe.model = "sonnet";
+    stored.lanes.safe.claudePermissionMode = "plan";
+    stored.lanes.safe.claudeMcp = "strict";
+    stored.lanes.safe.claudeSettingSources = ["project"];
+    stored.binaries = { codex: risky, claude: good };
+    writeFileSync(path, JSON.stringify(stored));
+    for (const { status, report } of [
+      p.doctor(),
+      (() => {
+        const result = p.runSource();
+        return {
+          status: result.status,
+          report: JSON.parse(result.stdout) as Report,
+        };
+      })(),
+    ]) {
+      expect(status).toBe(2);
+      expect(report.ok).toBe(false);
+      expect(report.config).toBe("valid");
+      const unsafe = report.problems.filter(
+        (item) => item.code === "BINARY_UNSAFE",
+      );
+      expect(unsafe).toEqual([
+        {
+          code: "BINARY_UNSAFE",
+          lane: "builder",
+          message: expect.stringMatching(
+            /^codex binary refused: a directory on its path .* is world-writable without the sticky bit$/,
+          ),
+        },
+      ]);
+      expect(report.problems.map((item) => item.code)).toEqual([
+        "BINARY_UNSAFE",
+      ]);
+      const lanes = Object.fromEntries(report.harnesses.map((h) => [h.id, h]));
+      expect(lanes.builder?.binary).toMatchObject({ path: risky, ok: false });
+      expect(lanes.safe?.binary).toEqual({ path: good, ok: true });
+      // The top-level binary is safe and is probed on its own.
+      expect(report.defaultBinary).toEqual({ path: good, ok: true });
+    }
+    expect(() => readFileSync(marker)).toThrow();
+  });
+
+  it("reports an unsafe top-level binary without a lane, once", () => {
+    const p = project();
+    const good = p.fake("good");
+    p.configure(p.config(good, { builder: { enabled: true } }));
+    chmodSync(good, 0o775);
+    const { status, report } = p.doctor();
+    expect(status).toBe(2);
+    expect(report.problems).toEqual([
+      {
+        code: "BINARY_UNSAFE",
+        lane: "builder",
+        message: "codex binary refused: it is group- or world-writable",
+      },
+    ]);
+    // The default binary names the same path, so it is not repeated.
+    expect(report.defaultBinary).toMatchObject({ path: good, ok: false });
+    const solo = project();
+    const bin = solo.fake("good");
+    solo.configure(solo.config(bin, { builder: { enabled: true } }));
+    const stored = JSON.parse(readFileSync(solo.storedConfig(), "utf8"));
+    const other = solo.fake("other");
+    chmodSync(other, 0o757);
+    stored.lanes = {};
+    stored.binary = other;
+    writeFileSync(solo.storedConfig(), JSON.stringify(stored));
+    const alone = solo.doctor();
+    expect(alone.status).toBe(2);
+    expect(alone.report.problems).toEqual([
+      {
+        code: "BINARY_UNSAFE",
+        message: "default binary refused: it is group- or world-writable",
+      },
+    ]);
+  });
+
   it("reports runtime bun when run from source", () => {
     const p = project();
     const good = p.fake("good");

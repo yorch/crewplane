@@ -1,3 +1,4 @@
+import type { SafetyCheck } from "../binary-safety.ts";
 import { claudePermissionModes, type Harness } from "../engine/harness.ts";
 import { printablePath } from "../project.ts";
 import {
@@ -8,7 +9,6 @@ import {
   type Rejection,
 } from "./detect.ts";
 import { noPrior, type Prior, planEpochs } from "./epochs.ts";
-import type { SafetyCheck } from "./safety.ts";
 import {
   acceptModel,
   acceptPiModel,
