@@ -17,10 +17,10 @@ import { checkWatchdog } from "./service.ts";
 it("projects private health without raw notices, tolerates missing config and checks notice-only", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-health-input-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
+    await mkdir(store, { mode: 0o700, recursive: true });
     const now = Date.now();
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: process.pid,
         running: true,
@@ -39,7 +39,7 @@ it("projects private health without raw notices, tolerates missing config and ch
       { mode: 0o600 },
     );
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: false }),
       { mode: 0o600 },
     );
@@ -67,7 +67,7 @@ it("projects private health without raw notices, tolerates missing config and ch
       await readFile(join(store, "watchdog/latest.json"), "utf8"),
     );
     expect(persisted.nextCheck - persisted.checkedAt).toBe(180000);
-    await writeFile(join(store, "supervisor/state.json"), "{PRIVATE_SENTINEL", {
+    await writeFile(join(store, "state.json"), "{PRIVATE_SENTINEL", {
       mode: 0o600,
     });
     const missing = await readHealth(store, now);
@@ -81,7 +81,7 @@ it("projects private health without raw notices, tolerates missing config and ch
 it("keeps partially shaped private snapshots unknown-safe", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-invalid-health-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
+    await mkdir(store, { mode: 0o700, recursive: true });
     for (const decoded of [
       null,
       [],
@@ -95,11 +95,9 @@ it("keeps partially shaped private snapshots unknown-safe", async () => {
         records: { p: { lane: "INVALID", status: "running", pid: -1 } },
       },
     ]) {
-      await writeFile(
-        join(store, "supervisor/state.json"),
-        JSON.stringify(decoded),
-        { mode: 0o600 },
-      );
+      await writeFile(join(store, "state.json"), JSON.stringify(decoded), {
+        mode: 0o600,
+      });
       const result = await readHealth(store);
       expect(result.supervisor.alive).toBe("unknown");
       expect(result.config.loaded).toBeNull();
@@ -121,7 +119,7 @@ it("keeps partially shaped private snapshots unknown-safe", async () => {
 it("observes new running sessions beyond historical prefixes and ignores superseded lane pauses", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-health-history-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
+    await mkdir(store, { mode: 0o700, recursive: true });
     const now = 900000;
     const records: Record<string, unknown> = Object.fromEntries(
       Array.from({ length: 130 }, (_, index) => [
@@ -156,7 +154,7 @@ it("observes new running sessions beyond historical prefixes and ignores superse
       startedAt: new Date(2000).toISOString(),
     };
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: 500,
         running: true,
@@ -178,8 +176,8 @@ it("observes new running sessions beyond historical prefixes and ignores superse
 it("projects real queue, planning, steering and operation ages while preserving budget waits and intentional stop", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-watchdog-orchestration-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
-    await mkdir(join(store, "supervisor/commands"), {
+    await mkdir(store, { mode: 0o700, recursive: true });
+    await mkdir(join(store, "commands"), {
       mode: 0o700,
       recursive: true,
     });
@@ -231,11 +229,11 @@ it("projects real queue, planning, steering and operation ages while preserving 
       },
     };
     const saveState = () =>
-      writeFile(join(store, "supervisor/state.json"), JSON.stringify(state), {
+      writeFile(join(store, "state.json"), JSON.stringify(state), {
         mode: 0o600,
       });
     await saveState();
-    const desired = join(store, "supervisor/desired.json");
+    const desired = join(store, "desired.json");
     await writeFile(desired, JSON.stringify({ desiredRunning: true }), {
       mode: 0o600,
     });
@@ -243,7 +241,7 @@ it("projects real queue, planning, steering and operation ages while preserving 
       ["00000000-0000-4000-8000-000000000001", "queued"],
     ])
       await writeFile(
-        join(store, "supervisor/commands", `${id}.json`),
+        join(store, "commands", `${id}.json`),
         JSON.stringify({
           version: 1,
           id,
@@ -322,9 +320,9 @@ it("projects real queue, planning, steering and operation ages while preserving 
 it("keeps malformed or unsafe health sources unavailable instead of inventing queue authority", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-watchdog-unknown-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
+    await mkdir(store, { mode: 0o700, recursive: true });
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         scheduling: { maxParallel: "4" },
         records: {},
@@ -352,7 +350,7 @@ it("keeps malformed or unsafe health sources unavailable instead of inventing qu
     );
     const foreign = join(store, "foreign");
     await mkdir(foreign, { mode: 0o700, recursive: true });
-    await symlink(foreign, join(store, "supervisor/commands"));
+    await symlink(foreign, join(store, "commands"));
     const input = await readHealth(store, 900000, () => "unknown");
     expect(input.queue).toEqual([]);
     expect(input.availableCapacity).toBeNull();
@@ -360,8 +358,8 @@ it("keeps malformed or unsafe health sources unavailable instead of inventing qu
     expect(input.pendingOperations).toBeUndefined();
     expect(input.availableSignals).toEqual([]);
     expect(JSON.stringify(input)).not.toContain("PRIVATE_SENTINEL");
-    await rm(join(store, "supervisor/commands"));
-    await mkdir(join(store, "supervisor/commands"), {
+    await rm(join(store, "commands"));
+    await mkdir(join(store, "commands"), {
       mode: 0o700,
       recursive: true,
     });
@@ -379,7 +377,7 @@ it("keeps malformed or unsafe health sources unavailable instead of inventing qu
       }),
       { mode: 0o600 },
     );
-    await symlink(target, join(store, "supervisor/commands", `${id}.json`));
+    await symlink(target, join(store, "commands", `${id}.json`));
     const symlinked = await readHealth(store, 900000, () => "unknown");
     expect(symlinked.pendingOperations).toBeUndefined();
     expect(symlinked.availableSignals).not.toContain("operations");
@@ -392,14 +390,14 @@ it("keeps malformed or unsafe health sources unavailable instead of inventing qu
 it("does not silently project a completed-operation prefix when bounded operation coverage overflows", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-watchdog-operation-cap-"));
   try {
-    await mkdir(join(store, "supervisor/commands"), {
+    await mkdir(join(store, "commands"), {
       mode: 0o700,
       recursive: true,
     });
     for (let index = 0; index < 65; index++) {
       const id = `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`;
       await writeFile(
-        join(store, "supervisor/commands", `${id}.json`),
+        join(store, "commands", `${id}.json`),
         JSON.stringify({
           version: 1,
           id,
@@ -419,6 +417,7 @@ it("does not silently project a completed-operation prefix when bounded operatio
 });
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { controlDirectory } from "../../control.ts";
 
 it("resolves CLI health from the shared Git common directory or explicit absolute override", async () => {
   const root = await mkdtemp(join(tmpdir(), "relay-watchdog-cli-store-"));
@@ -460,12 +459,14 @@ it("resolves CLI health from the shared Git common directory or explicit absolut
       linked,
       "HEAD",
     );
-    const expectedStore = join(primary, ".crewplane-state");
-    const override = join(root, "explicit-store");
+    const sharedBase = join(root, "state-a");
+    const overrideBase = join(root, "state-b");
+    const controlIn = (base: string, project: string) =>
+      controlDirectory(project, { CREWPLANE_STATE_DIR: base });
     for (const [directory, source] of [
-      [expectedStore, "git-common"],
-      [override, "explicit-override"],
-      [join(linked, ".crewplane-state"), "wrong-worktree-local"],
+      [controlIn(sharedBase, primary), "git-common"],
+      [controlIn(overrideBase, primary), "explicit-override"],
+      [controlIn(sharedBase, linked), "wrong-worktree-local"],
     ] as const) {
       await mkdir(join(directory, "watchdog"), {
         recursive: true,
@@ -484,17 +485,27 @@ it("resolves CLI health from the shared Git common directory or explicit absolut
         env,
         encoding: "utf8",
       });
-    const shared = run(environment);
+    const shared = run({ ...environment, CREWPLANE_STATE_DIR: sharedBase });
     expect(shared.status).toBe(0);
     expect(JSON.parse(shared.stdout)).toEqual({ source: "git-common" });
-    const explicit = run({ ...environment, CREWPLANE_COORD_DIR: override });
+    const explicit = run({
+      ...environment,
+      CREWPLANE_STATE_DIR: overrideBase,
+    });
     expect(explicit.status).toBe(0);
     expect(JSON.parse(explicit.stdout)).toEqual({
       source: "explicit-override",
     });
+    // The board location override never redirects control state.
+    const board = run({
+      ...environment,
+      CREWPLANE_STATE_DIR: sharedBase,
+      CREWPLANE_COORD_DIR: join(root, "attacker-store"),
+    });
+    expect(JSON.parse(board.stdout)).toEqual({ source: "git-common" });
     const invalid = run({
       ...environment,
-      CREWPLANE_COORD_DIR: "relative-store",
+      CREWPLANE_STATE_DIR: "relative-state",
     });
     expect(invalid.status).toBe(1);
     expect(invalid.stdout).toBe("");
@@ -508,9 +519,9 @@ it("delivers only safe fault metadata and a bounded nudge, respects intentional 
   const { readdir } = await import("node:fs/promises");
   const store = await mkdtemp(join(tmpdir(), "relay-watchdog-delivery-"));
   try {
-    await mkdir(join(store, "supervisor"), { mode: 0o700, recursive: true });
+    await mkdir(store, { mode: 0o700, recursive: true });
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: false }),
       { mode: 0o600 },
     );
@@ -521,31 +532,28 @@ it("delivers only safe fault metadata and a bounded nudge, respects intentional 
     expect(
       await readFile(join(store, "watchdog/notice.json"), "utf8"),
     ).not.toContain("PRIVATE_SENTINEL");
-    await expect(readdir(join(store, "supervisor/commands"))).rejects.toThrow();
+    await expect(readdir(join(store, "commands"))).rejects.toThrow();
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: true }),
       { mode: 0o600 },
     );
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({ running: true, generation: "test-generation" }),
       { mode: 0o600 },
     );
     await deliverNotice(store, { key: "ignored", codes: ["eligible-stalled"] });
-    const files = await readdir(join(store, "supervisor/commands"));
+    const files = await readdir(join(store, "commands"));
     expect(files).toHaveLength(1);
     const command = JSON.parse(
-      await readFile(
-        join(store, "supervisor/commands", String(files[0])),
-        "utf8",
-      ),
+      await readFile(join(store, "commands", String(files[0])), "utf8"),
     );
     expect(command).toMatchObject({ action: "nudge", lane: "coordinator" });
     expect(command.text).not.toMatch(/PRIVATE|retry --|resume --/);
-    await rm(join(store, "supervisor/commands"), { recursive: true });
+    await rm(join(store, "commands"), { recursive: true });
     await mkdir(join(store, "outside"));
-    await symlink(join(store, "outside"), join(store, "supervisor/commands"));
+    await symlink(join(store, "outside"), join(store, "commands"));
     await expect(
       deliverNotice(store, { key: "ignored", codes: ["eligible-stalled"] }),
     ).rejects.toThrow("Unsafe");
@@ -558,9 +566,8 @@ it("delivers only safe fault metadata and a bounded nudge, respects intentional 
 it("detects quiescent ready handoffs awaiting coordinator disposition without inventing a task assignment", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-disposition-health-"));
   try {
-    await mkdir(join(store, "supervisor"));
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: process.pid,
         running: true,
@@ -578,7 +585,7 @@ it("detects quiescent ready handoffs awaiting coordinator disposition without in
       { mode: 0o600 },
     );
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: true }),
       { mode: 0o600 },
     );
@@ -597,15 +604,12 @@ it("detects quiescent ready handoffs awaiting coordinator disposition without in
 it("projects schedule overflow as configuration blocked while retaining real command and partial coverage", async () => {
   const store = await mkdtemp(join(tmpdir(), "watchdog-schedule-overflow-"));
   try {
-    await mkdir(join(store, "supervisor/commands"), {
+    await mkdir(join(store, "commands"), {
       recursive: true,
       mode: 0o700,
     });
     await writeFile(
-      join(
-        store,
-        "supervisor/commands/00000000-0000-4000-8000-000000000001.json",
-      ),
+      join(store, "commands/00000000-0000-4000-8000-000000000001.json"),
       JSON.stringify({ action: "stop", at: new Date(0).toISOString() }),
       { mode: 0o600 },
     );
@@ -619,7 +623,7 @@ it("projects schedule overflow as configuration blocked while retaining real com
     };
     const save = (rows: unknown[]) =>
       writeFile(
-        join(store, "supervisor/state.json"),
+        join(store, "state.json"),
         JSON.stringify({ queue: { version: 1, queue: rows } }),
         { mode: 0o600 },
       );
@@ -669,15 +673,15 @@ it("projects schedule overflow as configuration blocked while retaining real com
 it("reports paused retained process groups and identity-free unverified cleanup as orphan risks", async () => {
   const store = await mkdtemp(join(tmpdir(), "watchdog-retained-child-"));
   try {
-    await mkdir(join(store, "supervisor"), { recursive: true, mode: 0o700 });
+    await mkdir(store, { recursive: true, mode: 0o700 });
     const now = 900000;
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: true }),
       { mode: 0o600 },
     );
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: 500,
         checkedAt: new Date(now).toISOString(),
@@ -732,10 +736,10 @@ it("reports paused retained process groups and identity-free unverified cleanup 
 it("orders unverified children before plain retained ones and signals truncation past 64", async () => {
   const store = await mkdtemp(join(tmpdir(), "watchdog-children-cap-"));
   try {
-    await mkdir(join(store, "supervisor"), { recursive: true, mode: 0o700 });
+    await mkdir(store, { recursive: true, mode: 0o700 });
     const now = 900000;
     await writeFile(
-      join(store, "supervisor/desired.json"),
+      join(store, "desired.json"),
       JSON.stringify({ desiredRunning: true }),
       { mode: 0o600 },
     );
@@ -753,7 +757,7 @@ it("orders unverified children before plain retained ones and signals truncation
       cleanupUnverified: true,
     };
     await writeFile(
-      join(store, "supervisor/state.json"),
+      join(store, "state.json"),
       JSON.stringify({
         pid: 500,
         checkedAt: new Date(now).toISOString(),

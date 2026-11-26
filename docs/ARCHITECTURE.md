@@ -20,7 +20,7 @@ Runtime, Git workspaces, persistence, harness adapters and HTTP/dashboard implem
 
 Harness adapters expose capability discovery, invocation, stream normalization, resume identity, termination and result validation. Report configured and observed models separately. Missing usage/cache dimensions are unknown, not zero; provider counters are not certified billing.
 
-Private project state, worktrees and artifacts live outside embedded assets. Embedded files are immutable distribution assets. Separate executable location, selected repository root, invocation cwd and state root.
+The board (tasks, messages, evidence, traces) lives in the project store; the supervisor control plane (configuration, commands, state, leases, watchdog state) lives in a private per-user control directory outside the project so no root handed to a harness contains it (defense in depth, not a sandbox; see docs/USAGE.md "Control directory"). Private project state, worktrees and artifacts live outside embedded assets. Embedded files are immutable distribution assets. Separate executable location, selected repository root, invocation cwd and state root.
 
 ## Lifecycle invariants
 

@@ -91,10 +91,18 @@ const baseNames = new Set([
   "GIT_CONFIG_NOSYSTEM",
   "GIT_EDITOR",
   "GIT_TERMINAL_PROMPT",
-  // Crewplane location settings the board CLI needs inside the child.
+  // Crewplane location settings the board CLI needs inside the child. The
+  // board location (CREWPLANE_COORD_DIR) is set by the supervisor; the control
+  // directory is never passed. CREWPLANE_STATE_DIR is only the operator's base
+  // override, so `crewplane agents` can derive the same directory to READ run
+  // state. Under CREWPLANE_HEADLESS_LANE the CLI refuses configure, start,
+  // control verbs, migrate and pin, so a child only reads there. Read-only intent is
+  // enforced by a sandbox, not by Crewplane.
+  // The update cache (and its supervisor registry) is deliberately NOT forwarded:
+  // anything that can write it can forge a supervisor registration.
+  "CREWPLANE_STATE_DIR",
   "CREWPLANE_EXECUTABLE",
   "CREWPLANE_RELEASES_DIR",
-  "CREWPLANE_CACHE_DIR",
   "CREWPLANE_NO_AUTO_UPDATE",
   // Windows process basics.
   "SYSTEMROOT",

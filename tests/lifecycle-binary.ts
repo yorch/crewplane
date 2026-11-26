@@ -6,6 +6,7 @@ import {
   spawn,
   spawnSync,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -74,6 +75,8 @@ function setup(name: string, mode: string, interval = 1) {
     ...process.env,
     PATH: tools,
     HOME: join(parent, "home"),
+    // Control state is private and outside the project; keep it hermetic.
+    CREWPLANE_STATE_DIR: join(parent, "state"),
     CREWPLANE_COORD_DIR: "",
     CREWPLANE_NO_AUTO_UPDATE: "1",
     // Keep dispatch hermetic: never resolve this machine's retained releases.
@@ -141,14 +144,15 @@ function setup(name: string, mode: string, interval = 1) {
     }),
   );
   cli("configure", "--file", config);
+  // Independently authored expectation of the control directory location.
+  const control = join(
+    parent,
+    "state/crewplane/projects",
+    createHash("sha256").update(root).digest("hex").slice(0, 24),
+  );
   const state = () => {
     try {
-      return JSON.parse(
-        readFileSync(
-          join(root, ".crewplane-state/supervisor/state.json"),
-          "utf8",
-        ),
-      );
+      return JSON.parse(readFileSync(join(control, "state.json"), "utf8"));
     } catch {
       return null;
     }
@@ -192,6 +196,7 @@ function setup(name: string, mode: string, interval = 1) {
   };
   return {
     root,
+    control,
     cli,
     state,
     records,
@@ -219,9 +224,7 @@ try {
     "idle SIGTERM must wake the 60-second wait",
   );
   assert.equal(idle.cli("status").desired.desiredRunning, false);
-  assert(
-    !existsSync(join(idle.root, ".crewplane-state/supervisor/watcher.lock")),
-  );
+  assert(!existsSync(join(idle.control, "watcher.lock")));
   // An in-flight drain retains the lease until native completion and trace settlement.
   const drain = setup("drain", "drain"),
     draining = drain.start();
@@ -229,18 +232,14 @@ try {
   drain.collect();
   draining.kill("SIGTERM");
   await until(() => drain.state()?.draining === true, "drain intent");
-  assert(
-    existsSync(join(drain.root, ".crewplane-state/supervisor/watcher.lock")),
-  );
+  assert(existsSync(join(drain.control, "watcher.lock")));
   await exit(draining);
   assert(
     drain
       .records()
       .every((r) => r.status !== "running" && !r.pid && !r.processGroupId),
   );
-  assert(
-    !existsSync(join(drain.root, ".crewplane-state/supervisor/watcher.lock")),
-  );
+  assert(!existsSync(join(drain.control, "watcher.lock")));
   const traceDirectory = join(
     drain.root,
     ".crewplane-state/operational-traces",

@@ -49,12 +49,21 @@ const env = {
   ...process.env,
   PATH: tools,
   HOME: join(temp, "home"),
+  // Control state is private and outside the project; keep it hermetic.
+  CREWPLANE_STATE_DIR: join(temp, "state"),
   CREWPLANE_COORD_DIR: "",
   CREWPLANE_EXECUTABLE: bin,
   CREWPLANE_NO_AUTO_UPDATE: "1",
   // Keep dispatch hermetic: never resolve this machine's retained releases.
   CREWPLANE_RELEASES_DIR: join(temp, "releases-hermetic"),
 };
+// Independently authored expectation of the control directory location.
+const controlOf = (project: string) =>
+  join(
+    temp,
+    "state/crewplane/projects",
+    createHash("sha256").update(project).digest("hex").slice(0, 24),
+  );
 const command = (...args: string[]) => {
   const result = spawnSync(bin, ["--project", root, ...args], {
     env,
@@ -493,7 +502,9 @@ try {
   command("watchdog", "once");
   assert.equal(JSON.parse(command("watchdog", "status")).recovery, "none");
   // Simulate a dead supervisor's persisted running-without-child state and lease.
-  const directory = join(root, ".crewplane-state/supervisor");
+  const directory = controlOf(root);
+  assert(!existsSync(join(root, ".crewplane-state/supervisor")));
+  assert.equal(statSync(directory).mode & 0o077, 0);
   const old = state();
   old.running = true;
   old.records.interrupted = {
@@ -980,6 +991,60 @@ try {
   } finally {
     writeFileSync(join(root, "crewplane.json"), previousPolicy);
   }
+
+  // Legacy in-store control state fails closed until explicitly migrated.
+  const legacyProject = join(temp, "legacy-project");
+  mkdirSync(legacyProject);
+  git("init", "-q", "--initial-branch=main", legacyProject);
+  const legacyRun = (...args: string[]) =>
+    spawnSync(bin, ["--project", legacyProject, ...args], {
+      env,
+      encoding: "utf8",
+      timeout: 15000,
+    });
+  assert.equal(legacyRun("init").status, 0);
+  const legacyDirectory = join(legacyProject, ".crewplane-state/supervisor");
+  mkdirSync(legacyDirectory, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    join(legacyDirectory, "state.json"),
+    JSON.stringify({
+      version: 2,
+      running: false,
+      checkedAt: "2000-01-01T00:00:00.000Z",
+      pid: 4207337,
+      draining: false,
+      held: [],
+      commands: [],
+      notices: {},
+      records: {},
+    }),
+  );
+  const refusedLegacy = legacyRun("resume", "--all", "true");
+  assert.equal(refusedLegacy.status, 1);
+  assert.equal(refusedLegacy.stdout, "");
+  assert.match(refusedLegacy.stderr, /run `crewplane migrate`/);
+  assert.equal(legacyRun("--version").status, 0);
+  const dry = JSON.parse(legacyRun("migrate", "--dry-run").stdout);
+  assert.equal(dry.status, "dry-run");
+  assert(existsSync(join(legacyDirectory, "state.json")));
+  assert.equal(legacyRun("migrate").status, 1); // a digest is required
+  assert.match(dry.digest, /^[a-f0-9]{64}$/);
+  writeFileSync(join(legacyDirectory, "planted-after-review.bin"), "OPAQUE");
+  const migrated = JSON.parse(
+    legacyRun("migrate", "--accept-config", dry.digest).stdout,
+  );
+  assert(
+    !existsSync(join(controlOf(legacyProject), "planted-after-review.bin")),
+  );
+  assert.equal(migrated.status, "migrated");
+  assert.equal(migrated.to, controlOf(legacyProject));
+  assert(!existsSync(legacyDirectory));
+  assert(existsSync(join(controlOf(legacyProject), "state.json")));
+  assert.equal(legacyRun("status").status, 0);
+  assert.equal(
+    JSON.parse(legacyRun("migrate").stdout).status,
+    "nothing-to-migrate",
+  );
 
   console.log(
     "Standalone acceptance passed: no Node/Bun on PATH; two worktrees, messages, pinned review, author correction/session reuse, linear integration, embedded assets/traces, intentional stop, crash recovery and checksum-verified self-update.",

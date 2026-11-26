@@ -1,5 +1,7 @@
-import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 if (process.argv[2] === "child") {
   if (process.argv[3] === "ignore-term") process.on("SIGTERM", () => {});
@@ -12,8 +14,30 @@ if (process.argv[2] === "child") {
   const mode = process.env.CREWPLANE_FIXTURE_MODE;
   if (!store || !pidFile || !mode)
     throw Error("Synthetic lifecycle context absent");
+  // The child is only given the board. Derive the control directory
+  // independently of the product code: the primary root is the parent of the
+  // Git common directory, and the key is the first 24 hex of its SHA-256.
+  const common = realpathSync(
+    execFileSync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { encoding: "utf8" },
+    ).trim(),
+  );
+  const key = createHash("sha256")
+    .update(dirname(common))
+    .digest("hex")
+    .slice(0, 24);
   const state = JSON.parse(
-    readFileSync(`${store}/supervisor/state.json`, "utf8"),
+    readFileSync(
+      join(
+        process.env.CREWPLANE_STATE_DIR ?? "",
+        "crewplane/projects",
+        key,
+        "state.json",
+      ),
+      "utf8",
+    ),
   ) as { records: Record<string, { pid?: number; status: string }> };
   if (
     !Object.values(state.records).some(

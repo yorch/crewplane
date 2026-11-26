@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { join } from "node:path";
+import { checkControlDirectory } from "../../control.ts";
 
 const faults = new Set([
   "supervisor-dead",
@@ -18,10 +19,11 @@ const faults = new Set([
   "review-stalled",
   "eligible-stalled",
 ]);
-export async function watchdogHealth(store: string, now = Date.now()) {
+export async function watchdogHealth(control: string, now = Date.now()) {
   try {
+    checkControlDirectory(control);
     const handle = await open(
-      join(store, "watchdog/latest.json"),
+      join(control, "watchdog/latest.json"),
       constants.O_RDONLY | constants.O_NOFOLLOW,
     );
     let value: unknown;

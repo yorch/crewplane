@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { controlDirectory } from "../src/control.ts";
 import { main } from "../src/engine/agents.mjs";
 import { evaluateOrchestration } from "../src/engine/orchestration.ts";
 import { parseTask, snapshot } from "../src/engine/read-model.ts";
@@ -225,13 +226,14 @@ it("tolerates wrongly shaped supervisor state and config files", async () => {
   delete process.env.CREWPLANE_COORD_DIR;
   try {
     execFileSync("git", ["init", "-q", "--initial-branch=main"], { cwd: root });
-    const { store } = (await main(["init"], root)) as { store: string };
-    mkdirSync(join(store, "supervisor"), { recursive: true });
+    await main(["init"], root);
+    const control = controlDirectory(root);
+    mkdirSync(control, { recursive: true, mode: 0o700 });
     writeFileSync(
-      join(store, "supervisor/state.json"),
+      join(control, "state.json"),
       JSON.stringify({ running: true, records: [], held: "x" }),
     );
-    writeFileSync(join(store, "supervisor/config.json"), "[]");
+    writeFileSync(join(control, "config.json"), "[]");
     const view = await snapshot(root);
     expect(view.headless.lanes).toEqual([]);
   } finally {

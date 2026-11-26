@@ -2,8 +2,13 @@ import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
+import {
+  bindControl,
+  controlDirectory,
+  ensureControlDirectory,
+} from "../control.ts";
 import { publishJson } from "../io.ts";
-import { validId, validTaskId } from "../project.ts";
+import { discoverProject, validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
 import { control } from "./control-policy.ts";
@@ -133,10 +138,20 @@ export function createDashboard(
           response.writeHead(400).end("Invalid control");
           return;
         }
-        const { store } = (await coordination(["init"], root)) as {
-          store: string;
-        };
-        const directory = join(store, "supervisor", "commands");
+        // Commands are authority: they go to the private control directory.
+        const identity = discoverProject(root);
+        const controlDir = controlDirectory(identity.primary);
+        await ensureControlDirectory(controlDir);
+        await bindControl(
+          identity.store,
+          controlDir,
+          {
+            primaryRoot: identity.primary,
+            gitCommon: identity.common,
+          },
+          { narrowing: true },
+        );
+        const directory = join(controlDir, "commands");
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const id = randomUUID();
         await publishJson(join(directory, `${id}.json`), value);

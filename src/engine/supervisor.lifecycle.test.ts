@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import {
   access,
   mkdir,
@@ -11,6 +12,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { controlDirectory } from "../control.ts";
+import { migrateControl } from "../migrate.ts";
 import { snapshot } from "./dashboard.ts";
 import { type Config, type State, serve } from "./supervisor.ts";
 
@@ -27,8 +30,8 @@ const initialState = (): State => ({
 });
 async function fixture(mode = "ready") {
   const root = await realpath(await mkdtemp(join(tmpdir(), "relay-audit-")));
-  const directory = join(root, ".crewplane-state/supervisor");
-  await mkdir(directory, { recursive: true });
+  const directory = controlDirectory(root);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   await mkdir(join(root, "tasks"), { recursive: true });
   await writeFile(join(root, "STATUS.md"), "Synthetic audit fixture");
   await writeFile(
@@ -305,7 +308,7 @@ it(
         // The OS and the node shebang may add their own bookkeeping names.
         const osAdded = /^(?:__CF_.*|_|PWD|OLDPWD|SHLVL)$/;
         const allowedPattern =
-          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
+          /^(?:PATH|HOME|USER|LOGNAME|SHELL|LANG|LANGUAGE|TZ|TERM|COLORTERM|NO_COLOR|TMPDIR|TMP|TEMP|LC_.*|XDG_.*|OPENAI_.*|CODEX_.*|CREWPLANE_(?:EXECUTABLE|RELEASES_DIR|CACHE_DIR|NO_AUTO_UPDATE|STATE_DIR)|GIT_(?:AUTHOR|COMMITTER)_.*|GIT_CONFIG_.*|GIT_SSL_.*|GIT_EDITOR|GIT_TERMINAL_PROMPT|[A-Z_]*PROXY|[A-Z_]*CERT.*|[A-Z_]*CA_BUNDLE)$/i;
         expect(
           keys.filter(
             (key) =>
@@ -326,6 +329,244 @@ it(
       }
     }),
   15000,
+);
+it(
+  "never exposes the control directory to a child and ignores commands a child plants through its board path",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const dump = join(f.root, "child-env-values.json");
+      const planted = "00000000-0000-4000-8000-0000000000ff.json";
+      const body = await readFile(f.config.binary, "utf8");
+      await writeFile(
+        f.config.binary,
+        body.replace(
+          "const args=",
+          `const fsm=await import('node:fs');const coord=process.env.CREWPLANE_COORD_DIR;
+fsm.mkdirSync(coord+'/supervisor/commands',{recursive:true});
+fsm.writeFileSync(coord+'/supervisor/commands/${planted}',JSON.stringify({action:'stop',at:new Date().toISOString()}));
+fsm.writeFileSync(${JSON.stringify(dump)},JSON.stringify(process.env));
+const args=`,
+        ),
+        { mode: 0o700 },
+      );
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            await access(dump);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        // Let at least one more supervisor cycle consume anything consumable.
+        await new Promise((r) => setTimeout(r, 2500));
+        const environment = JSON.parse(await readFile(dump, "utf8")) as Record<
+          string,
+          string
+        >;
+        // The child is given the board only, never the control directory.
+        expect(environment.CREWPLANE_COORD_DIR).toBe(
+          join(f.root, ".crewplane-state"),
+        );
+        for (const value of Object.values(environment)) {
+          expect(value).not.toContain(f.directory);
+          expect(value).not.toContain("/crewplane/projects/");
+        }
+        expect(f.directory.startsWith(f.root)).toBe(false);
+        // The planted stop is not in the supervisor's command queue, so the
+        // supervisor never applied it and never recorded it.
+        await access(
+          join(f.root, ".crewplane-state/supervisor/commands", planted),
+        );
+        const state = await f.load();
+        expect(state.running).toBe(true);
+        expect(state.draining).toBe(false);
+        expect(state.commands).not.toContain(planted);
+        expect(state.controlLog ?? []).toEqual([]);
+        expect(
+          JSON.parse(await readFile(join(f.directory, "desired.json"), "utf8"))
+            .desiredRunning,
+        ).toBe(true);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
+  "keeps a re-armed legacy pause holding after migrate and start, ignores planted leases and never applies a quarantined resume",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      await rm(f.directory, { recursive: true });
+      const legacy = join(f.root, ".crewplane-state/supervisor");
+      await mkdir(join(legacy, "commands"), { recursive: true, mode: 0o700 });
+      await writeFile(join(legacy, "config.json"), JSON.stringify(f.config));
+      await writeFile(
+        join(legacy, "state.json"),
+        JSON.stringify({ ...initialState(), running: false }),
+      );
+      // Planted by an agent: none of this may survive migration.
+      await writeFile(
+        join(legacy, "watcher.lock"),
+        JSON.stringify({ pid: 1, token: "forged" }),
+      );
+      await writeFile(join(legacy, "identity.json"), '{"primaryRoot":"/x"}');
+      const at = new Date().toISOString();
+      const pause = "00000000-0000-4000-8000-0000000000a1.json";
+      const resume = "00000000-0000-4000-8000-0000000000a2.json";
+      await writeFile(
+        join(legacy, "commands", pause),
+        JSON.stringify({ action: "pause", all: true, at }),
+      );
+      await writeFile(
+        join(legacy, "commands", resume),
+        JSON.stringify({ action: "resume", all: true, at }),
+      );
+      const base = {
+        store: join(f.root, ".crewplane-state"),
+        control: f.directory,
+        root: f.root,
+      };
+      const reviewed = await migrateControl({ ...base, dryRun: true });
+      const report = await migrateControl({
+        ...base,
+        ...(reviewed.digest ? { acceptConfig: reviewed.digest } : {}),
+      });
+      expect(report.rearmedCommands).toEqual([
+        { id: pause.slice(0, -5), action: "pause" },
+      ]);
+      expect(report.quarantinedCommands.map((c) => c.id)).toEqual([
+        resume.slice(0, -5),
+      ]);
+      expect(existsSync(join(f.directory, "watcher.lock"))).toBe(false);
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            return (await f.load()).instanceHeld === true;
+          } catch {
+            return false;
+          }
+        });
+        await new Promise((r) => setTimeout(r, 1500));
+        expect((await f.load()).instanceHeld).toBe(true);
+        expect(existsSync(join(f.directory, "commands", resume))).toBe(false);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
+  "keeps a halt queued before migration in force after migrate and start",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      await rm(f.directory, { recursive: true });
+      const legacy = join(f.root, ".crewplane-state/supervisor");
+      await mkdir(legacy, { recursive: true, mode: 0o700 });
+      await writeFile(join(legacy, "config.json"), JSON.stringify(f.config));
+      await writeFile(
+        join(legacy, "state.json"),
+        JSON.stringify({ ...initialState(), running: false }),
+      );
+      // The operator halted while the legacy directory still existed.
+      await mkdir(join(f.directory, "commands"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await writeFile(
+        join(f.directory, "identity.json"),
+        JSON.stringify({ version: 1, bindingId: "id-1", primaryRoot: f.root }),
+        { mode: 0o600 },
+      );
+      await writeFile(
+        join(
+          f.directory,
+          "commands",
+          "00000000-0000-4000-8000-0000000000b1.json",
+        ),
+        JSON.stringify({ v: 2, action: "pause", all: true }),
+        { mode: 0o600 },
+      );
+      const base = {
+        store: join(f.root, ".crewplane-state"),
+        control: f.directory,
+        root: f.root,
+      };
+      const reviewed = await migrateControl({ ...base, dryRun: true });
+      await migrateControl({
+        ...base,
+        ...(reviewed.digest ? { acceptConfig: reviewed.digest } : {}),
+      });
+      const c = new AbortController();
+      const running = serve(f.config, f.directory, c.signal);
+      try {
+        await until(async () => {
+          try {
+            return (await f.load()).instanceHeld === true;
+          } catch {
+            return false;
+          }
+        });
+        await new Promise((r) => setTimeout(r, 1200));
+        expect((await f.load()).instanceHeld).toBe(true);
+      } finally {
+        c.abort();
+        await running;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
+);
+it(
+  "refuses to start on recorded process groups that could address every process",
+  () =>
+    withEnv(async () => {
+      const f = await fixture();
+      const state = initialState();
+      state.records.B = {
+        key: "B",
+        lane: "B",
+        task: null,
+        cwd: f.root,
+        status: "running",
+        reason: "",
+        seen: [],
+        runs: [],
+        noProgress: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        pid: 4194000,
+        processGroupId: 1,
+      };
+      await writeFile(join(f.directory, "state.json"), JSON.stringify(state));
+      const kill = process.kill;
+      const probes: number[] = [];
+      process.kill = ((pid: number, signal?: string | number) => {
+        probes.push(pid);
+        return kill.call(process, pid, signal as never);
+      }) as typeof process.kill;
+      try {
+        await expect(
+          serve(f.config, f.directory, new AbortController().signal),
+        ).rejects.toThrow("Invalid supervisor state");
+        expect(probes.some((pid) => pid === -1 || pid === 1)).toBe(false);
+      } finally {
+        process.kill = kill;
+        await rm(f.root, { recursive: true, force: true });
+      }
+    }),
+  20000,
 );
 it(
   "releases startup lease on invalid state and pauses interrupted records even without a stored PID",

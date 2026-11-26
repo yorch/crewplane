@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { controlDirectory } from "../control.ts";
 import type { snapshot } from "./dashboard.ts";
 import {
   type Config,
@@ -208,8 +209,8 @@ it("rejects a retained native session when a disabled lane switches harness with
   const { serve } = await import("./supervisor.ts");
   const root = await mkdtemp(join(tmpdir(), "relay-switch-"));
   try {
-    const directory = join(root, ".crewplane-state/supervisor");
-    await mkdir(directory, { recursive: true });
+    const directory = controlDirectory(root);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(
       join(directory, "state.json"),
       JSON.stringify({
@@ -302,7 +303,7 @@ let input='';for await(const chunk of process.stdin)input+=chunk;
 if(!/Crewplane agent (coordinator|reviewer)/.test(input))process.exit(2);
 const harness=${JSON.stringify(harness)};
 const args=process.argv.slice(2);const out=args[args.indexOf('--output-last-message')+1];
-if (harness === 'pi') {const dir=args[args.indexOf('--session-dir')+1];if(dir!==${JSON.stringify(join(root, ".crewplane-state/supervisor/pi-sessions"))}||!existsSync(dir))process.exit(9);}
+if (harness === 'pi') {const dir=args[args.indexOf('--session-dir')+1];if(dir!==${JSON.stringify(join(controlDirectory(root), "pi-sessions"))}||!existsSync(dir))process.exit(9);}
 if (harness === 'pi' || harness === 'opencode') {if(!input.includes('Return ONLY a JSON object'))process.exit(7);}
 mkdirSync('.crewplane-local',{recursive:true});const file='.crewplane-local/args.json';const history=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):[];history.push(args);writeFileSync(file,JSON.stringify(history));
 const result={state:'waiting',summary:'Controlled fixture completed'};
@@ -337,7 +338,7 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
 `,
         { mode: 0o700 },
       );
-      const directory = join(root, ".crewplane-state/supervisor");
+      const directory = controlDirectory(root);
       const initial: Config = {
         ...config,
         root,
@@ -367,7 +368,7 @@ console.log(JSON.stringify({type:'step_finish',sessionID:session,part:{type:'ste
           },
         },
       };
-      await mkdir(directory, { recursive: true });
+      await mkdir(directory, { recursive: true, mode: 0o700 });
       const replaceConfig = async (value: unknown) => {
         const temporary = join(directory, "candidate.json");
         await writeFile(temporary, JSON.stringify(value));
@@ -602,7 +603,7 @@ if (mode === 'malformed') process.stdout.write('{"type":"broken');
 `,
         { mode: 0o700 },
       );
-      const directory = join(root, ".crewplane-state/supervisor");
+      const directory = controlDirectory(root);
       const lane =
         harness === "claude"
           ? {
@@ -631,7 +632,7 @@ if (mode === 'malformed') process.stdout.write('{"type":"broken');
         allowedTasks: [],
         lanes: { coordinator: lane },
       };
-      await mkdir(directory, { recursive: true });
+      await mkdir(directory, { recursive: true, mode: 0o700 });
       await writeFile(join(directory, "config.json"), JSON.stringify(strict));
       running = serve(strict, directory, controller.signal);
       const load = async (): Promise<State | undefined> => {
@@ -849,8 +850,8 @@ it("applies or refuses an audited new-session reset atomically", async () => {
     git("config", "user.email", "synthetic@example.invalid");
     git("add", ".");
     git("commit", "-qm", "test: reset fixture");
-    const directory = join(root, ".crewplane-state/supervisor");
-    await mkdir(directory, { recursive: true });
+    const directory = controlDirectory(root);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     const session = "00000000-0000-4000-8000-000000000001";
     const base = {
       version: 1,
@@ -1044,7 +1045,7 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
 `,
       { mode: 0o700 },
     );
-    const directory = join(root, ".crewplane-state/supervisor");
+    const directory = controlDirectory(root);
     const value: Config = {
       ...config,
       root,
@@ -1063,7 +1064,7 @@ console.log(JSON.stringify({type:'agent_settled',aborted:false}));
         },
       },
     };
-    await mkdir(directory, { recursive: true });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(join(directory, "config.json"), JSON.stringify(value));
     const { snapshot: readSnapshot } = await import("./read-model.ts");
     running = serve(value, directory, controller.signal, {

@@ -71,8 +71,8 @@ it("delivers synthetic dead/paused/mismatch faults visibly without controlling l
 it("keeps failed rollout observable while protecting a live drain and intentional stop", async () => {
   const store = await mkdtemp(join(tmpdir(), "relay-rollout-health-"));
   try {
-    const supervisor = join(store, "supervisor");
-    await (await import("node:fs/promises")).mkdir(supervisor, { mode: 0o700 });
+    const supervisor = store;
+
     await writeFile(
       join(supervisor, "desired.json"),
       JSON.stringify({ desiredRunning: true }),

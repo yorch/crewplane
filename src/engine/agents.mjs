@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdir, readFile, rename } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { checkControlDirectory, controlDirectory } from "../control.ts";
 import { gitEnvironment } from "../environment.ts";
 import { durableMkdir, publishJson, syncDirectory } from "../io.ts";
 import { withProcessLock } from "../process-lock.ts";
@@ -85,6 +86,28 @@ async function context(cwd) {
   return { ...identity, policy: projectPolicy(identity.primary) };
 }
 
+/**
+ * Supervisor run state, for READING only. Under a supervised child
+ * (CREWPLANE_HEADLESS_LANE) a missing control directory or state file REFUSES
+ * the guard, since a child with a changed HOME or state base would otherwise
+ * bypass it; outside a child, absence means no supervisor has run. Either way
+ * this is an advisory guard: without an OS sandbox a same-user agent can still
+ * edit the board directly.
+ */
+async function controlState(ctx) {
+  const control = controlDirectory(ctx.primary);
+  const supervised = Boolean(process.env.CREWPLANE_HEADLESS_LANE);
+  if (!checkControlDirectory(control)) {
+    ensure(!supervised, "Supervisor control state is unavailable; refusing");
+    return null;
+  }
+  const state = await read(join(control, "state.json"), null);
+  ensure(
+    !supervised || state !== null,
+    "Supervisor control state is unavailable; refusing",
+  );
+  return state;
+}
 function taskPath(ctx, id, file) {
   return join(ctx.store, "tasks", task(id), file);
 }
@@ -315,7 +338,7 @@ async function executionGuard(
   revision = false,
   checkpoint = false,
 ) {
-  const state = await read(join(ctx.store, "supervisor", "state.json"), null);
+  const state = await controlState(ctx);
   for (const record of Object.values(state?.records ?? {})) {
     ensure(
       record.lane !== agent ||
@@ -816,10 +839,7 @@ async function execute(command, o, ctx) {
       !(await read(taskPath(ctx, id, "accepted.json"), null)),
       "Accepted work needs a new task, not release",
     );
-    const runtime = await read(
-      join(ctx.store, "supervisor", "state.json"),
-      null,
-    );
+    const runtime = await controlState(ctx);
     ensure(
       !Object.values(runtime?.records ?? {}).some(
         (r) =>
