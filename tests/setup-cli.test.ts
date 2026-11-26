@@ -1,9 +1,10 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { controlDirectory } from "../src/control.ts";
 
@@ -90,8 +91,9 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
   it("installs a generated config that doctor accepts, without running the harness", () => {
     const p = project();
     expect(p.run(runner, ["init"]).status).toBe(0);
+    // A card on disk names a different task and owner; neither may authorize anything.
     mkdirSync(join(p.root, "tasks"), { recursive: true });
-    writeFileSync(join(p.root, "tasks/CP-101.md"), "# t\nOwner: builder.\n");
+    writeFileSync(join(p.root, "tasks/CP-999.md"), "# t\nOwner: sneaky.\n");
     const setup = p.run(runner, [
       "setup",
       "--non-interactive",
@@ -122,9 +124,10 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
     );
     expect(stored.binary).toBe(p.fake);
     expect(stored.root).toBe(p.root);
+    expect(stored.allowedTasks).toEqual(["CP-101"]);
     expect(Object.keys(stored.lanes)).toEqual([
       "coordinator",
-      "builder",
+      "implementer",
       "reviewer",
       "visual",
     ]);
@@ -138,6 +141,26 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
       config: "valid",
     });
     expect(existsSync(p.ranMarker)).toBe(false);
+  });
+
+  it("requires --tasks and fails closed without it", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    mkdirSync(join(p.root, "tasks"), { recursive: true });
+    writeFileSync(join(p.root, "tasks/CP-101.md"), "# t\nOwner: builder.\n");
+    const result = p.run(runner, [
+      "setup",
+      "--non-interactive",
+      "true",
+      "--template",
+      "codex",
+      "--binary",
+      p.fake,
+    ]);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/requires --tasks ID,ID/);
+    expect(existsSync(p.control)).toBe(false);
   });
 
   it("without a terminal or --non-interactive it fails instead of waiting", () => {
@@ -215,7 +238,10 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
     );
     expect(refused.status).toBe(1);
     expect(refused.stdout).toBe("");
-    expect(refused.stderr).toMatch(/Stop and inspect the existing supervisor/);
+    // The pre-check refuses to stamp a confirmation while the state says running.
+    expect(refused.stderr).toMatch(
+      /Refusing --confirm-stopped true: the control state says a supervisor is running/,
+    );
     expect(readFileSync(join(p.control, "config.json"), "utf8")).toBe(before);
   });
 
@@ -250,5 +276,231 @@ describe.each(runners)("setup (%s)", (_name, runner) => {
       );
     }
     expect(existsSync(p.control)).toBe(false);
+  });
+
+  const base = (p: ReturnType<typeof project>) => [
+    "setup",
+    "--non-interactive",
+    "true",
+    "--template",
+    "codex",
+    "--binary",
+    p.fake,
+    "--tasks",
+    "CP-101",
+  ];
+
+  it("refuses --confirm-stopped while the state says running or a supervisor is live", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    const args = [...base(p), "--confirm-stopped", "true"];
+    expect(p.run(runner, args).status).toBe(0);
+    mkdirSync(dirname(p.control), { recursive: true, mode: 0o700 });
+    mkdirSync(p.control, { mode: 0o700 });
+    writeFileSync(
+      join(p.control, "state.json"),
+      JSON.stringify({ running: true }),
+    );
+    const running = p.run(runner, args);
+    expect(running.status).toBe(1);
+    expect(running.stdout).toBe("");
+    expect(running.stderr).toMatch(
+      /Refusing --confirm-stopped true: the control state says a supervisor is running/,
+    );
+    // Not running by flag, but a recorded child process of ours is alive.
+    const child = spawnSync("sleep", ["0"]); // ensure sleep exists
+    expect(child.status).toBe(0);
+    const sleeper = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      writeFileSync(
+        join(p.control, "state.json"),
+        JSON.stringify({
+          running: false,
+          records: {
+            r: { lane: "coordinator", status: "running", pid: sleeper.pid },
+          },
+        }),
+      );
+      const live = p.run(runner, args);
+      expect(live.status).toBe(1);
+      expect(live.stderr).toMatch(/appears to be live/);
+      // Without a confirmation setup still prints and stamps nothing.
+      const printed = p.run(runner, base(p));
+      expect(printed.status, printed.stderr).toBe(0);
+      expect(JSON.parse(printed.stdout).confirmedStopped).toBe(false);
+    } finally {
+      sleeper.kill();
+    }
+  });
+
+  it("a refused --install with --out leaves no file and a retry then succeeds", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    const out = join(p.base, "runtime.json");
+    const args = [
+      ...base(p),
+      "--confirm-stopped",
+      "true",
+      "--install",
+      "true",
+      "--out",
+      out,
+    ];
+    expect(p.run(runner, args.slice(0, -2)).status).toBe(0);
+    writeFileSync(
+      join(p.control, "state.json"),
+      JSON.stringify({ running: true }),
+    );
+    const refused = p.run(runner, args);
+    expect(refused.status).toBe(1);
+    expect(existsSync(out)).toBe(false);
+    expect(readdirSync(p.base).filter((n) => n.includes("runtime"))).toEqual(
+      [],
+    );
+    writeFileSync(
+      join(p.control, "state.json"),
+      JSON.stringify({ running: false }),
+    );
+    const retry = p.run(runner, args);
+    expect(retry.status, retry.stderr).toBe(0);
+    expect(JSON.parse(retry.stdout)).toMatchObject({
+      installed: true,
+      written: out,
+    });
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+  });
+
+  it("--out refuses directories, missing parents, the control directory and tracked paths", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    mkdirSync(dirname(p.control), { recursive: true, mode: 0o700 });
+    mkdirSync(p.control, { mode: 0o700 });
+    const cases: Array<[string, RegExp]> = [
+      [p.base, /--out names a directory/],
+      [join(p.base, "missing", "x.json"), /parent directory does not exist/],
+      [join(p.control, "x.json"), /inside the Crewplane control or state/],
+      [
+        join(p.root, ".crewplane-state", "x.json"),
+        /inside the Crewplane control or state/,
+      ],
+      [join(p.root, "runtime.json"), /not git-ignored/],
+    ];
+    for (const [out, pattern] of cases) {
+      const result = p.run(runner, [...base(p), "--out", out]);
+      expect(result.status, out).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr, out).toMatch(pattern);
+    }
+    expect(existsSync(join(p.root, "runtime.json"))).toBe(false);
+    // A git-ignored path inside the repository is allowed, resolved against --project.
+    writeFileSync(join(p.root, ".gitignore"), "/ignored.json\n");
+    const ok = p.run(runner, [...base(p), "--out", "ignored.json"]);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(JSON.parse(ok.stdout).written).toBe(join(p.root, "ignored.json"));
+  });
+
+  it("rejects an unsafe explicit binary and never carries environment secrets anywhere", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    chmodSync(p.fake, 0o775);
+    const refused = p.run(runner, base(p));
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toMatch(
+      /codex binary refused: it is group- or world-writable/,
+    );
+    chmodSync(p.fake, 0o755);
+    const secrets = {
+      OPENAI_API_KEY: "sentinel-openai-0f1e",
+      ANTHROPIC_API_KEY: "sentinel-anthropic-7a2b",
+    };
+    const out = join(p.base, "env.json");
+    const result = p.run(
+      runner,
+      [
+        ...base(p),
+        "--confirm-stopped",
+        "true",
+        "--install",
+        "true",
+        "--out",
+        out,
+      ],
+      secrets,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const everything = [
+      result.stdout,
+      result.stderr,
+      readFileSync(out, "utf8"),
+      readFileSync(join(p.control, "config.json"), "utf8"),
+    ].join("\n");
+    for (const value of Object.values(secrets))
+      expect(everything).not.toContain(value);
+  });
+
+  it("a rerun with a different harness installs lanes `serve` accepts via a fresh sessionEpoch", () => {
+    const p = project();
+    p.run(runner, ["init"]);
+    const install = [
+      ...base(p),
+      "--confirm-stopped",
+      "true",
+      "--install",
+      "true",
+    ];
+    expect(p.run(runner, install).status).toBe(0);
+    // A drained idle record from the codex run exists in the state.
+    writeFileSync(
+      join(p.control, "state.json"),
+      JSON.stringify({
+        running: false,
+        records: {
+          r: {
+            key: "k",
+            lane: "coordinator",
+            task: null,
+            cwd: p.root,
+            harness: "codex",
+            status: "idle",
+            reason: "",
+            seen: [],
+            runs: [],
+            noProgress: 0,
+          },
+        },
+      }),
+    );
+    const claude = join(p.base, "tools", "claude");
+    writeFileSync(claude, "#!/bin/sh\nexit 0\n");
+    chmodSync(claude, 0o755);
+    const switched = p.run(runner, [
+      "setup",
+      "--non-interactive",
+      "true",
+      "--template",
+      "claude",
+      "--claude-binary",
+      claude,
+      "--model",
+      "opus",
+      "--tasks",
+      "CP-101",
+      "--confirm-stopped",
+      "true",
+      "--install",
+      "true",
+    ]);
+    expect(switched.status, switched.stderr).toBe(0);
+    expect(switched.stderr).toMatch(
+      /lane coordinator switches harness from codex to claude/,
+    );
+    const stored = JSON.parse(
+      readFileSync(join(p.control, "config.json"), "utf8"),
+    );
+    expect(stored.lanes.coordinator.sessionEpoch).toMatch(
+      /^setup-[0-9a-f]{12}$/,
+    );
+    expect(stored.lanes.coordinator.harness).toBe("claude");
+    expect(p.run(runner, ["doctor"]).status).toBe(0);
   });
 });

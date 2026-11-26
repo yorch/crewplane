@@ -100,6 +100,8 @@ export interface SetupAnswers {
   confirmedStoppedAt?: string;
   /** Pi lanes require a fresh explicit epoch. */
   sessionEpoch?: string;
+  /** Lane id -> epoch for non-Pi lanes that switch harness or keep a prior epoch. */
+  laneEpochs?: Record<string, string>;
 }
 
 export const defaultLimits = (): Record<LimitName, number> => ({
@@ -205,10 +207,17 @@ export function laneFor(
   answers: SetupAnswers,
 ): LaneHarness & { enabled: boolean } {
   const enabled = laneEnabled(policy, id, role);
+  const epoch = answers.laneEpochs?.[id];
+  const withEpoch = epoch ? { sessionEpoch: epoch } : {};
   switch (harness) {
     case "codex": {
       const model = answers.models.codex;
-      return { enabled, harness, ...(model ? { model } : {}) };
+      return {
+        enabled,
+        harness,
+        ...(model ? { model } : {}),
+        ...withEpoch,
+      };
     }
     case "claude":
       return {
@@ -220,12 +229,14 @@ export function laneFor(
         claudeMcp: answers.claude.mcp,
         claudeSettingSources: [...answers.claude.settingSources],
         maxCostUsdPerRun: answers.claude.maxCostUsdPerRun,
+        ...withEpoch,
       };
     case "opencode":
       return {
         enabled,
         harness,
         model: answers.models.opencode as string,
+        ...withEpoch,
       };
     case "pi":
       return {
@@ -249,6 +260,20 @@ export interface BuiltSetup {
  * structural preconditions and every lane through the engine's validateHarness
  * so the generated file cannot drift from what `configure` accepts.
  */
+/** Lane id -> harness for every lane a setup would write, in config order. */
+export function laneHarnesses(
+  answers: Pick<SetupAnswers, "roles" | "implementers">,
+  policy: SetupPolicy,
+): Record<string, Harness> {
+  const lanes: Record<string, Harness> = {
+    [policy.coordinator]: answers.roles.coordinator,
+  };
+  for (const id of answers.implementers) lanes[id] = answers.roles.implementer;
+  for (const id of policy.reviewers)
+    lanes[id] = answers.roles[lanePolicyOf(policy, id)];
+  return lanes;
+}
+
 export function buildConfig(
   answers: SetupAnswers,
   policy: SetupPolicy,
@@ -360,6 +385,26 @@ export function buildConfig(
       `top-level binary is the ${primary} executable because the engine requires one; only Codex lanes fall back to it`,
     );
   return { config, notes };
+}
+
+/** Parse a Pi model and validate it through the engine's own lane validator. */
+export function acceptPiModel(text: string): { provider: string; id: string } {
+  const piModel = parsePiModel(text.trim());
+  try {
+    validateHarness(
+      { root: "/", binary: "/" },
+      {
+        harness: "pi",
+        piPermissions: "no-tools",
+        sessionEpoch: "setup-check",
+        piModel,
+      },
+      { checkBinary: false },
+    );
+  } catch (error) {
+    return fail(error instanceof Error ? error.message : "Invalid Pi model");
+  }
+  return piModel;
 }
 
 /**

@@ -31,6 +31,7 @@ const context = () => ({
   discoveredTasks: ["CP-101", "CP-102"],
   discoveredImplementers: ["builder"],
   check: async (path: string) => path.startsWith("/fake/"),
+  safety: async () => null,
   now: () => new Date("2026-11-08T12:00:00.000Z"),
   epoch: () => "setup-epoch1",
   review: (a: Parameters<typeof buildConfig>[0]) =>
@@ -192,9 +193,181 @@ it("declining the final review aborts", async () => {
 });
 
 it("custom lets only reviewers choose Pi", async () => {
-  const { io, text } = scripted(["custom", "pi", "claude", "claude"]);
-  // pi is not offered for the coordinator: the first menu lists three harnesses.
-  await runWizard(io, context()).catch(() => undefined);
-  const firstMenu = text.join("").split("Harness for implementers")[0] ?? "";
-  expect(firstMenu).not.toMatch(/\d\) pi/);
+  const { io, text, left } = scripted([
+    "custom",
+    "pi", // coordinator: rejected, pi is not offered
+    "claude",
+    "pi", // implementers: rejected
+    "claude",
+    "pi", // reviewers: accepted
+    "", // claude binary (detected)
+    "/fake/pi", // pi has no detected default
+    "opus", // claude model
+    "", // pi model (harness default)
+    "", // implementer permission mode default
+    "",
+    "",
+    "", // claudeMcp, sources, cost
+    "",
+    "", // implementers, tasks
+    "",
+    "",
+    "",
+    "", // limits
+    "no", // stopped
+    "yes", // review
+    "", // out
+  ]);
+  const result = await runWizard(io, context());
+  expect(left()).toBe(0);
+  expect(result.template).toBe("custom");
+  expect(result.answers.roles).toEqual({
+    coordinator: "claude",
+    implementer: "claude",
+    reviewer: "pi",
+  });
+  expect(result.answers.sessionEpoch).toBe("setup-epoch1");
+  const shown = text.join("");
+  // The two menus for coordinator and implementers offer exactly three
+  // harnesses and reject a typed pi; only the reviewer menu lists it.
+  expect(
+    shown.match(
+      /invalid: choose one of: codex, claude, opencode \(try again\)/g,
+    ),
+  ).toHaveLength(2);
+  const [coordinatorMenu, rest = ""] = shown.split("Harness for implementers:");
+  const [implementerMenu, reviewerMenu = ""] = rest.split(
+    "Harness for reviewers:",
+  );
+  expect(coordinatorMenu).not.toMatch(/\d\) pi/);
+  expect(implementerMenu).not.toMatch(/\d\) pi/);
+  expect(reviewerMenu).toMatch(/4\) pi/);
+});
+
+it("re-prompts a bad Pi model instead of failing at the end", async () => {
+  const { io, text, left } = scripted([
+    "custom",
+    "claude",
+    "claude",
+    "pi",
+    "",
+    "/fake/pi",
+    "opus",
+    "prov/bad model", // engine rejects: space
+    "prov/ok-model",
+    "", // permission mode
+    "",
+    "",
+    "", // claudeMcp, sources, cost
+    "",
+    "", // implementers, tasks
+    "",
+    "",
+    "",
+    "", // limits
+    "no",
+    "yes",
+    "",
+  ]);
+  const result = await runWizard(io, context());
+  expect(left()).toBe(0);
+  expect(text.join("")).toContain(
+    "invalid: Invalid explicit Pi provider/model",
+  );
+  expect(result.answers.piModel).toEqual({ provider: "prov", id: "ok-model" });
+});
+
+it("shows a detected binary default through printablePath and still refuses it", async () => {
+  const ctx = { ...context(), detection: { ...context().detection } };
+  ctx.detection.codex = "/fake/co\ndex\u001b[31m";
+  const { io, prompts } = scripted([
+    "codex",
+    "", // blank accepts the (control-character) default: refused
+    "/fake/codex",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "no",
+    "yes",
+    "",
+  ]);
+  const result = await runWizard(io, ctx);
+  const binaryPrompts = prompts.filter((p) => p.includes("executable"));
+  expect(binaryPrompts).toHaveLength(2);
+  for (const prompt of binaryPrompts) {
+    expect(prompt).not.toMatch(/\p{Cc}/u);
+    expect(prompt).toContain("[/fake/co?dex?[31m]");
+  }
+  expect(result.answers.binaries.codex).toBe("/fake/codex");
+});
+
+it("refuses to record a stop confirmation the control state contradicts", async () => {
+  const answers = [
+    "codex",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "yes", // stopped
+  ];
+  const { io } = scripted(answers);
+  await expect(
+    runWizard(io, {
+      ...context(),
+      verifyStopped: async () =>
+        "the control state says a supervisor is running",
+    }),
+  ).rejects.toThrow(
+    /Refusing to record the stop confirmation: the control state/,
+  );
+  // A "no" never consults the control state.
+  let asked = 0;
+  const declined = scripted([...answers.slice(0, 9), "no", "yes", ""]);
+  const result = await runWizard(declined.io, {
+    ...context(),
+    verifyStopped: async () => {
+      asked++;
+      return "running";
+    },
+  });
+  expect(asked).toBe(0);
+  expect("confirmedStoppedAt" in result.answers).toBe(false);
+});
+
+it("emits a fresh epoch for a lane whose harness changed since the installed config", async () => {
+  const { io, text } = scripted([
+    "codex",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "no",
+    "yes",
+    "",
+  ]);
+  const result = await runWizard(io, {
+    ...context(),
+    prior: {
+      config: { captain: { harness: "claude" } },
+      records: { builder: { harness: "opencode", busy: false } },
+    },
+  });
+  expect(result.answers.laneEpochs).toEqual({
+    captain: "setup-epoch1",
+    builder: "setup-epoch1",
+  });
+  expect(result.notes.join(" ")).toMatch(/lane captain switches harness/);
+  expect(text.join("")).toContain("note: lane builder switches harness");
 });

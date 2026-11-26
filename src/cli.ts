@@ -67,7 +67,8 @@ import {
   writeProjectPin,
 } from "./project.ts";
 import { runSetup, terminalIO } from "./setup/command.ts";
-import { installConfig } from "./setup/install.ts";
+import { loadPrior } from "./setup/epochs.ts";
+import { installConfig, stoppedProblem } from "./setup/install.ts";
 import {
   compareVersions,
   dispatchTarget,
@@ -679,7 +680,17 @@ async function main() {
       env: process.env,
       tty: Boolean(process.stdin.isTTY && process.stdout.isTTY),
       options,
-      install: (value) => installConfig(value, installTarget),
+      install: (value) =>
+        installConfig(value, installTarget, { requireStopped: true }),
+      stopped: () => stoppedProblem(directory),
+      prior: () => loadPrior(directory),
+      protectedPaths: [
+        directory,
+        controlDir,
+        ctx.store,
+        join(root, ".crewplane-state"),
+        join(root, ".crewplane-local"),
+      ],
       makeIO: () => terminalIO(process.stdin, process.stderr),
     });
     for (const problem of report.problems)

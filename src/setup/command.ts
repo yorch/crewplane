@@ -1,25 +1,29 @@
 import { randomBytes } from "node:crypto";
-import { lstat, open, readdir, writeFile } from "node:fs/promises";
+import { lstat, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Config } from "../contracts.ts";
 import { type DoctorProblem, effectiveBinary, probeBinary } from "../doctor.ts";
 import { type Harness, instructionFileProblem } from "../engine/harness.ts";
-import {
-  type ProjectPolicy,
-  printablePath,
-  validId,
-  validTaskId,
-} from "../project.ts";
+import { type ProjectPolicy, validId, validTaskId } from "../project.ts";
 import {
   acceptBinary,
+  type Detection,
+  describeRejection,
   detectHarnesses,
   type ExecutableCheck,
+  harnessCommands,
   isUsableExecutable,
+  type Rejection,
+  safetyFor,
 } from "./detect.ts";
+import { noPrior, type Prior, planEpochs } from "./epochs.ts";
 import { decodeConfig } from "./install.ts";
+import { checkOut, prepareOut } from "./out.ts";
+import type { SafetyCheck } from "./safety.ts";
 import {
   acceptModel,
+  acceptPiModel,
   buildConfig,
   type ClaudeSettings,
   defaultClaudeSettings,
@@ -28,12 +32,12 @@ import {
   harnessesUsed,
   isTemplate,
   type LimitName,
+  laneHarnesses,
   parseCost,
   parseImplementers,
   parseLimit,
   parseMcp,
   parsePermissionMode,
-  parsePiModel,
   parseSettingSources,
   parseTaskIds,
   roleHarnesses,
@@ -91,7 +95,7 @@ export interface SetupReport {
 }
 
 export interface SetupDeps {
-  /** Base for relative `--out` paths (the invocation directory). */
+  /** Base for relative `--out` paths: `--project` when given, else the invocation directory. */
   requested: string;
   root: string;
   policy: ProjectPolicy;
@@ -99,10 +103,20 @@ export interface SetupDeps {
   /** True only when both stdin and stdout are terminals. */
   tty: boolean;
   options: (args: string[], allowed: string[]) => Record<string, string>;
-  /** Shared with `configure`; receives the generated runtime JSON. */
+  /**
+   * Shared with `configure`; receives the generated runtime JSON. Must itself
+   * refuse while a supervisor runs or is live, inside the install lock.
+   */
   install: (value: Record<string, unknown>) => Promise<Config>;
+  /** Why a stop confirmation cannot be recorded now (running state or live supervisor), or null. */
+  stopped?: () => Promise<string | null>;
+  /** Read-only view of the installed configuration and supervisor records. */
+  prior?: () => Promise<Prior>;
+  /** Directories `--out` may never point into (control directory, stores). */
+  protectedPaths?: string[];
   makeIO: () => WizardIO;
   check?: ExecutableCheck;
+  safety?: SafetyCheck;
   now?: () => Date;
   epoch?: () => string;
 }
@@ -115,8 +129,16 @@ const bool = (opts: Record<string, string>, flag: string) => {
 };
 
 const maxCardBytes = 8192;
+const maxCards = 200;
 const ownerPattern = /^Owner(?: lane)?:\s*([A-Za-z][A-Za-z0-9_-]{0,63})\b/m;
-/** Cheap, bounded discovery of task IDs and card owners; failures mean "none". */
+const finishedPattern =
+  /^Status:\s*(?:done|complete|completed|closed|cancelled|canceled|abandoned|accepted|merged)\b/im;
+/**
+ * Cheap, bounded discovery of task IDs and card owners, only to seed wizard
+ * defaults the operator must confirm. Cards that say they are finished are
+ * ignored; every ID passes the same validation as an operator-typed one;
+ * failures mean "none". Never used to authorize anything on its own.
+ */
 export async function discoverTasks(
   root: string,
   tasksPath: string,
@@ -128,20 +150,21 @@ export async function discoverTasks(
     const directory = join(root, tasksPath);
     const names = (await readdir(directory)).sort().slice(0, 500);
     for (const name of names) {
+      if (tasks.length >= maxCards) break;
       const id = name.endsWith(".md") ? name.slice(0, -3) : "";
       if (!validTaskId(id)) continue;
       const path = join(directory, name);
       const info = await lstat(path).catch(() => null);
       if (!info?.isFile()) continue;
-      tasks.push(id);
       const handle = await open(path, "r").catch(() => null);
       if (!handle) continue;
       try {
         const buffer = Buffer.alloc(maxCardBytes);
         const { bytesRead } = await handle.read(buffer, 0, maxCardBytes, 0);
-        const owner = buffer
-          .toString("utf8", 0, bytesRead)
-          .match(ownerPattern)?.[1];
+        const text = buffer.toString("utf8", 0, bytesRead);
+        if (finishedPattern.test(text)) continue;
+        tasks.push(id);
+        const owner = text.match(ownerPattern)?.[1];
         if (owner && validId(owner) && !reserved.has(owner)) owners.add(owner);
       } finally {
         await handle.close();
@@ -156,9 +179,13 @@ export async function discoverTasks(
 /**
  * Doctor-equivalent verification of a generated configuration using the same
  * primitives doctor uses (validateConfig without the binary check, then
- * probeBinary per lane and the instruction-file check). Nothing is executed.
+ * probeBinary per lane and the instruction-file check), plus setup's own
+ * binary safety probe. Nothing is executed.
  */
-export async function checkGenerated(config: Config): Promise<DoctorProblem[]> {
+export async function checkGenerated(
+  config: Config,
+  safety: SafetyCheck = safetyFor(isUsableExecutable),
+): Promise<DoctorProblem[]> {
   const problems: DoctorProblem[] = [];
   const reported = new Set<string>();
   for (const [id, lane] of Object.entries(config.lanes)) {
@@ -167,11 +194,13 @@ export async function checkGenerated(config: Config): Promise<DoctorProblem[]> {
       effectiveBinary(config, harness),
       harness,
     );
-    if (code && !(probe.path && reported.has(probe.path))) {
+    // The unsafe-binary probe is setup policy; doctor never applies it.
+    const unsafe = !code && probe.path ? await safety(probe.path) : null;
+    if ((code || unsafe) && !(probe.path && reported.has(probe.path))) {
       problems.push({
-        code,
+        code: code ?? "BINARY_INVALID",
         lane: id,
-        message: probe.problem ?? "binary unusable",
+        message: probe.problem ?? `${harness} binary refused: ${unsafe}`,
       });
       if (probe.path) reported.add(probe.path);
     }
@@ -201,10 +230,12 @@ const policyOf = (policy: ProjectPolicy): SetupPolicy => ({
 async function nonInteractiveAnswers(
   opts: Record<string, string>,
   deps: SetupDeps,
-  discovered: { tasks: string[]; implementers: string[] },
+  detection: Detection,
+  rejected: Rejection[],
   confirmed: boolean,
 ): Promise<{ answers: SetupAnswers; template: Template }> {
   const check = deps.check ?? isUsableExecutable;
+  const safety = deps.safety ?? safetyFor(check);
   const template = opts["--template"];
   if (!isTemplate(template))
     throw new Error(`setup requires --template ${templates.join("|")}`);
@@ -227,16 +258,19 @@ async function nonInteractiveAnswers(
       throw new Error(
         `${flagFor[harness]} does not apply to the ${template} template`,
       );
-  const detection = await detectHarnesses(deps.env.PATH, check);
   const binaries: SetupAnswers["binaries"] = {};
   for (const harness of used) {
     const given = opts[flagFor[harness]];
     const path = given ?? detection[harness];
-    if (!path)
+    if (!path) {
+      const refused = rejected
+        .filter((r) => r.path.endsWith(`/${harnessCommands[harness]}`))
+        .map(describeRejection);
       throw new Error(
-        `No ${harness} executable found on PATH; pass ${flagFor[harness]} ABSOLUTE_PATH`,
+        `No ${harness} executable found on PATH${refused.length ? ` (${refused.join("; ")})` : ""}; pass ${flagFor[harness]} ABSOLUTE_PATH`,
       );
-    binaries[harness] = await acceptBinary(path, harness, check);
+    }
+    binaries[harness] = await acceptBinary(path, harness, check, safety);
   }
 
   const models: SetupAnswers["models"] = {};
@@ -258,7 +292,7 @@ async function nonInteractiveAnswers(
   if (opts["--pi-model"] !== undefined) {
     if (!(template === "mixed" && reviewerHarness === "pi"))
       throw new Error("--pi-model applies only to mixed with pi reviewers");
-    piModel = parsePiModel(opts["--pi-model"]);
+    piModel = acceptPiModel(opts["--pi-model"]);
   }
   for (const harness of used)
     if (harness !== "codex" && harness !== "pi" && !models[harness])
@@ -291,18 +325,17 @@ async function nonInteractiveAnswers(
   if (opts["--max-cost-usd"] !== undefined)
     claude.maxCostUsdPerRun = parseCost(opts["--max-cost-usd"]);
 
-  const allowedTasks =
-    opts["--tasks"] !== undefined
-      ? parseTaskIds(opts["--tasks"])
-      : discovered.tasks;
-  if (!allowedTasks.length)
-    throw new Error("No task cards found; pass --tasks ID,ID");
+  // Authorization is never inferred from files on disk: the operator names
+  // every task that may run and every implementer lane.
+  if (opts["--tasks"] === undefined)
+    throw new Error(
+      "setup --non-interactive requires --tasks ID,ID: only the tasks you name may ever run (task cards on disk are not trusted)",
+    );
+  const allowedTasks = parseTaskIds(opts["--tasks"]);
   const implementers =
     opts["--implementers"] !== undefined
       ? parseImplementers(opts["--implementers"])
-      : discovered.implementers.length
-        ? discovered.implementers
-        : [defaultImplementerId];
+      : [defaultImplementerId];
   const limits = defaultLimits();
   for (const [flag, name] of Object.entries(limitFlags))
     if (opts[flag] !== undefined) limits[name] = parseLimit(name, opts[flag]);
@@ -332,17 +365,10 @@ async function nonInteractiveAnswers(
 }
 const defaultEpoch = () => `setup-${randomBytes(6).toString("hex")}`;
 
-async function writeNew(path: string, text: string) {
-  try {
-    await writeFile(path, text, { flag: "wx", mode: 0o600 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST")
-      throw new Error(
-        `Refusing to overwrite existing file: ${printablePath(path)}`,
-      );
-    throw error;
-  }
-}
+const shellQuote = (value: string) =>
+  /^[A-Za-z0-9_/.,:=@%+-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, `'\\''`)}'`;
 
 export async function runSetup(
   args: string[],
@@ -357,18 +383,33 @@ export async function runSetup(
       );
     if (!deps.tty)
       throw new Error(
-        "setup needs an interactive terminal on stdin and stdout; use `setup --non-interactive true --template NAME` in scripts",
+        "setup needs an interactive terminal on stdin and stdout; use `setup --non-interactive true --template NAME --tasks ID,ID` in scripts",
       );
   }
   const setup = policyOf(deps.policy);
   const reserved = new Set([setup.coordinator, ...setup.reviewers]);
-  const discovered = await discoverTasks(
-    deps.root,
-    deps.policy.tasksPath,
-    reserved,
-  );
   const check = deps.check ?? isUsableExecutable;
+  const safety = deps.safety ?? safetyFor(check);
   const now = deps.now ?? (() => new Date());
+  const epoch = deps.epoch ?? defaultEpoch;
+  const protectedPaths = deps.protectedPaths ?? [];
+  const outPathOf = (out: string) => resolve(deps.requested, out);
+  const refuseRunning = async (what: string) => {
+    const problem = await deps.stopped?.();
+    if (problem)
+      throw new Error(
+        `Refusing ${what}: ${problem}. Stop the supervisor and inspect it first`,
+      );
+  };
+  const rejected: Rejection[] = [];
+  const detection = await detectHarnesses(
+    deps.env.PATH,
+    check,
+    safety,
+    rejected,
+  );
+  const prior = deps.prior ? await deps.prior() : noPrior;
+  const notes: string[] = rejected.map(describeRejection);
 
   let answers: SetupAnswers;
   let template: Template | "custom";
@@ -382,23 +423,40 @@ export async function runSetup(
       throw new Error(
         "--install requires --confirm-stopped true after you have verified the supervisor is stopped",
       );
+    // Refusals first: nothing below may run, let alone write, past one.
+    if (confirmed) await refuseRunning("--confirm-stopped true");
+    if (out !== undefined) await checkOut(outPathOf(out), protectedPaths);
     ({ answers, template } = await nonInteractiveAnswers(
       opts,
       deps,
-      discovered,
+      detection,
+      rejected,
       confirmed,
     ));
+    const plan = planEpochs(laneHarnesses(answers, setup), prior, epoch);
+    if (Object.keys(plan.epochs).length) answers.laneEpochs = plan.epochs;
+    notes.push(...plan.notes);
   } else {
+    const discovered = await discoverTasks(
+      deps.root,
+      deps.policy.tasksPath,
+      reserved,
+    );
     const io = deps.makeIO();
     try {
       const result = await runWizard(io, {
         policy: setup,
-        detection: await detectHarnesses(deps.env.PATH, check),
+        detection,
+        rejected,
+        prior,
         discoveredTasks: discovered.tasks,
         discoveredImplementers: discovered.implementers,
         check,
+        safety,
+        verifyStopped: async () => (await deps.stopped?.()) ?? null,
+        checkOut: (path) => checkOut(outPathOf(path), protectedPaths),
         now,
-        epoch: deps.epoch ?? defaultEpoch,
+        epoch,
         review: (a) => {
           const built = buildConfig(a, setup);
           return `${JSON.stringify(built.config, null, 2)}\n${built.notes.map((n) => `note: ${n}`).join("\n")}`;
@@ -408,12 +466,14 @@ export async function runSetup(
       template = result.template;
       install = result.install;
       out = result.out;
+      notes.push(...result.notes);
     } finally {
       io.close?.();
     }
   }
 
   const built = buildConfig(answers, setup);
+  notes.push(...built.notes);
   // Validate exactly as `configure` will; the stop confirmation is only a
   // placeholder here so every other field is still checked when it is absent.
   const decoded = decodeConfig(
@@ -423,19 +483,41 @@ export async function runSetup(
     },
     { root: deps.root, policy: deps.policy },
   );
-  const problems = await checkGenerated(decoded);
+  const problems = await checkGenerated(decoded, safety);
   const text = `${JSON.stringify(built.config, null, 2)}\n`;
-  const outPath = out === undefined ? null : resolve(deps.requested, out);
-  const notes = [...built.notes];
+  const outPath = out === undefined ? null : outPathOf(out);
+  let written: string | null = null;
+  let installed = false;
   if (problems.length) {
     if (install || outPath)
       notes.push("nothing was written because verification found problems");
   } else {
-    if (outPath) await writeNew(outPath, text);
-    if (install) await deps.install(built.config);
+    // Prepare the file first (all refusals, content fsynced under a temporary
+    // name) but publish it only after the install succeeded: a refused install
+    // must not leave behind a file that carries a stop confirmation.
+    const plan = outPath
+      ? await prepareOut(outPath, text, protectedPaths)
+      : null;
+    try {
+      if (install) {
+        await deps.install(built.config);
+        installed = true;
+      }
+      if (plan) {
+        try {
+          await plan.commit();
+        } catch (error) {
+          throw new Error(
+            `${installed ? "The configuration WAS installed, but " : ""}--out was not written: ${error instanceof Error ? error.message : "write failed"}`,
+          );
+        }
+        written = plan.path;
+      }
+    } catch (error) {
+      await plan?.discard();
+      throw error;
+    }
   }
-  const written = problems.length ? null : outPath;
-  const installed = install && !problems.length;
   const next: string[] = [];
   if (installed) next.push("crewplane doctor");
   else {
@@ -444,7 +526,7 @@ export async function runSetup(
         "verify the supervisor is stopped, then record confirmedStoppedAt",
       );
     next.push(
-      `crewplane configure --file ${written ?? "PATH"}`,
+      `crewplane configure --file ${written ? shellQuote(written) : "PATH"}`,
       "crewplane doctor",
     );
   }
@@ -454,7 +536,7 @@ export async function runSetup(
     template,
     config: built.config,
     confirmedStopped: answers.confirmedStoppedAt !== undefined,
-    written: written === null ? null : written,
+    written,
     installed,
     problems,
     notes,

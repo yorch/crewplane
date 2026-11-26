@@ -6,6 +6,7 @@ import { instructionFileProblem } from "../engine/harness.ts";
 import { validateConfig } from "../engine/supervisor.ts";
 import { acquire } from "../engine/watch.ts";
 import { publishJson } from "../io.ts";
+import { isLive, supervisorLiveness } from "../migrate.ts";
 import type { ProjectPolicy } from "../project.ts";
 
 export interface InstallTarget {
@@ -47,6 +48,7 @@ export const decodeConfig = (
 export async function installConfig(
   value: Record<string, unknown>,
   target: InstallTarget,
+  options: { requireStopped?: boolean } = {},
 ): Promise<Config> {
   const config = decodeConfig(value, target);
   for (const [laneId, lane] of Object.entries(config.lanes)) {
@@ -64,11 +66,37 @@ export async function installConfig(
       throw new Error(
         "Stop and inspect the existing supervisor before replacing configuration",
       );
+    // `setup --install` additionally refuses on supervisor liveness evidence
+    // (the same oracle `pin` uses); `configure` keeps its recorded-state check.
+    // Our own lock lease is not evidence of a supervisor.
+    if (options.requireStopped) {
+      const live = supervisorLiveness(target.directory, { skipLease: true });
+      if (isLive(live))
+        throw new Error(
+          `Stop and inspect the existing supervisor before replacing configuration (${[live.credible, live.heartbeat, live.children].filter(Boolean).join("; ")})`,
+        );
+    }
     await publishJson(join(target.directory, "config.json"), config);
   } finally {
     await release();
   }
   return config;
+}
+
+/**
+ * Why the stop confirmation cannot be recorded, or null when nothing says a
+ * supervisor is running. Read-only; uses the recorded `running` flag and the
+ * shared liveness oracle exactly as `pin` does.
+ */
+export async function stoppedProblem(
+  directory: string,
+): Promise<string | null> {
+  const state = await readState(join(directory, "state.json"));
+  if (state?.running) return "the control state says a supervisor is running";
+  const live = supervisorLiveness(directory);
+  if (isLive(live))
+    return `a supervisor appears to be live (${[live.credible, live.heartbeat, live.children].filter(Boolean).join("; ")})`;
+  return null;
 }
 
 async function readState(path: string): Promise<{ running?: boolean } | null> {

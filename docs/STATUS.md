@@ -29,21 +29,24 @@ The supervisor control plane moved from `<store>/supervisor` (inside roots harne
 
 `crewplane setup` (wizard and non-interactive flags) is implemented in `src/setup/`. Its behavior is covered by repository tests:
 
-- `src/setup/templates.test.ts`: every template's output passes the same validator `configure` uses, plus Claude isolation fields, mixed and Pi reviewer mappings, and negative cases (bypass modes, missing models, Pi as coordinator or implementer, bounds, duplicate IDs).
-- `src/setup/detect.test.ts`: PATH detection on fake binaries, with PATH order, relative entries and dangling symlinks handled, and no binary executed.
-- `src/setup/wizard.test.ts` and `src/setup/command.test.ts`: the wizard driven by scripted answers, and the non-interactive flags, `--out`, `--install` and `--confirm-stopped` rules.
-- `tests/setup-cli.test.ts`, run against source and the compiled executable: a generated Codex configuration installs and passes `doctor` with the fake harness never run; a bare run without a terminal fails; `--out` is 0600 and refuses overwrite; `--install` refuses while state says a supervisor runs; headless agents are refused.
+- `src/setup/templates.test.ts`: every template's output passes the same validator `configure` uses, an exact hand-written expected Claude configuration, Claude isolation fields, mixed and Pi reviewer mappings, Pi model validation through the engine, and negative cases (bypass modes, missing models, Pi as coordinator or implementer, bounds, duplicate IDs).
+- `src/setup/detect.test.ts`: PATH detection on fake binaries (order, relative entries, dangling symlinks, no binary executed) and the binary safety policy (group/world-writable files, world-writable directories without the sticky bit, symlinks judged by target and by named directory, rejection listing).
+- `src/setup/epochs.test.ts`: read-only loading of the installed config and state, and fresh-`sessionEpoch` planning checked against the engine's own `assertSwitch` and `validateConfig` for every harness.
+- `src/setup/install.test.ts`: setup's install refuses on liveness evidence inside the lock while `configure` is unchanged, and `stoppedProblem`.
+- `src/setup/terminal.test.ts`: the readline adapter `terminalIO` with injected streams (answers, end of input, Ctrl+C, close).
+- `src/setup/wizard.test.ts` and `src/setup/command.test.ts`: the wizard driven by scripted answers (Pi only for reviewers and rejected for the coordinator and implementers, Pi model re-prompt, printable binary defaults, refused stop confirmation, out re-prompt), and the non-interactive rules: required `--tasks`, no card-derived authorization, `--out` refusals (directory, missing parent, control or store directory, tracked path unless git-ignored, race on publish, temp cleanup, shell quoting), install-before-file ordering and retry, `--confirm-stopped` refusal, binary safety, harness-switch epochs, the exit-2 path reached by a binary that becomes writable during the wizard review, and sentinel environment variables never appearing in reports or files.
+- `tests/setup-cli.test.ts`, run against source and the compiled executable: a generated Codex configuration installs and passes `doctor` with the fake harness never run and a card on disk ignored; a missing `--tasks` fails; a bare run without a terminal fails; `--out` is 0600 and refuses overwrite, directories, missing parents, the control and store directories and tracked paths; a refused install leaves no file and a retry works; `--confirm-stopped` is refused while state says running or a recorded child is alive; an unsafe explicit binary is refused and sentinel secrets never reach stdout, stderr, the file or the installed config; a rerun with another harness installs a fresh `sessionEpoch`; headless agents are refused.
+- `tests/binary.ts` repeats the generate, install and `doctor` flow, and the missing `--tasks` refusal, with the compiled executable and no access to source.
 - `tests/docs.test.ts` and `src/help.test.ts`: documented commands and help flags match the accepted grammar.
-
-On 2026-11-26 the five setup test files (59 tests), docs and help tests, and `bun run check` passed on this tree. The compiled binary used by the end-to-end test was built after the last source change.
 
 Limits:
 
-- The interactive wizard has not been exercised on a real terminal. Tests drive it through scripted input. The readline adapter (`terminalIO` in `src/setup/command.ts`) has no test at all.
+- The interactive wizard has not been exercised on a real terminal or a pty. Tests drive it through scripted input, and `terminalIO` through injected streams, not a real tty. There is no CLI-level test of exit `2`; it is tested through `runSetup` (the exit code mapping in `src/cli.ts` is a one-line `process.exitCode = 2`).
 - Each template uses one harness per role group: coordinator, implementers and reviewers. The wizard's `custom` choice picks one harness per group, not per lane.
-- `confirmedStoppedAt` is an operator assertion. Setup does not verify that harnesses or supervisors are stopped; `--install` only refuses when the control state records a running supervisor.
-- Binaries are checked as absolute, executable regular files. Their versions, credentials and provider behavior are not checked, and no live harness run is claimed.
-- No test triggers exit `2` (verification problems) through flags, because setup checks binaries with the same probe it accepted them with.
+- `confirmedStoppedAt` is an operator assertion. Setup refuses to record it when the control state says running or the shared liveness oracle reports a live supervisor (and `--install` rechecks under the install lock), but it cannot prove that unrelated harness processes are stopped; liveness evidence can be stale or missing.
+- Binaries are checked as absolute, executable regular files that other users cannot replace (see docs/USAGE.md "Binary safety checks"; `doctor` does not apply this policy). Versions, credentials and provider behavior are not checked, there is a window between checking and use, and no live harness run is claimed. The ownership rule only compares against the current user and root.
+- `--out` is atomic and never overwrites, but it relies on hard links in the target directory. On a filesystem without them the write is refused. If an install succeeds and the later file publish fails, the configuration stays installed and the error says so.
+- Harness-switch epochs rely on the installed config and the latest record per lane; an installed config that was hand-edited to disagree with its records is handled by taking the record first. The supervisor can still refuse a switch when the lane is not drained.
 
 ## Remaining boundaries
 

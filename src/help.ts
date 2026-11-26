@@ -13,7 +13,7 @@ Usage: crewplane [--project PATH] COMMAND
   setup --non-interactive true --template codex|claude|opencode|mixed
         [--binary PATH] [--claude-binary PATH] [--opencode-binary PATH] [--pi-binary PATH]
         [--model ID] [--reviewer-model ID] [--reviewer-harness opencode|pi] [--pi-model PROVIDER/MODEL]
-        [--tasks ID,ID] [--implementers ID,ID] [--confirm-stopped true]
+        --tasks ID,ID [--implementers ID,ID] [--confirm-stopped true]
         [--claude-permission-mode MODE] [--claude-mcp strict|inherit]
         [--claude-setting-sources user,project,local] [--max-cost-usd N]
         [--max-parallel N] [--interval-seconds N] [--max-run-minutes N] [--max-runs-per-hour N]

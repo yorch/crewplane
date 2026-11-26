@@ -1,6 +1,8 @@
 import { delimiter, isAbsolute, join, normalize } from "node:path";
 import { probeBinary } from "../doctor.ts";
 import { harnesses as allHarnesses, type Harness } from "../engine/harness.ts";
+import { printablePath } from "../project.ts";
+import { binarySafetyProblem, noSafety, type SafetyCheck } from "./safety.ts";
 
 /**
  * Reports whether `path` is an absolute regular file the current user may
@@ -9,6 +11,21 @@ import { harnesses as allHarnesses, type Harness } from "../engine/harness.ts";
 export type ExecutableCheck = (path: string) => Promise<boolean>;
 export const isUsableExecutable: ExecutableCheck = async (path) =>
   (await probeBinary(path, "harness")).code === undefined;
+
+/**
+ * The safety probe that goes with a check: the real one with the real check;
+ * an injected check stands in for the file system, so it gets none.
+ */
+export const safetyFor = (check: ExecutableCheck): SafetyCheck =>
+  check === isUsableExecutable ? binarySafetyProblem : noSafety;
+
+/** A PATH candidate that exists as an executable but was refused as unsafe. */
+export interface Rejection {
+  path: string;
+  reason: string;
+}
+export const describeRejection = (rejection: Rejection) =>
+  `rejected ${printablePath(rejection.path)}: ${rejection.reason}`;
 
 /** Executable file names searched for each harness. */
 export const harnessCommands: Record<Harness, string> = {
@@ -29,12 +46,17 @@ export async function findOnPath(
   name: string,
   pathVariable: string | undefined,
   check: ExecutableCheck = isUsableExecutable,
+  safety: SafetyCheck = safetyFor(check),
+  rejected: Rejection[] = [],
 ): Promise<string | null> {
   if (!pathVariable || /[\\/]/.test(name)) return null;
   for (const entry of pathVariable.split(delimiter)) {
     if (!entry || !isAbsolute(entry)) continue;
     const candidate = join(normalize(entry), name);
-    if (await check(candidate)) return candidate;
+    if (!(await check(candidate))) continue;
+    const reason = await safety(candidate);
+    if (reason === null) return candidate;
+    rejected.push({ path: candidate, reason });
   }
   return null;
 }
@@ -44,6 +66,8 @@ export type Detection = Record<Harness, string | null>;
 export async function detectHarnesses(
   pathVariable: string | undefined,
   check: ExecutableCheck = isUsableExecutable,
+  safety: SafetyCheck = safetyFor(check),
+  rejected: Rejection[] = [],
 ): Promise<Detection> {
   const found = {} as Detection;
   for (const harness of allHarnesses)
@@ -51,6 +75,8 @@ export async function detectHarnesses(
       harnessCommands[harness],
       pathVariable,
       check,
+      safety,
+      rejected,
     );
   return found;
 }
@@ -63,6 +89,7 @@ export async function acceptBinary(
   path: string,
   harness: Harness,
   check: ExecutableCheck = isUsableExecutable,
+  safety: SafetyCheck = safetyFor(check),
 ): Promise<string> {
   if (!isAbsolute(path))
     throw new Error(`${harness} binary path must be absolute`);
@@ -72,6 +99,11 @@ export async function acceptBinary(
   if (!(await check(normalized)))
     throw new Error(
       `${harness} binary is not an executable regular file: ${normalized}`,
+    );
+  const reason = await safety(normalized);
+  if (reason !== null)
+    throw new Error(
+      `${harness} binary refused: ${reason}: ${printablePath(normalized)}`,
     );
   return normalized;
 }

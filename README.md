@@ -19,7 +19,7 @@ bun run verify
 
 ## Use in a project
 
-Recommended: generate the runtime configuration with the guided setup, which needs a terminal. The wizard offers to install only after you confirm the supervisor is stopped. Otherwise it can write the JSON to a file, which you install later with `configure --file` once the stop is recorded.
+Recommended: generate the runtime configuration with the guided setup, which needs a terminal. The wizard offers to install only after you confirm the supervisor is stopped, and setup refuses that confirmation while the control state or liveness evidence says a supervisor is running. Setup records only executables that other users cannot replace. Otherwise it can write the JSON to a file, which you install later with `configure --file` once the stop is recorded.
 
 ```sh
 crewplane --project /path/to/repo init
@@ -29,7 +29,7 @@ crewplane task list
 crewplane start
 ```
 
-Scripts can run `crewplane setup --non-interactive true --template codex|claude|opencode|mixed` with flags instead; see [guided setup](docs/USAGE.md#guided-setup). Writing the runtime JSON by hand remains supported:
+Scripts can run `crewplane setup --non-interactive true --template codex|claude|opencode|mixed --tasks ID,ID` with flags instead (`--tasks` is required; task cards on disk never authorize tasks); see [guided setup](docs/USAGE.md#guided-setup). Writing the runtime JSON by hand remains supported:
 
 ```sh
 crewplane configure --file /private/path/runtime.json

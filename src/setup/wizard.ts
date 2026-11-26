@@ -3,10 +3,15 @@ import { printablePath } from "../project.ts";
 import {
   acceptBinary,
   type Detection,
+  describeRejection,
   type ExecutableCheck,
+  type Rejection,
 } from "./detect.ts";
+import { noPrior, type Prior, planEpochs } from "./epochs.ts";
+import type { SafetyCheck } from "./safety.ts";
 import {
   acceptModel,
+  acceptPiModel,
   type ClaudeSettings,
   defaultClaudeSettings,
   defaultImplementerId,
@@ -14,12 +19,12 @@ import {
   harnessesUsed,
   isTemplate,
   type LimitName,
+  laneHarnesses,
   limitBounds,
   parseCost,
   parseImplementers,
   parseLimit,
   parseMcp,
-  parsePiModel,
   parseSettingSources,
   parseTaskIds,
   type RoleHarnesses,
@@ -56,6 +61,16 @@ export interface WizardContext {
   discoveredTasks: string[];
   discoveredImplementers: string[];
   check: ExecutableCheck;
+  /** Binary safety probe applied to every accepted executable. */
+  safety: SafetyCheck;
+  /** PATH candidates refused as unsafe, listed with their reason. */
+  rejected?: Rejection[];
+  /** Installed configuration and records, read-only, for harness switches. */
+  prior?: Prior;
+  /** Why a stop confirmation cannot be recorded now, or null. */
+  verifyStopped?: () => Promise<string | null>;
+  /** Throws a clear error when the `--out` path would be refused. */
+  checkOut?: (path: string) => Promise<void>;
   now: () => Date;
   /** Fresh Pi session epoch. */
   epoch: () => string;
@@ -68,6 +83,8 @@ export interface WizardResult {
   template: Template | "custom";
   install: boolean;
   out?: string;
+  /** Harness-switch epoch notes to surface in the report. */
+  notes: string[];
 }
 
 async function prompt<T>(
@@ -75,10 +92,12 @@ async function prompt<T>(
   question: string,
   parse: (text: string) => T | Promise<T>,
   fallback?: string,
+  /** What to show for the default when it must not be echoed verbatim. */
+  display: (value: string) => string = (value) => value,
 ): Promise<T> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const raw = await io.ask(
-      `${question}${fallback !== undefined && fallback !== "" ? ` [${fallback}]` : ""}: `,
+      `${question}${fallback !== undefined && fallback !== "" ? ` [${display(fallback)}]` : ""}: `,
     );
     if (raw === null) throw new SetupAborted();
     const text =
@@ -138,6 +157,8 @@ export async function runWizard(
     io.write(
       `  ${harness}: ${detection[harness] ? printablePath(detection[harness]) : "not found on PATH"}\n`,
     );
+  for (const rejection of context.rejected ?? [])
+    io.write(`  ${describeRejection(rejection)}\n`);
   io.write(
     `\nProject lanes: coordinator ${policy.coordinator}; reviewers ${policy.reviewers.join(", ") || "(none)"}\n\n`,
   );
@@ -184,8 +205,9 @@ export async function runWizard(
     binaries[harness] = await prompt(
       io,
       `Absolute path to the ${harness} executable`,
-      (text) => acceptBinary(text, harness, context.check),
+      (text) => acceptBinary(text, harness, context.check, context.safety),
       found ?? undefined,
+      printablePath,
     );
   }
 
@@ -197,7 +219,7 @@ export async function runWizard(
       const text = await prompt(
         io,
         "Pi model as PROVIDER/MODEL (blank for the harness default)",
-        (value) => (value === "" ? null : parsePiModel(value)),
+        (value) => (value === "" ? null : acceptPiModel(value)),
         "",
       );
       if (text) piModel = text;
@@ -306,6 +328,15 @@ export async function runWizard(
     "no",
   );
 
+  if (stopped) {
+    // Fail closed: never stamp a confirmation the control state contradicts.
+    const problem = await context.verifyStopped?.();
+    if (problem)
+      throw new SetupError(
+        `Refusing to record the stop confirmation: ${problem}. Stop the supervisor, then rerun setup`,
+      );
+  }
+
   const answers: SetupAnswers = {
     roles,
     binaries,
@@ -318,6 +349,14 @@ export async function runWizard(
     ...(stopped ? { confirmedStoppedAt: context.now().toISOString() } : {}),
     ...(roles.reviewer === "pi" ? { sessionEpoch: context.epoch() } : {}),
   };
+
+  const plan = planEpochs(
+    laneHarnesses(answers, policy),
+    context.prior ?? noPrior,
+    context.epoch,
+  );
+  if (Object.keys(plan.epochs).length) answers.laneEpochs = plan.epochs;
+  for (const note of plan.notes) io.write(`note: ${note}\n`);
 
   io.write(`\nReview:\n${context.review(answers)}\n`);
   if (!(await prompt(io, "Looks right? (yes/no)", yesNo, "no")))
@@ -338,7 +377,10 @@ export async function runWizard(
   const out = await prompt(
     io,
     "Also write the JSON to a new file? Path, or blank to skip",
-    (text) => text,
+    async (text) => {
+      if (text) await context.checkOut?.(text);
+      return text;
+    },
     "",
   );
   return {
@@ -346,5 +388,6 @@ export async function runWizard(
     template,
     install,
     ...(out ? { out } : {}),
+    notes: plan.notes,
   };
 }

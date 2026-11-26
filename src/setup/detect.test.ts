@@ -10,7 +10,14 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { acceptBinary, detectHarnesses, findOnPath } from "./detect.ts";
+import {
+  acceptBinary,
+  describeRejection,
+  detectHarnesses,
+  findOnPath,
+  type Rejection,
+} from "./detect.ts";
+import { binarySafetyProblem } from "./safety.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -95,4 +102,53 @@ it("uses an injected checker instead of the file system", async () => {
   });
   expect(found).toBe("/two/codex");
   expect(seen).toEqual(["/one/codex", "/two/codex"]);
+});
+
+it("skips group/world-writable files and unsafe directories, listing each reason", async () => {
+  const good = temp(),
+    loose = temp(),
+    wide = temp();
+  fake(good, "codex");
+  fake(loose, "codex", 0o775);
+  fake(wide, "codex");
+  chmodSync(wide, 0o777);
+  const rejected: Rejection[] = [];
+  const path = [loose, wide, good].join(delimiter);
+  expect(await findOnPath("codex", path, undefined, undefined, rejected)).toBe(
+    join(good, "codex"),
+  );
+  expect(rejected).toEqual([
+    { path: join(loose, "codex"), reason: "it is group- or world-writable" },
+    {
+      path: join(wide, "codex"),
+      reason: "its directory is world-writable without the sticky bit",
+    },
+  ]);
+  expect(describeRejection(rejected[0] as Rejection)).toBe(
+    `rejected ${join(loose, "codex")}: it is group- or world-writable`,
+  );
+  // Sticky world-writable directories (/tmp style) are protected.
+  chmodSync(wide, 0o1777);
+  expect(await binarySafetyProblem(join(wide, "codex"))).toBeNull();
+  // acceptBinary applies the same policy to explicit paths.
+  await expect(acceptBinary(join(loose, "codex"), "codex")).rejects.toThrow(
+    /codex binary refused: it is group- or world-writable/,
+  );
+});
+
+it("judges a symlink by its resolved target and the directory it was named in", async () => {
+  const home = temp(),
+    wide = temp(),
+    safe = temp();
+  fake(safe, "real");
+  chmodSync(wide, 0o777);
+  symlinkSync(join(safe, "real"), join(wide, "pi"));
+  expect(await binarySafetyProblem(join(wide, "pi"))).toMatch(
+    /world-writable without the sticky bit/,
+  );
+  symlinkSync(join(safe, "real"), join(home, "pi"));
+  expect(await binarySafetyProblem(join(home, "pi"))).toBeNull();
+  expect(await binarySafetyProblem(join(home, "missing"))).toBe(
+    "it cannot be inspected",
+  );
 });

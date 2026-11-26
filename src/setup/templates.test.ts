@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { validateConfig } from "../engine/supervisor.ts";
 import { decodeConfig } from "./install.ts";
 import {
   acceptModel,
+  acceptPiModel,
   buildConfig,
   defaultClaudeSettings,
   defaultLimits,
@@ -223,14 +223,54 @@ describe("negative cases", () => {
   });
 });
 
-it("the engine decoder is the same one used by the tests", () => {
-  const { config } = buildConfig(answers("codex"), policy);
-  expect(() =>
-    validateConfig({
-      ...config,
-      root: process.cwd(),
-      coordinator: "captain",
-      reviewers: ["inspector", "visual"],
-    } as never),
-  ).not.toThrow();
+it("a claude setup is exactly this hand-written runtime file", () => {
+  // Expected value authored from the documented contract, not from the code
+  // under test: roles from policy, bounded limits, claude isolation fields.
+  const { config } = buildConfig(
+    answers("claude", {
+      implementers: ["dev"],
+      allowedTasks: ["T-1"],
+      claude: {
+        implementerMode: "auto",
+        mcp: "strict",
+        settingSources: ["project"],
+        maxCostUsdPerRun: 2,
+      },
+    }),
+    policy,
+  );
+  const claudeLane = (mode: string, enabled = true) => ({
+    enabled,
+    harness: "claude",
+    model: "opus",
+    claudePermissionMode: mode,
+    claudeMcp: "strict",
+    claudeSettingSources: ["project"],
+    maxCostUsdPerRun: 2,
+  });
+  expect(config).toEqual({
+    version: 1,
+    binary: exe,
+    binaries: { claude: exe },
+    allowedTasks: ["T-1"],
+    maxParallel: 2,
+    intervalSeconds: 10,
+    maxRunMinutes: 25,
+    maxRunsPerHour: 20,
+    confirmedStoppedAt: "2026-11-08T00:00:00.000Z",
+    lanes: {
+      captain: claudeLane("plan"),
+      dev: claudeLane("auto"),
+      inspector: claudeLane("plan"),
+      visual: claudeLane("plan", false),
+    },
+  });
+  // And the engine accepts it unchanged.
+  expect(() => decode(config)).not.toThrow();
+});
+
+it("validates a Pi model through the engine and rejects what it would reject", () => {
+  expect(acceptPiModel("prov/m-1")).toEqual({ provider: "prov", id: "m-1" });
+  for (const bad of ["nomodel", "/m", "p/", "p/has space", "p/$(x)"])
+    expect(() => acceptPiModel(bad), bad).toThrow();
 });

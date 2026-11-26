@@ -191,8 +191,32 @@ try {
   const configFile = join(temp, "runtime.json");
   writeFileSync(configFile, JSON.stringify(config));
   // Guided setup: generate and install a codex configuration, then diagnose it.
-  // Lane names come from policy (captain, inspector) and task-card owners
-  // (builder, designer); the fixture is the codex binary and is never run here.
+  // Lane names come from policy (captain, inspector) and --implementers; the
+  // allowed tasks come only from --tasks (cards on disk are never trusted). The
+  // fixture is the codex binary and is never run here.
+  const noTasks = spawnSync(
+    bin,
+    [
+      "--project",
+      root,
+      "setup",
+      "--non-interactive",
+      "true",
+      "--template",
+      "codex",
+      "--binary",
+      fixture,
+    ],
+    {
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15000,
+    },
+  );
+  assert.equal(noTasks.status, 1);
+  assert.equal(noTasks.stdout, "");
+  assert.match(noTasks.stderr, /requires --tasks/);
   const generated = json(
     "setup",
     "--non-interactive",
@@ -201,6 +225,10 @@ try {
     "codex",
     "--binary",
     fixture,
+    "--tasks",
+    "CP-101,CP-102",
+    "--implementers",
+    "builder,designer",
     "--confirm-stopped",
     "true",
     "--install",
