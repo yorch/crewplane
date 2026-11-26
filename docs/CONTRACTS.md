@@ -85,6 +85,8 @@ or `not-configured`; `runtime` is `compiled` for a standalone executable and
 mismatches, unsafe stores and a non-repository or missing `git` are refused
 before `doctor` runs, as for any project command (exit 1, nothing on stdout).
 
+**Setup.** `setup` prints one report object on stdout on success: `version` (1), `mode` (`interactive` or `non-interactive`), `template` (`codex`, `claude`, `opencode`, `mixed`, or `custom` in the wizard), `config` (the runtime JSON `configure --file` accepts, without `root` or roles), `confirmedStopped` (boolean), `written` (absolute `--out` path or `null`), `installed` (boolean), `problems` (`{code, lane?, message}` entries, empty when valid), `notes` (strings) and `next` (suggested commands). Prompts, echoes, notes and problem lines go to stderr. Exit `0` is a valid report with no problems; `2` prints the report with `problems` and writes or installs nothing; `1` prints nothing on stdout. Interactive mode requires stdin and stdout to be terminals, so its report is never redirected. Full flag and exit-code rules are in docs/USAGE.md "Guided setup".
+
 **Errors.** Errors go to stderr, never stdout. The first line is
 `crewplane: MESSAGE`; continuation lines are indented and carry recovery
 context. The release-pin message stays one line because the supervisor persists

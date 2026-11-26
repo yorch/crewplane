@@ -19,12 +19,20 @@ bun run verify
 
 ## Use in a project
 
+Recommended: generate the runtime configuration with the guided setup, which needs a terminal. The wizard offers to install only after you confirm the supervisor is stopped. Otherwise it can write the JSON to a file, which you install later with `configure --file` once the stop is recorded.
+
 ```sh
 crewplane --project /path/to/repo init
-crewplane configure --file /private/path/runtime.json
+crewplane --project /path/to/repo setup
 crewplane doctor
 crewplane task list
 crewplane start
+```
+
+Scripts can run `crewplane setup --non-interactive true --template codex|claude|opencode|mixed` with flags instead; see [guided setup](docs/USAGE.md#guided-setup). Writing the runtime JSON by hand remains supported:
+
+```sh
+crewplane configure --file /private/path/runtime.json
 ```
 
 Configure committed task cards and explicitly approved assignments before execution. `start` runs in the foreground. Start observation independently:
