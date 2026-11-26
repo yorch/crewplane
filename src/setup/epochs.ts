@@ -111,6 +111,16 @@ export function planEpochs(
         );
       continue;
     }
+    const installed = prior.config[id];
+    if (
+      record &&
+      installed?.harness === harness &&
+      installed.sessionEpoch &&
+      installed.sessionEpoch !== record.sessionEpoch
+    )
+      plan.notes.push(
+        `lane ${id}: the installed configuration's sessionEpoch (${installed.sessionEpoch}) was discarded because the latest state record ${record.sessionEpoch ? `has sessionEpoch ${record.sessionEpoch}` : "has none"}; \`serve\` will resume the recorded session`,
+      );
     if (reference?.sessionEpoch) plan.epochs[id] = reference.sessionEpoch;
   }
   return plan;

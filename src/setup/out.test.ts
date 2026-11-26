@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -103,12 +104,17 @@ it("never runs a repository-configured core.fsmonitor", async () => {
   expect(existsSync(marker)).toBe(false);
 });
 
-it("refuses when git times out, without leaving it running", async () => {
+it("refuses when git times out and kills git itself (helper processes git spawns are not tracked)", async () => {
   const dir = base();
   const tools = join(dir, "tools");
   mkdirSync(tools);
   const marker = join(dir, "git-started");
-  writeFileSync(join(tools, "git"), `#!/bin/sh\ntouch '${marker}'\nsleep 20\n`);
+  // exec: the process that records its pid is the one that sleeps, so the kill
+  // of the direct child is observable.
+  writeFileSync(
+    join(tools, "git"),
+    `#!/bin/sh\necho $$ > '${marker}'\nexec sleep 20\n`,
+  );
   chmodSync(join(tools, "git"), 0o755);
   const saved = process.env.PATH;
   process.env.PATH = `${tools}:${saved}`;
@@ -121,6 +127,19 @@ it("refuses when git times out, without leaving it running", async () => {
     process.env.PATH = saved;
   }
   expect(existsSync(marker)).toBe(true);
+  const pid = Number(readFileSync(marker, "utf8").trim());
+  expect(pid).toBeGreaterThan(1);
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (let i = 0; i < 50 && alive(); i++)
+    await new Promise((r) => setTimeout(r, 20));
+  expect(alive()).toBe(false);
 });
 
 const childScript = (dir: string, tail: string) => {

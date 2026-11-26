@@ -83,8 +83,6 @@ export interface WizardResult {
   template: Template | "custom";
   install: boolean;
   out?: string;
-  /** Harness-switch epoch notes to surface in the report. */
-  notes: string[];
 }
 
 async function prompt<T>(
@@ -388,6 +386,5 @@ export async function runWizard(
     template,
     install,
     ...(out ? { out } : {}),
-    notes: plan.notes,
   };
 }

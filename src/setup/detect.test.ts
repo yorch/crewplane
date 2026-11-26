@@ -121,7 +121,7 @@ it("skips group/world-writable files and unsafe directories, listing each reason
     { path: join(loose, "codex"), reason: "it is group- or world-writable" },
     {
       path: join(wide, "codex"),
-      reason: "its directory is world-writable without the sticky bit",
+      reason: `a directory on its path (${wide}) is world-writable without the sticky bit`,
     },
   ]);
   expect(describeRejection(rejected[0] as Rejection)).toBe(

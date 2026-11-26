@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
-import { binarySafetyProblem } from "./safety.ts";
+import { binarySafetyProblem, type Identity } from "./safety.ts";
 
 const scratch: string[] = [];
 const markers: string[] = [];
@@ -83,7 +83,9 @@ it.skipIf(!canChown)(
     const path = executable(dir);
     chownSync(dir, 0, other);
     chmodSync(dir, 0o2775);
-    expect(await binarySafetyProblem(path)).toMatch(/group-writable/);
+    expect(await binarySafetyProblem(path)).toMatch(
+      /group-writable by a group the current user is not in/,
+    );
   },
 );
 
@@ -121,7 +123,7 @@ it("refuses a world-writable ancestor of the binary's directory", async () => {
   const path = executable(join(wide, "inner", "bin"));
   chmodSync(wide, 0o777);
   expect(await binarySafetyProblem(path)).toMatch(
-    /parent directory .* is world-writable without the sticky bit/,
+    /directory on its path .* is world-writable without the sticky bit/,
   );
   // A sticky ancestor (like /tmp) is allowed.
   chmodSync(wide, 0o1777);
@@ -136,7 +138,7 @@ it.skipIf(!canChown)(
     const path = executable(join(outer, "inner"));
     chownSync(outer, other, other);
     expect(await binarySafetyProblem(path)).toMatch(
-      /parent directory .* is owned by another user/,
+      /directory on its path .* is owned by another user/,
     );
     chownSync(outer, 0, 0);
     const link = join(root, "link");
@@ -146,3 +148,133 @@ it.skipIf(!canChown)(
     expect(await binarySafetyProblem(link)).toBe("it is owned by another user");
   },
 );
+
+// Deterministic identities: no wrapper faking getuid/getgid is needed.
+const asUser = (uid: number, gid: number, ...groups: number[]): Identity => ({
+  uid,
+  gid,
+  groups: [gid, ...groups],
+});
+const root = asUser(0, 0);
+
+it.skipIf(!canChown)(
+  "refuses a foreign symlinked directory in the path as named (sticky tmp/evil -> bin)",
+  async () => {
+    const r = base();
+    const path = executable(join(r, "user-bin"));
+    const tmp = join(r, "tmp");
+    mkdirSync(tmp);
+    chmodSync(tmp, 0o1777);
+    const evil = join(tmp, "evil");
+    symlinkSync(join(r, "user-bin"), evil);
+    lchownSync(evil, 2000, 2000);
+    expect(path).toBeTruthy();
+    expect(await binarySafetyProblem(join(evil, "codex"), root)).toBe(
+      "it is owned by another user",
+    );
+  },
+);
+
+it.skipIf(!canChown)(
+  "refuses a foreign directory holding a symlink to the user's bin (foreign/bin -> bin)",
+  async () => {
+    const r = base();
+    executable(join(r, "real"));
+    const foreign = join(r, "foreign");
+    mkdirSync(foreign);
+    chownSync(foreign, 2000, 2000);
+    const bin = join(foreign, "bin");
+    symlinkSync(join(r, "real"), bin);
+    lchownSync(bin, 2000, 2000);
+    expect(await binarySafetyProblem(join(bin, "codex"), root)).toMatch(
+      /owned by another user/,
+    );
+    // Even with an own-owned link, the foreign holding directory is refused.
+    lchownSync(bin, 0, 0);
+    expect(await binarySafetyProblem(join(bin, "codex"), root)).toMatch(
+      /directory on its path .* is owned by another user/,
+    );
+  },
+);
+
+it.skipIf(!canChown)(
+  "inspects directories reached through a trusted symlink target and its ancestors",
+  async () => {
+    const r = base();
+    const hole = join(r, "hole");
+    const path = executable(join(hole, "inner"));
+    chmodSync(hole, 0o777);
+    const link = join(r, "alias");
+    symlinkSync(join(hole, "inner"), link);
+    expect(await binarySafetyProblem(join(link, "codex"), root)).toMatch(
+      /world-writable without the sticky bit/,
+    );
+    expect(path).toBeTruthy();
+  },
+);
+
+it("refuses a symlink loop without hanging", async () => {
+  const r = base();
+  symlinkSync(join(r, "b"), join(r, "a"));
+  symlinkSync(join(r, "a"), join(r, "b"));
+  expect(await binarySafetyProblem(join(r, "a", "codex"), root)).toMatch(
+    /too long or loops/,
+  );
+});
+
+it("follows .. the way the kernel does (through a symlinked directory)", async () => {
+  const r = base();
+  const real = join(r, "real");
+  mkdirSync(join(real, "deep"), { recursive: true });
+  const path = executable(join(real, "bin"));
+  symlinkSync(join(real, "deep"), join(r, "to-deep"));
+  // The link's target to-deep/../bin/codex is real/bin/codex, not r/bin/codex.
+  symlinkSync("to-deep/../bin/codex", join(r, "lnk"));
+  expect(await binarySafetyProblem(join(r, "lnk"), root)).toBeNull();
+  chmodSync(real, 0o777);
+  expect(await binarySafetyProblem(join(r, "lnk"), root)).toMatch(
+    /world-writable/,
+  );
+  expect(path).toBeTruthy();
+});
+
+it.skipIf(!canChown)(
+  "group-writable user:admin 775 is accepted only when the user is in admin (Homebrew)",
+  async () => {
+    const dir = join(base(), "homebrew-bin");
+    const path = executable(dir);
+    chownSync(dir, 0, 80);
+    chmodSync(dir, 0o775);
+    expect(await binarySafetyProblem(path, asUser(501, 20, 20, 80))).toBeNull();
+    expect(await binarySafetyProblem(path, asUser(501, 20, 20))).toMatch(
+      /group-writable by a group the current user is not in/,
+    );
+  },
+);
+
+it.skipIf(!canChown)(
+  "group-writable root:staff 2775 is accepted only by membership, as a directory and as an ancestor",
+  async () => {
+    const outer = join(base(), "local");
+    const path = executable(join(outer, "bin"));
+    chownSync(outer, 0, 50);
+    chmodSync(outer, 0o2775);
+    expect(await binarySafetyProblem(path, asUser(1000, 1000, 50))).toBeNull();
+    expect(await binarySafetyProblem(path, asUser(1000, 1000))).toMatch(
+      /directory on its path .* group-writable by a group the current user is not in/,
+    );
+    const direct = join(base(), "usr-local-bin");
+    const file = executable(direct);
+    chownSync(direct, 0, 50);
+    chmodSync(direct, 0o2775);
+    expect(await binarySafetyProblem(file, asUser(1000, 1000, 50))).toBeNull();
+    expect(await binarySafetyProblem(file, asUser(1000, 1000))).toMatch(
+      /group-writable/,
+    );
+  },
+);
+
+it("defaults the identity to the process's own", async () => {
+  const path = executable(join(base(), "bin"));
+  expect(await binarySafetyProblem(path)).toBeNull();
+});

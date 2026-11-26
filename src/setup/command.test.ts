@@ -666,7 +666,7 @@ describe("non-interactive", () => {
     });
     expect(report.config.binary).toBe(join(bin, "codex"));
     expect(report.notes).toContain(
-      `rejected ${join(wide, "codex")}: its directory is world-writable without the sticky bit`,
+      `rejected ${join(wide, "codex")}: a directory on its path (${wide}) is world-writable without the sticky bit`,
     );
     // With only the unsafe candidate the error names it.
     await expect(
@@ -688,13 +688,13 @@ describe("non-interactive", () => {
       chownSync(foreign, 4242, 4242);
       await expect(
         runSetup(ni("--template", "codex", "--binary", path), deps),
-      ).rejects.toThrow(/directory is owned by another user/);
+      ).rejects.toThrow(/directory on its path .* is owned by another user/);
       const report = await runSetup(ni("--template", "codex"), {
         ...deps,
         env: { PATH: `${foreign}:${deps.env.PATH}` },
       });
       expect(report.notes.join("\n")).toMatch(
-        /rejected .*foreign\/codex: its directory is owned by another user/,
+        /rejected .*foreign\/codex: a directory on its path .* is owned by another user/,
       );
     },
   );

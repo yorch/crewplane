@@ -368,6 +368,6 @@ it("emits a fresh epoch for a lane whose harness changed since the installed con
     captain: "setup-epoch1",
     builder: "setup-epoch1",
   });
-  expect(result.notes.join(" ")).toMatch(/lane captain switches harness/);
+  expect(text.join("")).toContain("note: lane captain switches harness");
   expect(text.join("")).toContain("note: lane builder switches harness");
 });

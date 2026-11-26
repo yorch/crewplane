@@ -150,7 +150,7 @@ Agent IDs are safe identifiers, not fixed letters; prototype-property names are 
 
 `crewplane setup` generates the runtime configuration that `configure --file` installs, so you do not have to write the JSON by hand. Run `init` first. Then use the wizard in a terminal, or pass flags from a script.
 
-Setup never starts a harness and never runs a harness executable: each binary is only checked to be an absolute, executable regular file that other users cannot replace (see [Binary safety checks](#binary-safety-checks)).
+Setup never starts a harness and never runs a harness executable: each binary is only checked to be an absolute, executable regular file that users outside your own groups cannot replace, nor any directory or link on its path (ACLs, mounts, attributes, capabilities and check-to-use races are not covered; `doctor` does not apply this; see [Binary safety checks](#binary-safety-checks)).
 
 By default it writes no configuration. See [Default runs and files](#default-runs-and-files) for the exact effects.
 
@@ -234,20 +234,23 @@ The file can be given to `configure --file` once you add `confirmedStoppedAt`, o
 
 ### Rerunning with a different harness
 
-The supervisor refuses to start a lane whose harness differs from its latest recorded run unless the lane carries a fresh explicit `sessionEpoch`. `sessionEpoch` is accepted for every harness, so setup reads the installed `config.json` and `state.json` (read-only). The supervisor compares a lane only with its latest state record, so setup does too: when the lane has a record, an unchanged harness reuses that record's `sessionEpoch` (or none, if the record has none) and a changed harness gets a fresh one; the installed configuration is consulted only for a lane with no record at all. This keeps a codex, then claude (never served), then codex sequence from inventing an epoch the crashed codex record lacks. Pi lanes are planned the same way as every other lane (a rerun of an unchanged Pi lane keeps its recorded epoch instead of minting a new one). Each switch is reported as a note naming the lane, printed once on stderr (in the wizard, before the review prompt), and another note appears when the lane's latest record is not idle. The supervisor still only accepts the switch when the lane is drained and idle, and it keeps the prior records; stop and drain first. An unreadable `config.json` or `state.json` fails setup closed.
+The supervisor refuses to start a lane whose harness differs from its latest recorded run unless the lane carries a fresh explicit `sessionEpoch`. `sessionEpoch` is accepted for every harness, so setup reads the installed `config.json` and `state.json` (read-only). The supervisor compares a lane only with its latest state record, so setup does too: when the lane has a record, an unchanged harness reuses that record's `sessionEpoch` (or none, if the record has none) and a changed harness gets a fresh one; the installed configuration is consulted only for a lane with no record at all. This keeps a codex, then claude (never served), then codex sequence from inventing an epoch the crashed codex record lacks. Pi lanes are planned the same way as every other lane (a rerun of an unchanged Pi lane keeps its recorded epoch instead of minting a new one). When an unchanged lane's installed configuration carries a `sessionEpoch` that its latest record lacks or differs from, that epoch is discarded and a note names the lane and says `serve` will resume the recorded session. Each switch is reported as a note naming the lane, printed once on stderr (in the wizard, before the review prompt), and another note appears when the lane's latest record is not idle. The supervisor still only accepts the switch when the lane is drained and idle, and it keeps the prior records; stop and drain first. An unreadable `config.json` or `state.json` fails setup closed.
 
 ### Binary safety checks
 
 Beyond being an absolute executable regular file, a binary that setup records must not be replaceable by other users:
 
-Checked (POSIX; ownership checks are skipped where there is no uid):
+The path is resolved the way the kernel does, one component at a time from `/`, and each step is inspected with `lstat` without being executed. That covers every directory entered (as named, through each symlink, and the ancestors of those) and every symlink followed, including links in the middle of the path and relative `..` in link targets (hop limit 40; a loop is refused). The path as named is what gets recorded, and only when this whole walk passes.
 
-- Every hop of the symlink chain (each link, then the final file) is refused when owned by a user other than the current user or root, even inside a directory you own or a sticky directory.
+Checked (POSIX; ownership and group checks are skipped where there is no uid):
+
+- Every symlink on the path and the final file is refused when owned by a user other than the current user or root, even inside a directory you own or a sticky directory.
 - The final file is refused when group- or world-writable.
-- The directory holding each hop is refused when world-writable without the sticky bit, owned by a user other than the current user or root, or group-writable unless it is owned by the current user and its group is the current user's primary group (so a `2775 root:staff` directory is refused, a private `775` user-and-primary-group directory is accepted).
-- Every directory on the way to each hop, and each of their ancestors up to `/`, is refused when world-writable without the sticky bit or owned by a user other than the current user or root. Group-writable ancestors are not refused (for example `/usr/local` on Debian).
+- Every directory (the one holding the binary, each directory or link holding a symlink, and every ancestor up to `/`) is refused when world-writable without the sticky bit, or owned by a user other than the current user or root, or group-writable by a group the current user is not in. Group membership is the user's primary group plus supplementary groups, so a `user:admin 775` Homebrew directory is accepted for a member of `admin` and refused otherwise, and a `root:staff 2775` `/usr/local/bin` is accepted for a member of `staff` and refused otherwise. A world-writable directory with the sticky bit (`/tmp`) is accepted when owned by the current user or root, and the group rule is not applied to it.
 
-Not checked: ACLs, extended attributes, mounts (a read-write bind or network mount), capabilities, or anything that changes after the check; the file may still be replaced between setup and launch.
+Trust boundary: other members of your own groups are inside it. The guarantee is only that users outside your own groups cannot replace the binary or any directory or link on its path.
+
+Not checked: ACLs, extended attributes, mounts (a read-write bind or network mount), capabilities, or anything that changes after the check (check-to-use races): the file may still be replaced between setup and launch.
 
 PATH candidates that fail are skipped and listed as `rejected /full/path/to/binary: reason` (in the wizard's listing and in the notes on stderr), and the next PATH entry is tried; if none passes, the error lists the rejected ones. An explicit `--binary` style flag or wizard answer that fails is refused. This check is part of setup only: `doctor` does not apply it, so it still accepts a binary setup would refuse, and it is not a sandbox (a same-user attacker is out of scope). The final verification also repeats it.
 

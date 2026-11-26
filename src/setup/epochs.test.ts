@@ -258,7 +258,9 @@ it("plans Pi lanes: notes and the not-idle note on a switch, no new epoch for an
     mint,
   );
   expect(unchanged.epochs).toEqual({ inspector: "pi-1" });
-  expect(unchanged.notes).toEqual([]);
+  // The only note is the discarded installed epoch (cfg); no switch note.
+  expect(unchanged.notes).toHaveLength(1);
+  expect(unchanged.notes[0]).toMatch(/cfg.*discarded/);
 });
 
 it("a Pi rerun reuses the record's epoch so serve accepts it even after a crashed run", () => {
@@ -304,4 +306,52 @@ it("a Pi rerun reuses the record's epoch so serve accepts it even after a crashe
       false,
     ),
   ).toThrow(/fresh explicit sessionEpoch/);
+});
+
+it("notes an installed config epoch that is discarded for an unchanged lane whose record differs", () => {
+  n = 0;
+  const noRecordEpoch = planEpochs(
+    { captain: "claude" },
+    {
+      config: { captain: { harness: "claude", sessionEpoch: "cfg-1" } },
+      records: { captain: { harness: "claude" } },
+    },
+    mint,
+  );
+  expect(noRecordEpoch.epochs).toEqual({});
+  expect(noRecordEpoch.notes).toHaveLength(1);
+  expect(noRecordEpoch.notes[0]).toMatch(/lane captain/);
+  expect(noRecordEpoch.notes[0]).toMatch(/cfg-1/);
+  expect(noRecordEpoch.notes[0]).toMatch(/resume the recorded session/);
+  const differs = planEpochs(
+    { captain: "claude" },
+    {
+      config: { captain: { harness: "claude", sessionEpoch: "cfg-1" } },
+      records: { captain: { harness: "claude", sessionEpoch: "rec-1" } },
+    },
+    mint,
+  );
+  expect(differs.epochs).toEqual({ captain: "rec-1" });
+  expect(differs.notes[0]).toMatch(/lane captain/);
+  // Same epoch in both, or no record at all: nothing is discarded.
+  expect(
+    planEpochs(
+      { captain: "claude" },
+      {
+        config: { captain: { harness: "claude", sessionEpoch: "x" } },
+        records: { captain: { harness: "claude", sessionEpoch: "x" } },
+      },
+      mint,
+    ).notes,
+  ).toEqual([]);
+  expect(
+    planEpochs(
+      { captain: "claude" },
+      {
+        config: { captain: { harness: "claude", sessionEpoch: "x" } },
+        records: {},
+      },
+      mint,
+    ).notes,
+  ).toEqual([]);
 });
