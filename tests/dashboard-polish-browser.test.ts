@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { type Browser, chromium, type Page } from "@playwright/test";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { failOnConsoleErrors } from "./support/console-errors.ts";
 import { buildViewsFixture, type ViewsFixture } from "./views-fixture.ts";
 
 // Phase 5 polish: command palette, shortcuts, theme, preferences, graph at
@@ -41,11 +42,7 @@ async function open(
   const page = await context.newPage();
   page.setDefaultTimeout(8000);
   const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => {
-    if (message.type() === "error" && /Content Security/.test(message.text()))
-      errors.push(message.text());
-  });
+  failOnConsoleErrors(page, errors);
   if (options.init) await page.addInitScript(options.init);
   await options.prepare?.(page);
   await page.goto(`${fixture.base}#token=${fixture.session}`);
@@ -402,7 +399,15 @@ it("dialogs fit a phone, have 44px targets on touch and respect forced colors", 
 
 /** A 1000 task model, stubbed into the real snapshot. */
 async function bigGraph(page: Page) {
-  await page.route("**/api/events", (route) => route.abort());
+  // An empty, finished stream (the page polls); an aborted request would be
+  // a console error, and no console error is allowed.
+  await page.route("**/api/events", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: "retry: 60000\n\n",
+    }),
+  );
   await page.route("**/api/snapshot", async (route) => {
     const response = await route.fetch();
     const real = (await response.json()) as Record<string, unknown>;
@@ -514,6 +519,129 @@ it("relationship graph at scale: never more than the cap in the DOM; focus, clus
   await close();
 }, 60000);
 
+it("a state file lacking optional fields never prints undefined, NaN or null on any of the 11 views", async () => {
+  const original = fixture.readState();
+  const bare = structuredClone(original) as Record<string, unknown>;
+  // The supervisor's own loaded schedule and run records, reduced to what
+  // the file must hold: everything optional is absent.
+  bare.scheduling = {};
+  delete bare.attention;
+  delete bare.configReload;
+  delete bare.queue;
+  delete bare.retiredRuns;
+  // Control log entries that hold little more than their number.
+  bare.controlLog = [{ seq: 1 }, { seq: 2, action: "stop" }, {}];
+  bare.records = Object.fromEntries(
+    Object.entries(
+      (original.records ?? {}) as Record<
+        string,
+        { lane: string; task: string; status: string }
+      >,
+    ).map(([key, record]) => [
+      key,
+      { key, lane: record.lane, task: record.task, status: record.status },
+    ]),
+  );
+  const views = [
+    "overview",
+    "tasks",
+    "agents",
+    "messages",
+    "runs",
+    "relationships",
+    "usage",
+    "evidence",
+    "audit",
+    "setup",
+    "system",
+  ];
+  const bad = /\b(undefined|NaN|null)\b/;
+  try {
+    for (const [label, state] of [
+      [
+        "no maxParallel",
+        {
+          ...original,
+          scheduling: {
+            ...((original.scheduling as object) ?? {}),
+            maxParallel: undefined,
+          },
+        },
+      ],
+      ["bare state", bare],
+    ] as const) {
+      fixture.writeState(state);
+      for (const width of [1440, 390]) {
+        const { page, errors, close } = await open("#/overview", { width });
+        for (const view of views) {
+          await page.evaluate((name) => {
+            window.location.hash = `#/${name}`;
+          }, view);
+          await page.waitForFunction(
+            (name) => window.crewplane.route.view === name,
+            view,
+          );
+          await page.waitForTimeout(250);
+          await page.waitForFunction(
+            () => !document.querySelector("#loading:not([hidden])"),
+          );
+          // biome-ignore lint/performance/useDomNodeTextContent: the text a person sees
+          const body = await page.evaluate(() => document.body.innerText);
+          expect(body, `${label} ${width}px ${view}`).not.toMatch(bad);
+        }
+        expect(errors).toEqual([]);
+        await close();
+      }
+    }
+  } finally {
+    fixture.writeState(original);
+  }
+}, 120000);
+
+it("a malformed graph model that decodes to nothing does not hide the valid plain graph", async () => {
+  let plain = 0;
+  const { page, errors, close } = await open(
+    "#/relationships?graph=communication",
+    {
+      prepare: async (page) => {
+        await page.route("**/api/events", (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: "text/event-stream",
+            body: "retry: 60000\n\n",
+          }),
+        );
+        await page.route("**/api/snapshot", async (route) => {
+          const real = (await (await route.fetch()).json()) as {
+            graphs: { communication: { nodes: unknown[] } };
+          };
+          plain = real.graphs.communication.nodes.length;
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ...real,
+              graphModels: {
+                dependencies: { version: 2, nodes: "garbage", edges: 7 },
+                communication: { version: 2, nodes: [null, 3], edges: [] },
+              },
+            }),
+          });
+        });
+      },
+    },
+  );
+  await page.locator("#graph-note").waitFor();
+  await page.locator(".relay-graph-nodes button").first().waitFor();
+  expect(plain).toBeGreaterThan(0);
+  expect((await drawn(page)).list).toBe(plain);
+  expect(await page.locator("#graph-note").textContent()).not.toContain(
+    "Graph data unavailable",
+  );
+  expect(errors).toEqual([]);
+  await close();
+}, 30000);
+
 it("relationship graph at scale on a phone", async () => {
   const { page, errors, close } = await open(
     "#/relationships?graph=dependencies&group=phase",
@@ -606,6 +734,77 @@ it("run timeline tools: filter, search, jump, JSON copy and download, comparison
   expect(await page.evaluate(() => document.activeElement?.id)).toBe(
     "run-compare-toggle",
   );
+  expect(errors).toEqual([]);
+  await close();
+}, 60000);
+
+it("a comparison still being read stops requesting when the Runs view is left, or the panel closed", async () => {
+  // The other run is endless (100 events a page, slowly): every request the
+  // page sends for it is counted.
+  let requests = 0;
+  let otherId = "";
+  const { page, errors, close } = await open("#/runs", {
+    prepare: async (p) => {
+      await p.route("**/api/runs/**", async (route) => {
+        const url = new URL(route.request().url());
+        const id = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+        if (!otherId || id !== otherId) return route.fallback();
+        requests += 1;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        const after = Number(url.searchParams.get("after") ?? 0);
+        const events = Array.from({ length: 100 }, (_, i) => ({
+          sequence: after + i + 1,
+          at: "2026-01-01T00:00:00Z",
+          kind: "message",
+          channel: "assistant",
+          message: `event ${after + i + 1}`,
+        }));
+        await route
+          .fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ events, nextCursor: after + 100 }),
+          })
+          .catch(() => undefined);
+      });
+    },
+  });
+  await page.locator("#run-history .run-row").first().waitFor();
+  await page.locator("#run-events .timeline-row").first().waitFor();
+  const select = page.locator("#run-compare-select");
+  const settle = async () => {
+    let last = -1;
+    while (last !== requests) {
+      last = requests;
+      await page.waitForTimeout(600);
+    }
+    return requests;
+  };
+  for (const leave of ["view", "panel"] as const) {
+    await page.locator("#run-compare-toggle").click();
+    expect(await select.locator("option").count()).toBeGreaterThan(1);
+    otherId =
+      (await select.locator("option").nth(1).getAttribute("value")) ?? "";
+    requests = 0;
+    await select.selectOption({ index: 1 });
+    await expect.poll(() => requests, { timeout: 5000 }).toBeGreaterThan(1);
+    if (leave === "view")
+      await page.evaluate(() => {
+        window.location.hash = "#/overview";
+      });
+    else await page.locator("#run-compare-toggle").click();
+    const stopped = await settle();
+    // It would otherwise go on for 60 pages (7 s and more).
+    expect(stopped, leave).toBeLessThan(10);
+    await page.waitForTimeout(1500);
+    expect(requests, leave).toBe(stopped);
+    if (leave === "view") {
+      await page.evaluate(() => {
+        window.location.hash = "#/runs";
+      });
+      await page.locator("#run-compare-toggle").waitFor();
+    }
+  }
   expect(errors).toEqual([]);
   await close();
 }, 60000);

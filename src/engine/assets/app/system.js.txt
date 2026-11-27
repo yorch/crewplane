@@ -1,6 +1,7 @@
 import { healthBadge } from "./badges.js";
 import { supervisorControls } from "./controls.js";
 import { el, fields, section } from "./dom.js";
+import { formatCount } from "./format.js";
 import { instanceHoldNotice } from "./hold-notice.js";
 import { $, store } from "./store.js";
 import { date, timeEl } from "./time.js";
@@ -67,10 +68,15 @@ export function renderSystem() {
       ? section(
           `Limits (${headless.budgetsSource ?? "unknown source"})`,
           fields([
-            ["Concurrent lanes", budgets.maxParallel],
-            ["Minutes per run", budgets.maxRunMinutes],
-            ["Runs per lane per hour", budgets.maxRunsPerHour],
-            ["Heartbeat interval", `${budgets.intervalSeconds}s`],
+            ["Concurrent lanes", formatCount(budgets.maxParallel)],
+            ["Minutes per run", formatCount(budgets.maxRunMinutes)],
+            ["Runs per lane per hour", formatCount(budgets.maxRunsPerHour)],
+            [
+              "Heartbeat interval",
+              formatCount(budgets.intervalSeconds) === null
+                ? null
+                : `${formatCount(budgets.intervalSeconds)}s`,
+            ],
           ]),
         )
       : el("p", "Supervisor budgets unavailable", "note"),

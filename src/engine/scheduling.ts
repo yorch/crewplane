@@ -145,8 +145,9 @@ export function schedulingReason(
       "Lane has another recorded native task/control run",
     );
   if (
+    Number.isFinite(loaded.maxParallel) &&
     Object.values(state.records).filter((r) => r.status === "running").length >=
-    loaded.maxParallel
+      loaded.maxParallel
   )
     return result(
       "waiting-capacity",

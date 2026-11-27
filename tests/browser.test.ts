@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "@playwright/test";
 import { expect, it } from "vitest";
+import { failOnConsoleErrors } from "./support/console-errors.ts";
 
 it("renders the embedded dashboard with custom agents, narrow layouts and safe refresh", async () => {
   const root = await realpath(
@@ -76,7 +77,7 @@ it("renders the embedded dashboard with custom agents, narrow layouts and safe r
     });
     const page = await browser.newPage();
     const errors: string[] = [];
-    page.on("pageerror", (error) => errors.push(error.message));
+    failOnConsoleErrors(page, errors);
     const deadline = Date.now() + 10000;
     while (true) {
       // The printed URL carries the per-launch session as a #token fragment.

@@ -17,7 +17,7 @@ import {
   shouldNotify,
   supervisorPending,
 } from "./notify-core.js";
-import { readAlerts, writeAlerts } from "./prefs-core.js";
+import { ALERTS_KEY, readAlerts, writeAlerts } from "./prefs-core.js";
 import { hrefFor } from "./route.js";
 import { store } from "./store.js";
 import { setUnseen, unseenCount } from "./title.js";
@@ -138,4 +138,16 @@ function clearUnseen() {
 export function initNotify() {
   window.addEventListener("focus", clearUnseen);
   document.addEventListener("visibilitychange", clearUnseen);
+  // Turning alerts off (or changing them) in another tab applies here too:
+  // the hidden poll and the supervisor recheck follow the stored choice.
+  window.addEventListener("storage", (event) => {
+    if (event.key !== ALERTS_KEY && event.key !== null) return;
+    prefs = readAlerts(safeStorage());
+    if (!prefs.badge) setUnseen(0);
+    if (!alertsEnabled() && recheck !== null) {
+      clearTimeout(recheck);
+      recheck = null;
+    }
+    for (const listener of listeners) listener();
+  });
 }

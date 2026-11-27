@@ -127,7 +127,7 @@ The dashboard serves public embedded assets and a set of data routes under `/api
 - **Errors.** `400` for unknown, repeated, malformed or out-of-range parameters (the body never echoes the offending value), `503 {"error": ...}` when the board cannot be read, `404` for unknown paths. Every response sends `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and the strict CSP.
 - **Data.** Responses are explicit allowlisted projections. They never contain environment values, tokens, file contents, raw provider payloads or private reasoning. Persisted strings are stripped of control characters and length-bounded; clients still render them with `textContent` only. `null` means unknown or not applicable and is never `0`.
 
-Existing routes are unchanged (the snapshot gained one additive field, `graphModels`, below): `GET /api/snapshot`, `GET /api/runs[?task&lane&harness&before&limit]`, `GET /api/runs/:runId[?after&limit]`.
+Existing routes are unchanged (the snapshot gained two additive fields, `graphModels` and `headless.intentionalStop`, below): `GET /api/snapshot`, `GET /api/runs[?task&lane&harness&before&limit]`, `GET /api/runs/:runId[?after&limit]`.
 
 ### Snapshot `graphModels` (additive)
 
@@ -139,6 +139,14 @@ Existing routes are unchanged (the snapshot gained one additive field, `graphMod
 - `hidden` and `truncated`: what the model itself left out. The first form (`version: 1`, edges `[from, to, kindIndex, label, threadId, at, unanswered]` by id) is still read by the page.
 
 It is absent when the graph is unavailable (the page then draws `graphs` without the cluster, focus and paging tools). It grants no authority and the page still draws at most 50 nodes and 100 edges at a time. Size on synthetic boards (JSON bytes of `graphModels`, both views): 100 tasks 45,884 before and 33,041 after; 500 tasks 394,734 before and 193,221 after; 1,000 tasks (64 lanes, 1,000 messages) 680,031 before and 281,953 after. The measured build time of all four sections dropped from about 38 ms to 22 ms (median, 1,000 tasks, 64 lanes, 1,000 messages) by sharing one projection per view.
+
+### Snapshot `headless.intentionalStop` (additive)
+
+`headless.intentionalStop` is `{ "at": ISO }` or `null`. It is the time the supervisor recorded an intentional stop (a stop command, SIGTERM or Ctrl-C) in `desired.json`: `desiredRunning: false`, `reason: "intentional-stop"` and a parseable `at`, re-serialized as a canonical ISO string; nothing else from the file is forwarded. A later start or rollout replaces the file, so the field returns to `null`. The file is read through the same reader as the other control-plane files (no final symlink followed, regular files only) with a 4 KiB cap; absent, oversized, unsafe or malformed content is `null`. A signal stop leaves no control-log entry, so the alerts compare this time with the heartbeat (`headless.checkedAt`) of the last snapshot that showed the supervisor running to tell a requested stop from a crash.
+
+### Snapshot `headless.budgets` and static routes
+
+`headless.budgets.{maxParallel,maxRunsPerHour,maxRunMinutes,intervalSeconds}` are each a finite number or `null` (never absent, `NaN` or `undefined`): a loaded schedule or configuration that lacks one of them is reported as `null` and the page prints "not recorded". The persisted `scheduling` object is normalized on read (string arrays, finite numbers or absent), so a partial `state.json` cannot fail the snapshot. `GET /favicon.ico` (exact path, same Host and Origin checks as every route, no session needed) answers `204 No Content`: the page has no icon, and an empty answer keeps the browser console free of a 404 on every first load.
 
 ### `GET /api/events` (server-sent events)
 

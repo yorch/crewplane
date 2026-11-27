@@ -34,7 +34,15 @@ export const KIND_ORDER = [
 ];
 const KIND_RANK = new Map(KIND_ORDER.map((kind, index) => [kind, index]));
 
-const MARKS = /\p{M}+/gu;
+// Only the combining diacritics that accent folding is meaningful for: the
+// marks NFKD produces for Latin, Greek and Cyrillic letters (U+0300-036F and
+// the extended, supplement, symbol and half marks blocks). Every other mark is
+// part of a letter's meaning and stays: Indic vowel signs and viramas (a
+// "kitab" must not fold into "ktb"), nukta, Thai tone and vowel marks, and
+// Arabic harakat (vocalized and unvocalized text are different strings; a
+// query without them matches only text without them).
+const MARKS =
+  /[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]+/gu;
 // Format characters (Unicode Cf): bidi controls, zero-width characters, soft
 // hyphen, the byte order mark. They are invisible or reorder what is drawn, so
 // a title could look like "reading" while its characters spell "gnidaer".

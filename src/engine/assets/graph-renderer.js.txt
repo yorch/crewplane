@@ -145,8 +145,30 @@ function groupedLayout(nodes, columns) {
     height: heightOf(positions),
   };
 }
+// Smallest ring radius at which no two pills of `count` nodes come within
+// `gap` of each other (on at least one axis). Pills are wider than tall, so
+// the ring is widened until every pair clears, not just neighbours.
+function ringRadius(count, gap = 12) {
+  // The same angles circularLayout places the nodes at.
+  const angle = (index) => (2 * Math.PI * index) / count - Math.PI / 2;
+  const clear = (radius) => {
+    for (let a = 0; a < count; a++)
+      for (let b = a + 1; b < count; b++) {
+        const dx = radius * (Math.cos(angle(a)) - Math.cos(angle(b)));
+        const dy = radius * (Math.sin(angle(a)) - Math.sin(angle(b)));
+        if (Math.abs(dx) < pill.width + gap && Math.abs(dy) < pill.height + gap)
+          return false;
+      }
+    return true;
+  };
+  let radius = Math.max(70, (count * 150) / (2 * Math.PI));
+  // Bounded: the drawn graph holds at most the node cap, and a radius of
+  // (cap * width) always clears.
+  while (!clear(radius) && radius < count * (pill.width + gap)) radius += 4;
+  return radius;
+}
 function circularLayout(nodes) {
-  const radius = Math.max(70, (nodes.length * 150) / (2 * Math.PI));
+  const radius = ringRadius(nodes.length);
   const centerX = radius + 90;
   const centerY = radius + 40;
   const positions = new Map();

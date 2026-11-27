@@ -215,6 +215,15 @@ it("serves each embedded file with its content type, nosniff and the strict poli
   expect((await raw("/runs.js")).body).toBe(embeddedAssets["run-viewer.js"]);
 });
 
+it("answers the browser's automatic favicon request with an empty 204, not a 404", async () => {
+  const result = await raw("/favicon.ico");
+  expect(result.status).toBe(204);
+  expect(result.body).toBe("");
+  // Only that exact path; decorated spellings still miss.
+  for (const path of ["/favicon.ico?x=1", "/favicon.ico/", "/Favicon.ico"])
+    expect((await raw(path)).status, path).toBe(404);
+});
+
 it("refuses unknown, traversing and decorated asset paths", async () => {
   for (const path of [
     "/app/nope.js",

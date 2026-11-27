@@ -56,6 +56,12 @@ export function sanitizeAlertPrefs(raw) {
  * entries, when loaded). Ids only; everything is bounded and validated, so a
  * hostile value cannot grow memory or reach a message.
  */
+const timeOf = (value) => {
+  if (typeof value !== "string" || value.length > 64) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+};
+
 export function factsFromSnapshot(data, logEntries) {
   const ids = (list, pick) => {
     const out = [];
@@ -101,6 +107,11 @@ export function factsFromSnapshot(data, logEntries) {
       : null,
     supervisor:
       typeof headless?.state === "string" ? headless.state : "unknown",
+    // When the supervisor wrote its intentional-stop marker (a signal stop
+    // leaves no control-log entry), and the heartbeat time of this snapshot;
+    // both server-clock milliseconds, null when absent or unusable.
+    stopMarkerAt: timeOf(headless?.intentionalStop?.at),
+    checkedAt: timeOf(headless?.checkedAt),
     // The newest stop command the operator got applied; null until the log
     // has been read. It tells a requested stop from a crash.
     stopSeq: Array.isArray(logEntries)
@@ -141,6 +152,9 @@ function createSupervisorWatch() {
     requested: false,
     // The highest applied stop command seen while it was running.
     stopBase: 0,
+    // When it was last seen running (the snapshot's heartbeat, else the local
+    // clock): an intentional-stop marker newer than this explains a stop.
+    runningAt: 0,
     // When the current unbroken run of down snapshots began, and how many.
     downSince: null,
     downCount: 0,
@@ -162,6 +176,7 @@ function observeSupervisor(state, facts, prefs, now, events) {
     watch.requested = false;
     watch.downSince = null;
     watch.downCount = 0;
+    watch.runningAt = Number.isFinite(facts.checkedAt) ? facts.checkedAt : now;
     if (stopSeq !== null) watch.stopBase = Math.max(watch.stopBase, stopSeq);
     state.known.supervisor = true;
     return;
@@ -186,6 +201,14 @@ function observeSupervisor(state, facts, prefs, now, events) {
   // from "stopped" until it is read; "stale" needs no log (a stop does not
   // leave a process looking stale).
   if (stopSeq !== null && stopSeq > watch.stopBase) watch.requested = true;
+  // A signal stop (SIGTERM, Ctrl-C) records only desired.json, and a quiet
+  // supervisor exits before any snapshot shows "draining": a marker written
+  // after the last running observation explains the stop too.
+  if (
+    Number.isFinite(facts.stopMarkerAt) &&
+    facts.stopMarkerAt > watch.runningAt
+  )
+    watch.requested = true;
   if (watch.requested || (status === "stopped" && stopSeq === null)) {
     if (watch.requested) watch.armed = false;
     return;
@@ -215,7 +238,9 @@ function observeSupervisor(state, facts, prefs, now, events) {
  *
  * The supervisor is judged differently, because "not running" is often what
  * the operator asked for: it alerts only after being seen running, only when
- * no stop command (control log, `facts.stopSeq`) explains it, only when it
+ * no stop command (control log, `facts.stopSeq`; or an intentional-stop
+ * marker newer than the last running snapshot, `facts.stopMarkerAt`) explains
+ * it, only when it
  * still looks down at a second observation at least SUPERVISOR_CONFIRM_MS
  * later, and at most once per SUPERVISOR_COOLDOWN_MS.
  */

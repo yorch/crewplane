@@ -312,6 +312,72 @@ describe("supervisor alerts: crash, clean stop and flapping", () => {
     observe(state, sup("stopped", 2), all, 1000);
     expect(observe(state, sup("stopped", 2), all, 1000 + T)).toHaveLength(1);
   });
+  describe("a signal stop (SIGTERM, Ctrl-C) leaves only desired.json", () => {
+    const withMarker = (
+      supervisor: string,
+      marker: number | null,
+      checkedAt: number | null,
+    ) => facts({ supervisor, stopSeq: 0, stopMarkerAt: marker, checkedAt });
+    it("running to stopped with a newer marker and no log entry never alerts", () => {
+      const state = createAlertState();
+      observe(state, withMarker("running", null, 900), all, 1000);
+      for (const at of [2000, 6000, 12000])
+        expect(
+          observe(state, withMarker("stopped", 1500, 900), all, at),
+        ).toEqual([]);
+      expect(supervisorPending(state)).toBe(false);
+    });
+    it("a genuine crash (no marker) still alerts", () => {
+      const state = createAlertState();
+      observe(state, withMarker("running", null, 900), all, 1000);
+      observe(state, withMarker("stopped", null, 900), all, 2000);
+      expect(
+        observe(state, withMarker("stale", null, 900), all, 2000 + T),
+      ).toHaveLength(1);
+    });
+    it("a marker older than the last running snapshot does not explain a later stop", () => {
+      const state = createAlertState();
+      // Stopped earlier, restarted, observed running at 5000: the old marker
+      // (at 1500) is history.
+      observe(state, withMarker("running", 1500, 5000), all, 5100);
+      observe(state, withMarker("stopped", 1500, 5000), all, 6000);
+      expect(
+        observe(state, withMarker("stopped", 1500, 5000), all, 6000 + T),
+      ).toHaveLength(1);
+    });
+    it("ignores a marker that is not a finite number", () => {
+      const state = createAlertState();
+      observe(state, withMarker("running", null, 900), all, 1000);
+      for (const bad of [Number.NaN, "x" as unknown as number, Infinity]) {
+        observe(state, withMarker("stopped", bad, 900), all, 2000);
+      }
+      expect(
+        observe(state, withMarker("stopped", Number.NaN, 900), all, 2000 + T),
+      ).toHaveLength(1);
+    });
+  });
+  it("reads the intentional-stop marker and heartbeat from the snapshot", () => {
+    const at = "2026-11-08T01:00:00.000Z";
+    const data = {
+      headless: {
+        state: "stopped",
+        checkedAt: "2026-11-08T00:59:55.000Z",
+        intentionalStop: { at },
+      },
+    };
+    const out = factsFromSnapshot(data, []);
+    expect(out.stopMarkerAt).toBe(Date.parse(at));
+    expect(out.checkedAt).toBe(Date.parse("2026-11-08T00:59:55.000Z"));
+    const none = factsFromSnapshot({ headless: { state: "running" } }, []);
+    expect(none.stopMarkerAt).toBeNull();
+    expect(none.checkedAt).toBeNull();
+    expect(
+      factsFromSnapshot(
+        { headless: { intentionalStop: { at: { evil: 1 } } } },
+        [],
+      ).stopMarkerAt,
+    ).toBeNull();
+  });
   it("does not announce a stop while the control log is unread", () => {
     const state = createAlertState();
     observe(state, sup("running", null), all, 0);

@@ -727,6 +727,12 @@ export function createDashboard(
         }
         return;
       }
+      // Browsers ask for /favicon.ico on every first load; the page has no
+      // icon, so say so without an error in the console.
+      if (request.url === "/favicon.ico") {
+        response.writeHead(204).end();
+        return;
+      }
       const route = routes.get(request.url ?? "");
       if (!route) {
         response.writeHead(404).end("Not found");

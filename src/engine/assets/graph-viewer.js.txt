@@ -66,7 +66,7 @@ function fillGroups(group) {
   }
   if (groupSelect.value !== group) groupSelect.value = group;
 }
-function snapshotFor(value) {
+function snapshotFor(value, graph) {
   const model = value?.models?.[view.value];
   if (!model) return null;
   let expanded = expandedModels.get(model);
@@ -74,6 +74,14 @@ function snapshotFor(value) {
     expanded = expandModel(model);
     expandedModels.set(model, expanded);
   }
+  // A malformed model that decodes to nothing must not hide a valid plain
+  // graph: fall back to the capped `graphs` view.
+  if (
+    !expanded.nodes.length &&
+    Array.isArray(graph?.nodes) &&
+    graph.nodes.length
+  )
+    return null;
   const params = scaleParams();
   return { expanded, params };
 }
@@ -85,7 +93,7 @@ function update(value) {
     scaleBar.hidden = true;
     return;
   }
-  const scaled = snapshotFor(value);
+  const scaled = snapshotFor(value, graph);
   let drawn = graph;
   let scaleText = "";
   if (scaled) {

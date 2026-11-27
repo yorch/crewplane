@@ -7,6 +7,10 @@ import { type Browser, chromium, type Page } from "@playwright/test";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { controlDirectory } from "../src/control.ts";
 import { createTraceStore } from "../src/engine/operational-traces.ts";
+import {
+  failOnConsoleErrors,
+  withoutInjectedFailures,
+} from "./support/console-errors.ts";
 
 const bin = resolve("dist/crewplane");
 const runId = "1794100000001-00000000-0000-4000-8000-000000000001";
@@ -252,11 +256,7 @@ async function open(
   const page = await browser.newPage({ viewport: { width, height: 900 } });
   await setup?.(page);
   const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => {
-    if (message.type() === "error" && /Content Security/.test(message.text()))
-      errors.push(message.text());
-  });
+  failOnConsoleErrors(page, errors);
   const deadline = Date.now() + 10000;
   while (true) {
     // The printed URL carries the per-launch session as a #token fragment;
@@ -550,7 +550,7 @@ it("preserves filters, focus and disclosure across polls and reports staleness",
   await page.locator("#refresh").click();
   await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
   expect(await banner.isVisible()).toBe(false);
-  expect(errors).toEqual([]);
+  expect(withoutInjectedFailures(errors)).toEqual([]); // the aborts are this test's own
   await page.close();
 }, 45000);
 
@@ -770,7 +770,7 @@ it("resets the older-messages limit when message filters change", async () => {
   await until(async () => (await rows()) === 200, "200 rows after show more");
   await page.locator("#message-search").fill("bulkmessage");
   await until(async () => (await rows()) === 100, "limit reset to 100");
-  expect(errors).toEqual([]);
+  expect(withoutInjectedFailures(errors)).toEqual([]); // the aborts are this test's own
   await page.close();
 }, 30000);
 
@@ -808,11 +808,7 @@ it("keeps selected state visible in forced colors and meets coarse-pointer targe
   });
   const touch = await context.newPage();
   const touchErrors: string[] = [];
-  touch.on("pageerror", (error) => touchErrors.push(error.message));
-  touch.on("console", (message) => {
-    if (message.type() === "error" && /Content Security/.test(message.text()))
-      touchErrors.push(message.text());
-  });
+  failOnConsoleErrors(touch, touchErrors);
   // A new context has no sessionStorage: adopt the per-launch session first.
   const sessionToken = /#token=([A-Za-z0-9_-]+)/.exec(output)?.[1] ?? "";
   await touch.goto(`${base}#token=${sessionToken}`);
@@ -1190,7 +1186,7 @@ it("falls back to polling when the event stream is blocked, with the banner sema
   await page.locator('#connection-wrap[data-mode="live"]').waitFor({
     timeout: 10000,
   });
-  expect(errors).toEqual([]);
+  expect(withoutInjectedFailures(errors)).toEqual([]); // the aborts are this test's own
   await page.close();
 }, 60000);
 

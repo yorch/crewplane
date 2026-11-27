@@ -48,6 +48,14 @@ import {
   const COMPARE_MAX_PAGES = 60;
   let other = null;
   let otherToken = 0;
+  // The in-flight comparison read, so leaving the view or closing the panel
+  // stops its requests instead of only ignoring their answers.
+  let otherAbort = null;
+  function cancelOther() {
+    otherToken++;
+    otherAbort?.abort();
+    otherAbort = null;
+  }
 
   const setText = (id, text) => {
     const node = get(id);
@@ -286,7 +294,7 @@ import {
   // Comparison of the selected run with another one of the same task or agent.
   function closeCompare(restoreFocus) {
     other = null;
-    otherToken++;
+    cancelOther();
     get("run-compare").hidden = true;
     get("run-compare-toggle").setAttribute("aria-expanded", "false");
     get("run-compare-body").replaceChildren();
@@ -313,7 +321,14 @@ import {
     );
   }
   async function loadOther(id) {
-    const token = ++otherToken;
+    cancelOther();
+    const token = otherToken;
+    const controller = new AbortController();
+    otherAbort = controller;
+    const signal = AbortSignal.any([
+      controller.signal,
+      AbortSignal.timeout(10000),
+    ]);
     other = null;
     get("run-compare-body").replaceChildren();
     if (!RUN_ID.test(id)) return;
@@ -329,7 +344,7 @@ import {
       for (let page = 0; page < COMPARE_MAX_PAGES; page++) {
         const response = await window.crewplaneFetch(
           `/api/runs/${encodeURIComponent(id)}?after=${after}&limit=100`,
-          { cache: "no-store", signal: AbortSignal.timeout(10000) },
+          { cache: "no-store", signal },
         );
         if (!response.ok) throw Error("The other run is not available.");
         const value = await response.json();
@@ -346,6 +361,7 @@ import {
       if (token === otherToken) text(get("run-compare-status"), error.message);
       return;
     }
+    if (otherAbort === controller) otherAbort = null;
     other = { id, events: loaded, total, complete };
     renderCompare();
   }
@@ -677,7 +693,20 @@ import {
   function syncRoute(route) {
     const wasActive = viewActive;
     viewActive = route.view === "runs";
-    if (!viewActive) return;
+    if (!viewActive) {
+      // Leaving Runs ends a comparison still being read.
+      if (otherAbort) {
+        cancelOther();
+        other = null;
+        get("run-compare-body").replaceChildren();
+        get("run-compare-select").value = "";
+        text(
+          get("run-compare-status"),
+          "Comparison stopped. Choose a run to compare again.",
+        );
+      }
+      return;
+    }
     const { lane = "", harness = "", task = "", run = null } = route.params;
     setControl("run-lane", lane);
     setControl("run-harness", harness);
@@ -754,7 +783,7 @@ import {
     if (id) loadOther(id);
     else {
       other = null;
-      otherToken++;
+      cancelOther();
       get("run-compare-body").replaceChildren();
     }
   });

@@ -22,6 +22,41 @@ describe("folding", () => {
     expect(fold("Straße")).toBe("straße");
     expect(fold("ｆｕｌｌｗｉｄｔｈ")).toBe("fullwidth");
   });
+  it("folds accents of Latin, Greek and Cyrillic, including stacked and extended marks", () => {
+    expect(fold("café")).toBe(fold("cafe"));
+    expect(fold("Ελληνικά")).toBe("ελληνικα");
+    expect(fold("Йога Ёлка")).toBe("иога елка");
+    expect(fold("a\u1ab0b\u1dc0c\u20d0d\ufe20e")).toBe("abcde");
+    expect(fold("e\u0301\u0302\u0303")).toBe("e");
+  });
+  it("keeps the marks that are part of a letter in other scripts", () => {
+    // Devanagari vowel signs and the virama: "kitab" is not "katab".
+    expect(fold("किताब")).not.toBe(fold("कतब"));
+    expect(fold("किताब")).toBe("किताब");
+    expect(fold("क्ष")).not.toBe(fold("कष"));
+    expect(fold("ड़")).toBe("ड\u093c");
+    // Bengali, Tamil and Kannada vowel signs.
+    expect(fold("বাংলা")).not.toBe(fold("বলা"));
+    expect(fold("தமிழ்")).not.toBe(fold("தமிழ"));
+    expect(fold("ಕನ್ನಡ")).toBe("ಕನ್ನಡ");
+    // Thai vowel and tone marks distinguish words.
+    expect(fold("ไก่")).not.toBe(fold("ไก"));
+    expect(fold("สวัสดี")).toBe("สวัสดี");
+    // Arabic harakat are kept (documented): vocalized text is a different
+    // string from unvocalized text.
+    expect(fold("كَتَبَ")).not.toBe(fold("كتب"));
+    // Hangul and CJK are unaffected.
+    expect(fold("한국어").normalize("NFC")).toBe("한국어".normalize("NFC"));
+    expect(fold("検索")).toBe("検索");
+  });
+  it("still drops joiners and non-joiners from the folded form, and searches through them", () => {
+    expect(fold("می\u200cخواهم")).toBe("میخواهم");
+    expect(fold("क्\u200dष")).toBe("क्ष");
+    expect(fold("\u{1f468}\u200d\u{1f469}")).toBe("\u{1f468}\u{1f469}");
+    const items = [entry("किताब पढ़ता"), entry("कतब")];
+    expect(ranked(items, "किताब")).toEqual(["किताब पढ़ता"]);
+    expect(ranked(items, "कतब")[0]).toBe("कतब");
+  });
   it("bounds hostile input", () => {
     expect(fold("a".repeat(1_000_000)).length).toBeLessThanOrEqual(160);
     expect(parseQuery("x ".repeat(500)).length).toBeLessThanOrEqual(1);

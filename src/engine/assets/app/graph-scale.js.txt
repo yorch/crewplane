@@ -44,6 +44,9 @@ const text = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 const orNull = (value) => (text(value) ? value : null);
 
+const ownIndex = (value, length) =>
+  Number.isInteger(value) && value >= 0 && value < length;
+
 /**
  * Fills defaults, drops malformed rows and indexes neighbours. Bounded.
  * Reads the compact version 2 model (edges `[from, to, kind, ref, unanswered]`
@@ -107,14 +110,19 @@ export function expandModel(model) {
       [from, to, kindIndex, label, threadId, at, unanswered] = raw;
     } else {
       [from, to, kindIndex, , unanswered] = raw;
-      const row = refs[raw[3]];
+      const refIndex = raw[3];
+      if (!ownIndex(refIndex, refs.length)) continue;
+      const row = refs[refIndex];
       if (!Array.isArray(row)) continue;
       [label, threadId, at] = row;
       from = endpoint(from);
       to = endpoint(to);
     }
     if (!text(from) || !text(to)) continue;
-    const kind = EDGE_KINDS[kindIndex] ?? "message";
+    // Only a real position selects a kind: a name such as "constructor" or
+    // "__proto__" would read a property of the array, not one of the four.
+    if (!ownIndex(kindIndex, EDGE_KINDS.length)) continue;
+    const kind = EDGE_KINDS[kindIndex];
     const base = `${kind}\u0000${from}\u0000${to}\u0000${label}\u0000${threadId ?? ""}\u0000${at ?? ""}`;
     const count = seen.get(base) ?? 0;
     seen.set(base, count + 1);

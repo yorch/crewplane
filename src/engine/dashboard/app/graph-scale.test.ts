@@ -8,6 +8,7 @@ import {
   describeScale,
   EDGE_CAP,
   expandModel,
+  GROUP_MODES,
   MAX_HOPS,
   NODE_CAP,
   neighbourhood,
@@ -365,31 +366,9 @@ function randomInput(seed: number): GraphInput {
   const taskIds = Array.from({ length: taskCount }, (_, i) => `T${i}`);
   const laneIds = Array.from({ length: laneCount }, (_, i) => `lane${i}`);
   const ghosts = ["BACKLOG-9", "ARCHIVED-1", "operator"];
-  return {
-    version: 1,
-    tasks: taskIds.map((id) => ({
-      id,
-      label: id,
-      status: pick(["blocked", "working", "review", null]),
-      accepted: random() < 0.3,
-      dependsOn: Array.from({ length: Math.floor(random() * 3) }, () => ({
-        taskId: random() < 0.35 ? pick(ghosts) : pick(taskIds),
-        require: pick(["accepted", "ready"] as const),
-      })),
-      phase: pick(["1", "2", null]),
-      owner: pick(laneIds),
-    })),
-    lanes: laneIds.map((id) => ({
-      id,
-      role: pick(["Implementation", "Code review", null]),
-      harness: null,
-      observedModel: null,
-      taskId: null,
-      processStatus: null,
-      taskStatus: null,
-      accepted: false,
-    })),
-    messages: Array.from({ length: Math.floor(random() * 10) }, (_, i) => ({
+  const messages = Array.from(
+    { length: Math.floor(random() * 14) },
+    (_, i) => ({
       id: `m${i}`,
       from: pick(laneIds),
       to:
@@ -401,42 +380,122 @@ function randomInput(seed: number): GraphInput {
         "update",
         "handoff",
       ] as const),
-      task: null,
-      replyTo: null,
-      at: `2026-01-01T00:00:${String(10 + i).padStart(2, "0")}Z`,
+      task: random() < 0.5 ? pick(taskIds) : null,
+      // Replies point at an earlier message (some of them a thread root).
+      replyTo: i > 0 && random() < 0.4 ? `m${Math.floor(random() * i)}` : null,
+      at: `2026-01-01T00:00:${String(10 + (i % 50)).padStart(2, "0")}Z`,
+    }),
+  );
+  return {
+    version: 1,
+    tasks: taskIds.map((id) => ({
+      id,
+      label: `${id} title`,
+      status: pick(["blocked", "working", "review", null]),
+      accepted: random() < 0.3,
+      dependsOn: Array.from({ length: Math.floor(random() * 3) }, () => ({
+        taskId: random() < 0.35 ? pick(ghosts) : pick(taskIds),
+        require: pick(["accepted", "ready"] as const),
+      })),
+      phase: pick(["1", "2", null]),
+      owner: pick([...laneIds, null]),
     })),
-    unansweredIds: [],
+    lanes: laneIds.map((id) => ({
+      id,
+      role: pick(["Implementation", "Code review", null]),
+      harness: pick(["claude", "codex", null]),
+      observedModel: null,
+      taskId: null,
+      processStatus: pick(["running", "paused", null]),
+      taskStatus: null,
+      accepted: false,
+    })),
+    messages,
+    unansweredIds: messages.filter(() => random() < 0.4).map((m) => m.id),
   };
 }
 describe("projection matches the server graph, missing references included", () => {
-  const key = (e: { from: string; to: string; kind: string; label: string }) =>
-    `${e.from}>${e.to}|${e.kind}|${e.label}`;
+  type Edge = Record<string, unknown>;
+  const key = (e: Edge) =>
+    JSON.stringify([
+      e.from,
+      e.to,
+      e.kind,
+      e.label,
+      e.threadId ?? null,
+      e.at ?? null,
+      e.unanswered === true,
+    ]);
+  const NODE_FIELDS = [
+    "label",
+    "role",
+    "harness",
+    "observedModel",
+    "processStatus",
+    "taskStatus",
+    "accepted",
+    "taskId",
+    "kind",
+  ];
+  const cover = { missing: 0, unanswered: 0, threads: 0, replies: 0 };
   for (const view of ["dependencies", "communication"] as const) {
-    it(`${view}: same edges and counts for 200 random boards`, () => {
-      let withMissing = 0;
-      for (let seed = 1; seed <= 200; seed++) {
+    it(`${view}: same nodes, edges and every edge field for 400 random boards`, () => {
+      for (let seed = 1; seed <= 400; seed++) {
         const input = randomInput(seed);
         const server = buildGraph(input, view);
-        const model = buildGraphModel(input, view);
-        const shown = projectGraph(expandModel(model), {});
+        // Through JSON, as the page receives the model.
+        const model = JSON.parse(JSON.stringify(buildGraphModel(input, view)));
+        const wire = expandModel(model);
+        const shown = projectGraph(wire, {});
         const nodeIds = new Set(server.nodes.map((n) => n.id));
         if (
           server.edges.some((e) => !nodeIds.has(e.from) || !nodeIds.has(e.to))
         )
-          withMissing++;
+          cover.missing++;
+        if (server.edges.some((e) => e.unanswered)) cover.unanswered++;
+        if (server.edges.some((e) => e.threadId)) cover.threads++;
+        if (input.messages.some((m) => m.replyTo)) cover.replies++;
         expect(shown.edges.map(key).sort(), `seed ${seed}`).toEqual(
           server.edges.map(key).sort(),
         );
         expect(shown.nodes.map((n) => n.id).sort()).toEqual(
           server.nodes.map((n) => n.id).sort(),
         );
+        const byId = new Map(
+          server.nodes.map((n) => [n.id, n as unknown as Edge]),
+        );
+        for (const node of shown.nodes as unknown as Edge[])
+          for (const field of NODE_FIELDS)
+            expect(
+              node[field] ?? null,
+              `seed ${seed} ${node.id} ${field}`,
+            ).toEqual(byId.get(node.id as string)?.[field] ?? null);
         expect(shown.truncated).toEqual(server.truncated);
         expect(shown.hidden).toEqual(server.hidden);
+        // Collapsing into clusters conserves every relationship.
+        for (const group of GROUP_MODES[view]) {
+          if (group === "none") continue;
+          const grouped = projectGraph(wire, { group });
+          const total =
+            grouped.edges.reduce(
+              (sum: number, e: { count?: number }) => sum + (e.count ?? 1),
+              0,
+            ) +
+            grouped.scale.internalEdges +
+            grouped.scale.edgesOffPage;
+          expect(total, `seed ${seed} ${view} ${group}`).toBe(
+            wire.edges.length,
+          );
+        }
       }
-      // The generator really does exercise missing references.
-      expect(withMissing).toBeGreaterThan(20);
     });
   }
+  it("the generator really exercises references, unanswered edges and threads", () => {
+    expect(cover.missing).toBeGreaterThan(40);
+    expect(cover.unanswered).toBeGreaterThan(40);
+    expect(cover.threads).toBeGreaterThan(40);
+    expect(cover.replies).toBeGreaterThan(100);
+  });
   it("a collapsed cluster merges edges to a missing reference instead of losing them", () => {
     const model = expandModel({
       view: "dependencies",
@@ -506,6 +565,74 @@ describe("compact model v2", () => {
       threadId: "th1",
       kind: "message",
     });
+  });
+});
+
+describe("hostile indexes in the compact model", () => {
+  const KINDS = ["dependency", "awaiting-answer", "review-handoff", "message"];
+  const hostile = [
+    "constructor",
+    "__proto__",
+    "length",
+    "toString",
+    "0",
+    -1,
+    4,
+    1.5,
+    Number.NaN,
+    Infinity,
+    null,
+    {},
+    [],
+  ];
+  const base = {
+    version: 2,
+    view: "communication",
+    nodes: [{ id: "A" }, { id: "B" }],
+    refs: [["hello", null, null]],
+  };
+  it("kind indexes outside the four kinds drop the edge and never read a property", () => {
+    for (const bad of hostile) {
+      const model = expandModel({
+        ...base,
+        edges: [
+          [0, 1, bad, 0, 0],
+          [0, 1, 3, 0, 0],
+        ],
+      });
+      expect(model.edges, String(bad)).toHaveLength(1);
+      for (const edge of model.edges) {
+        expect(KINDS).toContain(edge.kind);
+        expect(String(edge.kind)).not.toContain("native code");
+      }
+    }
+    // The first form (kind at the same position) is read the same way.
+    for (const bad of hostile) {
+      const model = expandModel({
+        ...base,
+        edges: [["A", "B", bad, "label", null, null, 0]],
+      });
+      expect(model.edges, String(bad)).toHaveLength(0);
+    }
+  });
+  it("ref indexes that are not own positions drop the edge", () => {
+    for (const bad of hostile.filter((value) => value !== "0")) {
+      const model = expandModel({ ...base, edges: [[0, 1, 3, bad, 0]] });
+      expect(model.edges, String(bad)).toHaveLength(0);
+    }
+    const shown = projectGraph(
+      expandModel({
+        ...base,
+        edges: [
+          [0, 1, "constructor", 0, 0],
+          [0, 1, 3, "__proto__", 0],
+          [0, 1, 3, 0, 0],
+        ],
+      }),
+      {},
+    );
+    expect(JSON.stringify(shown)).not.toContain("native code");
+    expect(shown.edges).toHaveLength(1);
   });
 });
 

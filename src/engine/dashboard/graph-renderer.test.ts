@@ -312,6 +312,84 @@ test("relationship table uses the supplied shared time formatter instead of raw 
   }
 }, 30000);
 
+test("communication layout: pills never touch or overlap, from 2 to 12 nodes", async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<main id="host"></main>');
+    await page.addStyleTag({ content: css });
+    await page.addScriptTag({
+      type: "module",
+      content: `${source}\nwindow.renderGraph = renderGraph;`,
+    });
+    await page.waitForFunction("typeof window.renderGraph === 'function'");
+    for (let count = 2; count <= 12; count++) {
+      const rects = await page.evaluate((n) => {
+        const host = document.querySelector("#host") as Element;
+        host.replaceChildren();
+        const nodes = Array.from({ length: n }, (_, i) => ({
+          id: `lane${i}`,
+          kind: "lane",
+          label: `lane${i}`,
+          role: null,
+          harness: null,
+          observedModel: null,
+          taskId: null,
+          processStatus: null,
+          taskStatus: null,
+          accepted: false,
+        }));
+        (
+          window as unknown as {
+            renderGraph: (...args: unknown[]) => unknown;
+          }
+        ).renderGraph(
+          document,
+          host,
+          {
+            version: 1,
+            view: "communication",
+            nodes,
+            edges: [],
+            hidden: { nodes: 0, edges: 0 },
+          },
+          {},
+        );
+        return [...host.querySelectorAll("svg .relay-node rect")].map(
+          (rect) => ({
+            x: Number(rect.getAttribute("x")),
+            y: Number(rect.getAttribute("y")),
+            width: Number(rect.getAttribute("width")),
+            height: Number(rect.getAttribute("height")),
+          }),
+        );
+      }, count);
+      expect(rects, `${count} nodes`).toHaveLength(count);
+      // A gap of at least 8px on one axis between every pair.
+      const gap = 8;
+      for (let a = 0; a < rects.length; a++)
+        for (let b = a + 1; b < rects.length; b++) {
+          const p = rects[a] as (typeof rects)[number];
+          const q = rects[b] as (typeof rects)[number];
+          const apartX = Math.max(q.x - (p.x + p.width), p.x - (q.x + q.width));
+          const apartY = Math.max(
+            q.y - (p.y + p.height),
+            p.y - (q.y + q.height),
+          );
+          expect(
+            Math.max(apartX, apartY),
+            `${count} nodes: ${a} and ${b}`,
+          ).toBeGreaterThanOrEqual(gap);
+        }
+    }
+  } finally {
+    await browser.close();
+  }
+}, 60000);
+
 async function expectText(
   locator: { textContent(): Promise<string | null> },
   text: string,

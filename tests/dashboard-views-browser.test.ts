@@ -7,6 +7,7 @@ import {
   type Page,
 } from "@playwright/test";
 import { afterAll, beforeAll, expect, it } from "vitest";
+import { failOnConsoleErrors } from "./support/console-errors.ts";
 import {
   buildViewsFixture,
   makePng,
@@ -119,11 +120,7 @@ async function open(
   page.setDefaultTimeout(8000);
   await page.addInitScript(spies);
   const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => {
-    if (message.type() === "error" && /Content Security/.test(message.text()))
-      errors.push(message.text());
-  });
+  failOnConsoleErrors(page, errors);
   await options.prepare?.(page);
   await page.goto(`${target.base}#token=${target.session}`);
   await page.locator("#loading").waitFor({ state: "hidden", timeout: 15000 });
@@ -1291,7 +1288,11 @@ it("reloads from the start, with a notice and without rebuilding the cards, when
   );
   expect(await page.locator("#evidence-list .banner").count()).toBe(0);
   expect(lists).toBe(4);
-  expect(opened.errors).toEqual([]);
+  // The pruned cursor is answered with a deliberate 400: the browser logs that
+  // one failed load, and nothing else may be logged.
+  expect(opened.errors).toEqual([
+    "Failed to load resource: the server responded with a status of 400 (Bad Request)",
+  ]);
   await close(opened);
 });
 
