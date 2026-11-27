@@ -177,5 +177,15 @@ export function liveTuning(override) {
     backoffCapMs: bounded(o.backoffCapMs, 10, 60000, 60000),
     stableMs: bounded(o.stableMs, 100, 30000, 30000),
     hiddenGraceMs: bounded(o.hiddenGraceMs, 0, 30000, 30000),
+    hiddenPollMs: bounded(o.hiddenPollMs, 100, 600000, 60000),
   };
+}
+
+/**
+ * Delay before the next hidden-tab alert poll: `base` spread over +-20% so
+ * many open tabs do not read the snapshot in the same second.
+ */
+export function hiddenPollDelay(base, random = Math.random) {
+  const r = Math.min(1, Math.max(0, Number(random()) || 0));
+  return Math.round(base * (0.8 + 0.4 * r));
 }

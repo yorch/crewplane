@@ -4,10 +4,21 @@ import { el } from "./dom.js";
 // cells into blocks, so explicit ARIA roles keep the table semantics). Cells
 // are Nodes or plain strings (set with textContent); null is "Not recorded".
 // `rows[i].key` makes row elements findable; `selected` marks the open row.
-export function dataTable({ label, columns, rows, className = "" }) {
+export function dataTable({
+  label,
+  columns,
+  rows,
+  className = "",
+  scrollable = false,
+}) {
   const table = el("table", undefined, `agents-table data-table ${className}`);
   table.setAttribute("role", "table");
   table.setAttribute("aria-label", label);
+  // A wide table scrolls inside itself; it must then be reachable by keyboard.
+  if (scrollable) {
+    table.tabIndex = 0;
+    table.classList.add("is-scrollable");
+  }
   const head = el("thead");
   head.setAttribute("role", "rowgroup");
   const header = el("tr");

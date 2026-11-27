@@ -312,9 +312,218 @@ test("relationship table uses the supplied shared time formatter instead of raw 
   }
 }, 30000);
 
+test("communication layout: pills never touch or overlap, from 2 to 12 nodes", async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<main id="host"></main>');
+    await page.addStyleTag({ content: css });
+    await page.addScriptTag({
+      type: "module",
+      content: `${source}\nwindow.renderGraph = renderGraph;`,
+    });
+    await page.waitForFunction("typeof window.renderGraph === 'function'");
+    for (let count = 2; count <= 12; count++) {
+      const rects = await page.evaluate((n) => {
+        const host = document.querySelector("#host") as Element;
+        host.replaceChildren();
+        const nodes = Array.from({ length: n }, (_, i) => ({
+          id: `lane${i}`,
+          kind: "lane",
+          label: `lane${i}`,
+          role: null,
+          harness: null,
+          observedModel: null,
+          taskId: null,
+          processStatus: null,
+          taskStatus: null,
+          accepted: false,
+        }));
+        (
+          window as unknown as {
+            renderGraph: (...args: unknown[]) => unknown;
+          }
+        ).renderGraph(
+          document,
+          host,
+          {
+            version: 1,
+            view: "communication",
+            nodes,
+            edges: [],
+            hidden: { nodes: 0, edges: 0 },
+          },
+          {},
+        );
+        return [...host.querySelectorAll("svg .relay-node rect")].map(
+          (rect) => ({
+            x: Number(rect.getAttribute("x")),
+            y: Number(rect.getAttribute("y")),
+            width: Number(rect.getAttribute("width")),
+            height: Number(rect.getAttribute("height")),
+          }),
+        );
+      }, count);
+      expect(rects, `${count} nodes`).toHaveLength(count);
+      // A gap of at least 8px on one axis between every pair.
+      const gap = 8;
+      for (let a = 0; a < rects.length; a++)
+        for (let b = a + 1; b < rects.length; b++) {
+          const p = rects[a] as (typeof rects)[number];
+          const q = rects[b] as (typeof rects)[number];
+          const apartX = Math.max(q.x - (p.x + p.width), p.x - (q.x + q.width));
+          const apartY = Math.max(
+            q.y - (p.y + p.height),
+            p.y - (q.y + q.height),
+          );
+          expect(
+            Math.max(apartX, apartY),
+            `${count} nodes: ${a} and ${b}`,
+          ).toBeGreaterThanOrEqual(gap);
+        }
+    }
+  } finally {
+    await browser.close();
+  }
+}, 60000);
+
 async function expectText(
   locator: { textContent(): Promise<string | null> },
   text: string,
 ) {
   expect(await locator.textContent()).toContain(text);
 }
+
+test("renderer never draws more than the cap, even for a 2000 node, 5000 edge snapshot; clusters and focus buttons are keyboard operable", async () => {
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: true,
+  });
+  try {
+    const page = await browser.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await page.setContent('<main id="host"></main>');
+    await page.addStyleTag({ content: css });
+    await page.addScriptTag({
+      type: "module",
+      content: `${source}\nwindow.renderGraph = renderGraph;`,
+    });
+    await page.waitForFunction("typeof window.renderGraph === 'function'");
+    const result = await page.evaluate(() => {
+      const nodes = Array.from({ length: 2000 }, (_, i) => ({
+        id: `n${i}`,
+        kind: "task",
+        label: `n${i}`,
+        taskStatus: "working",
+        accepted: false,
+      }));
+      const edges = Array.from({ length: 5000 }, (_, i) => ({
+        id: `e${i}`,
+        from: `n${i % 2000}`,
+        to: `n${(i * 7 + 1) % 2000}`,
+        kind: "dependency",
+        label: "requires accepted",
+        threadId: null,
+        at: null,
+        unanswered: false,
+      }));
+      const started = performance.now();
+      const win = window as unknown as {
+        renderGraph: (...args: unknown[]) => unknown;
+      };
+      win.renderGraph(document, document.getElementById("host"), {
+        version: 1,
+        view: "dependencies",
+        nodes,
+        edges,
+        hidden: { nodes: 0, edges: 0 },
+        truncated: { nodes: 0, edges: 0 },
+      });
+      return {
+        ms: performance.now() - started,
+        svg: document.querySelectorAll(".relay-node").length,
+        list: document.querySelectorAll(".relay-graph-nodes > *").length,
+        rows: document.querySelectorAll("tbody tr").length,
+      };
+    });
+    expect(result.svg).toBeLessThanOrEqual(50);
+    expect(result.list).toBeLessThanOrEqual(50);
+    expect(result.rows).toBeLessThanOrEqual(100);
+    // Measured median 31 ms in the browser; about 10x for shared machines.
+    expect(result.ms).toBeLessThan(300);
+    // Clusters toggle in place and focus buttons call back.
+    await page.evaluate(() => {
+      document.getElementById("host")?.replaceChildren();
+      const win = window as unknown as {
+        renderGraph: (...args: unknown[]) => unknown;
+        calls: string[];
+      };
+      win.calls = [];
+      const base = {
+        role: null,
+        harness: null,
+        observedModel: null,
+        taskId: null,
+        processStatus: null,
+        taskStatus: "blocked",
+        accepted: false,
+      };
+      win.renderGraph(
+        document,
+        document.getElementById("host"),
+        {
+          version: 1,
+          view: "dependencies",
+          nodes: [
+            {
+              ...base,
+              id: "cluster:owner:a",
+              kind: "cluster",
+              label: "Agent: <b>a</b>",
+              clusterCount: 3,
+              clusterNoun: "tasks",
+              clusterTrouble: 1,
+              clusterOpen: false,
+            },
+            { ...base, id: "t1", kind: "task", label: "t1" },
+          ],
+          edges: [],
+          hidden: { nodes: 0, edges: 0 },
+          truncated: { nodes: 0, edges: 0 },
+          scale: { focus: null },
+        },
+        {
+          onToggleCluster: (id: string) => win.calls.push(`toggle:${id}`),
+          focusAction: {
+            onFocus: (id: string) => win.calls.push(`focus:${id}`),
+          },
+          onSelect: (value: { id: string }) =>
+            win.calls.push(`select:${value.id}`),
+        },
+      );
+    });
+    const cluster = page.locator("button[aria-expanded]");
+    expect(await cluster.getAttribute("aria-expanded")).toBe("false");
+    expect(await cluster.textContent()).toContain("<b>a</b>");
+    expect(await page.locator("b").count()).toBe(0);
+    await cluster.focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("button", { name: "Focus on t1" }).click();
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { calls: string[] }).calls,
+      ),
+    ).toEqual(["toggle:cluster:owner:a", "focus:t1"]);
+    // A cluster has no Focus button of its own.
+    expect(await page.locator("button.relay-node-focus:visible").count()).toBe(
+      1,
+    );
+    expect(errors).toEqual([]);
+  } finally {
+    await browser.close();
+  }
+}, 60000);

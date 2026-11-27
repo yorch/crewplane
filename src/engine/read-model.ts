@@ -13,7 +13,11 @@ import {
   reviewersOf,
 } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
-import { buildGraph, type GraphInput } from "./dashboard/graph-builder.ts";
+import {
+  buildGraph,
+  buildGraphBundle,
+  type GraphInput,
+} from "./dashboard/graph-builder.ts";
 import {
   normalizeConfig,
   normalizeState,
@@ -309,6 +313,8 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
           ? "accepted"
           : (t.live?.status?.state ?? "assigned"),
         accepted: Boolean(t.live?.accepted),
+        phase: t.phase ? String(t.phase).slice(0, 64) : null,
+        owner: t.owner && t.owner !== "—" ? String(t.owner).slice(0, 64) : null,
         dependsOn:
           t.live?.scheduling?.dependsOn.map((dep) => ({
             taskId: dep.taskId,
@@ -358,15 +364,15 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
   };
   // Display validation must never take down the authoritative board read.
   let graphState = "available";
-  let graphs: {
-    dependencies: ReturnType<typeof buildGraph>;
-    communication: ReturnType<typeof buildGraph>;
-  };
+  let graphs: ReturnType<typeof buildGraphBundle>["graphs"];
+  // The larger model behind the 50 node display cap, for clusters, focus and
+  // paging in the page. Absent when the graph is unavailable.
+  let graphModels:
+    | ReturnType<typeof buildGraphBundle>["graphModels"]
+    | undefined;
   try {
-    graphs = {
-      dependencies: buildGraph(graphInput, "dependencies"),
-      communication: buildGraph(graphInput, "communication"),
-    };
+    // One validation and one projection per view feed both sections.
+    ({ graphs, graphModels } = buildGraphBundle(graphInput));
   } catch {
     graphState = "unavailable";
     graphs = {
@@ -382,6 +388,7 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
   }
   return {
     graphs,
+    ...(graphModels ? { graphModels } : {}),
     graphCoverage: {
       state: graphState,
       lanesTotal: agents.length,

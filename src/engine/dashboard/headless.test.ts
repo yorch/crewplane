@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -315,4 +315,110 @@ it("shows a lane as stale when its pid probe fails with EPERM instead of claimin
     kill.mockRestore();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("exposes the intentional-stop marker from desired.json, bounded and symlink-safe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "relay-desired-"));
+  const at = "2026-11-08T00:59:00.000Z";
+  const write = (value: unknown) =>
+    writeFile(join(root, "desired.json"), JSON.stringify(value));
+  try {
+    await writeFile(join(root, "state.json"), JSON.stringify(state));
+    expect((await readHeadless(root)).intentionalStop).toBeNull();
+    await write({
+      version: 1,
+      desiredRunning: false,
+      reason: "intentional-stop",
+      at,
+    });
+    expect((await readHeadless(root)).intentionalStop).toEqual({ at });
+    // A start, a rollout, a wrong shape or a bad time is not a stop marker.
+    for (const value of [
+      { version: 1, desiredRunning: true, reason: "start", at },
+      { version: 1, desiredRunning: true, reason: "intentional-stop", at },
+      { version: 1, desiredRunning: false, reason: "intentional-stop" },
+      {
+        version: 1,
+        desiredRunning: false,
+        reason: "intentional-stop",
+        at: "not a date",
+      },
+      {
+        version: 1,
+        desiredRunning: false,
+        reason: "intentional-stop",
+        at: { PRIVATE: 1 },
+      },
+      [],
+      "text",
+    ]) {
+      await write(value);
+      expect((await readHeadless(root)).intentionalStop).toBeNull();
+    }
+    // Oversized or hostile content is ignored, never forwarded.
+    await writeFile(
+      join(root, "desired.json"),
+      JSON.stringify({
+        desiredRunning: false,
+        reason: "intentional-stop",
+        at,
+        pad: "x".repeat(64 * 1024),
+      }),
+    );
+    const big = await readHeadless(root);
+    expect(big.intentionalStop).toBeNull();
+    expect(big.state).not.toBe("unavailable");
+    await rm(join(root, "desired.json"));
+    await writeFile(
+      join(root, "elsewhere.json"),
+      JSON.stringify({
+        desiredRunning: false,
+        reason: "intentional-stop",
+        at,
+      }),
+    );
+    await symlink(join(root, "elsewhere.json"), join(root, "desired.json"));
+    const linked = await readHeadless(root);
+    expect(linked.intentionalStop).toBeNull();
+    expect(JSON.stringify(linked)).not.toContain("PRIVATE");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("records budgets as numbers or null, never undefined or NaN, whatever the state file holds", async () => {
+  const { normalizeState } = await import("./headless.ts");
+  const loaded = normalizeState({
+    ...state,
+    scheduling: {
+      fingerprint: "a".repeat(64),
+      allowedTasks: "nope",
+      enabledLanes: [1, "coordinator"],
+      maxRunsPerHour: 4,
+      maxRunMinutes: 10,
+      intervalSeconds: 10,
+      maxParallel: "many",
+    },
+  });
+  expect(loaded?.scheduling?.allowedTasks).toEqual([]);
+  expect(loaded?.scheduling?.enabledLanes).toEqual(["coordinator"]);
+  const result = projectHeadless(config, loaded, now, () => true);
+  expect(result.budgets).toEqual({
+    maxParallel: null,
+    maxRunsPerHour: 4,
+    maxRunMinutes: 10,
+    intervalSeconds: 10,
+  });
+  expect(normalizeState({ ...state, scheduling: [] })?.scheduling).toBe(
+    undefined,
+  );
+  const bare = { ...config, maxParallel: Number.NaN } as unknown as Config;
+  delete (bare as unknown as Record<string, unknown>).maxRunMinutes;
+  expect(projectHeadless(bare, null, now).budgets).toEqual({
+    maxParallel: null,
+    maxRunsPerHour: 20,
+    maxRunMinutes: null,
+    intervalSeconds: 10,
+  });
+  expect(JSON.stringify(result.budgets)).not.toMatch(/NaN|undefined/);
 });

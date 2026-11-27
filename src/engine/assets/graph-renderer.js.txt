@@ -1,10 +1,35 @@
-const selectableKinds = new Set(["task", "lane"]);
+const selectableKinds = new Set(["task", "lane", "cluster"]);
 const svgNamespace = "http://www.w3.org/2000/svg";
 let detailCounter = 0;
 const pill = { width: 128, height: 34 };
 
-/** Layered positions: prerequisites to the left; cycles are cut by a visit guard. */
-function layeredLayout(nodes, edges) {
+const CELL_WIDTH = 180;
+const CELL_HEIGHT = 56;
+const DEFAULT_WIDTH = 1080;
+/** How many 180 unit columns fit the canvas; never fewer than one. */
+function columnsFor(pixels) {
+  return Math.max(
+    1,
+    Math.min(
+      12,
+      Math.floor((pixels > 0 ? pixels : DEFAULT_WIDTH) / CELL_WIDTH),
+    ),
+  );
+}
+/** Room below the lowest node, equal to the margin above the first row. */
+const heightOf = (positions) =>
+  36 + Math.max(0, ...[...positions.values()].map((point) => point.y));
+const at = (column, row) => ({
+  x: 90 + column * CELL_WIDTH,
+  y: 36 + row * CELL_HEIGHT,
+});
+
+/**
+ * Layered positions: prerequisites to the left; cycles are cut by a visit
+ * guard. A chain longer than `columns` wraps into further bands below, so the
+ * drawing is never wider than the canvas.
+ */
+function layeredLayout(nodes, edges, columns) {
   const dependsOn = new Map(nodes.map((node) => [node.id, []]));
   for (const edge of edges)
     if (dependsOn.has(edge.from) && dependsOn.has(edge.to))
@@ -24,20 +49,126 @@ function layeredLayout(nodes, edges) {
   const layers = new Map();
   for (const node of nodes) {
     const layer = visit(node.id, new Set());
-    layers.set(layer, [...(layers.get(layer) ?? []), node]);
+    const members = layers.get(layer);
+    if (members) members.push(node);
+    else layers.set(layer, [node]);
   }
   const positions = new Map();
-  let height = 0;
+  const lastLayer = Math.max(0, ...layers.keys());
+  // Rows each band needs: the tallest layer in it.
+  const bands = [];
   for (const [layer, members] of layers) {
-    for (const [index, node] of members.entries())
-      positions.set(node.id, { x: 90 + layer * 180, y: 36 + index * 56 });
-    height = Math.max(height, 36 + members.length * 56);
+    const band = Math.floor(layer / columns);
+    bands[band] = Math.max(bands[band] ?? 0, members.length);
   }
-  const width = 180 + Math.max(0, ...layers.keys()) * 180;
-  return { positions, width, height };
+  const top = [];
+  let rows = 0;
+  for (let band = 0; band < bands.length; band++) {
+    top[band] = rows;
+    rows += (bands[band] ?? 0) + 0.5;
+  }
+  for (const [layer, members] of layers)
+    for (const [index, node] of members.entries())
+      positions.set(
+        node.id,
+        at(layer % columns, (top[Math.floor(layer / columns)] ?? 0) + index),
+      );
+  return {
+    positions,
+    width: CELL_WIDTH * Math.min(columns, lastLayer + 1),
+    height: heightOf(positions),
+  };
+}
+/**
+ * Clusters as a grid: collapsed clusters and loose nodes fill rows left to
+ * right; an expanded cluster takes its own rows, its header first and its
+ * members beneath it, so what was just opened sits next to the control that
+ * opened it. Members whose cluster is not on this page are drawn as loose nodes.
+ */
+function groupedLayout(nodes, columns) {
+  const headers = new Set(
+    nodes.filter((node) => node.kind === "cluster").map((node) => node.id),
+  );
+  const membersOf = new Map();
+  const loose = new Set();
+  for (const node of nodes) {
+    if (node.kind === "cluster") continue;
+    if (node.clusterId && headers.has(node.clusterId)) {
+      const list = membersOf.get(node.clusterId);
+      if (list) list.push(node);
+      else membersOf.set(node.clusterId, [node]);
+    } else loose.add(node);
+  }
+  const positions = new Map();
+  let column = 0;
+  let row = 0;
+  let widest = 1;
+  const next = () => {
+    widest = Math.max(widest, column + 1);
+    if (++column >= columns) {
+      column = 0;
+      row++;
+    }
+  };
+  const newRow = () => {
+    if (column > 0) {
+      row++;
+      column = 0;
+    }
+  };
+  for (const node of nodes) {
+    if (node.kind !== "cluster") {
+      if (!loose.has(node)) continue;
+      positions.set(node.id, at(column, row));
+      next();
+      continue;
+    }
+    const members = membersOf.get(node.id) ?? [];
+    if (!node.clusterOpen || !members.length) {
+      positions.set(node.id, at(column, row));
+      next();
+      continue;
+    }
+    newRow();
+    positions.set(node.id, at(0, row));
+    widest = Math.max(widest, 1);
+    row++;
+    for (const member of members) {
+      positions.set(member.id, at(column, row));
+      next();
+    }
+    newRow();
+  }
+  return {
+    positions,
+    width: CELL_WIDTH * Math.max(1, Math.min(columns, widest)),
+    height: heightOf(positions),
+  };
+}
+// Smallest ring radius at which no two pills of `count` nodes come within
+// `gap` of each other (on at least one axis). Pills are wider than tall, so
+// the ring is widened until every pair clears, not just neighbours.
+function ringRadius(count, gap = 12) {
+  // The same angles circularLayout places the nodes at.
+  const angle = (index) => (2 * Math.PI * index) / count - Math.PI / 2;
+  const clear = (radius) => {
+    for (let a = 0; a < count; a++)
+      for (let b = a + 1; b < count; b++) {
+        const dx = radius * (Math.cos(angle(a)) - Math.cos(angle(b)));
+        const dy = radius * (Math.sin(angle(a)) - Math.sin(angle(b)));
+        if (Math.abs(dx) < pill.width + gap && Math.abs(dy) < pill.height + gap)
+          return false;
+      }
+    return true;
+  };
+  let radius = Math.max(70, (count * 150) / (2 * Math.PI));
+  // Bounded: the drawn graph holds at most the node cap, and a radius of
+  // (cap * width) always clears.
+  while (!clear(radius) && radius < count * (pill.width + gap)) radius += 4;
+  return radius;
 }
 function circularLayout(nodes) {
-  const radius = Math.max(70, (nodes.length * 150) / (2 * Math.PI));
+  const radius = ringRadius(nodes.length);
   const centerX = radius + 90;
   const centerY = radius + 40;
   const positions = new Map();
@@ -132,20 +263,35 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     make("th", text, header).scope = "col";
   const body = make("tbody", undefined, table);
   host.append(root);
+  // The layout wraps at the canvas width, so it follows the canvas.
+  if (typeof ResizeObserver === "function")
+    new ResizeObserver(() => {
+      if (drawn.nodes.length && columnsFor(canvas.clientWidth) !== columnsUsed)
+        draw();
+    }).observe(canvas);
   const nodeElements = new Map();
   const nodeParts = new Map();
+  // With a focus action each node is a wrapper holding its button and a
+  // second "Focus" button; without one the button itself is the list item.
+  const nodeItems = new Map();
+  const focusButtons = new Map();
   const edgeElements = new Map();
   let snapshot;
   let selected = null;
   let drawn = { nodes: [], edges: [], view: "communication" };
+  let columnsUsed = 0;
   const draw = () => {
     const { nodes, edges, view } = drawn;
     canvas.hidden = nodes.length === 0;
     svg.replaceChildren();
     if (!nodes.length) return;
-    const { positions, width, height } =
-      view === "dependencies"
-        ? layeredLayout(nodes, edges)
+    const columns = columnsFor(canvas.clientWidth);
+    columnsUsed = columns;
+    const grouped = nodes.some((node) => node.kind === "cluster");
+    const { positions, width, height } = grouped
+      ? groupedLayout(nodes, columns)
+      : view === "dependencies"
+        ? layeredLayout(nodes, edges, columns)
         : circularLayout(nodes);
     svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
     svg.setAttribute("width", String(width));
@@ -249,16 +395,25 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
         "text",
         { x: position.x, y: position.y + 4 },
         group,
-      ).textContent = shorten(node.label);
+      ).textContent =
+        node.kind === "cluster"
+          ? shorten(`${node.clusterOpen ? "▾" : "▸"} ${node.label}`)
+          : shorten(node.label);
     }
   };
   const choose = (value) => {
+    // A cluster is not a destination: it expands or collapses in place.
+    if (value.kind === "cluster") {
+      options.onToggleCluster?.(value.id);
+      return;
+    }
     selected = value;
     for (const [id, button] of nodeElements)
-      button.setAttribute(
-        "aria-pressed",
-        String(selected.kind === button.dataset.kind && selected.id === id),
-      );
+      if (button.dataset.kind !== "cluster")
+        button.setAttribute(
+          "aria-pressed",
+          String(selected.kind === button.dataset.kind && selected.id === id),
+        );
     for (const row of edgeElements.values()) {
       const button = row.querySelector("button");
       if (button)
@@ -302,6 +457,13 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     nodeParts.set(id, { label, nodeKind, primary, secondary });
     return button;
   };
+  const createFocusButton = (id) => {
+    const focus = document.createElement("button");
+    focus.type = "button";
+    focus.className = "relay-node-focus";
+    focus.addEventListener("click", () => options.focusAction.onFocus(id));
+    return focus;
+  };
   function update(next) {
     snapshot = next;
     const activeControl = root.contains(document.activeElement)
@@ -341,30 +503,68 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
       if (!button) {
         button = createNodeButton(node.id);
         nodeElements.set(node.id, button);
+        if (options.focusAction) {
+          const item = document.createElement("div");
+          item.className = "relay-node-item";
+          const focus = createFocusButton(node.id);
+          item.append(button, focus);
+          nodeItems.set(node.id, item);
+          focusButtons.set(node.id, focus);
+        }
       }
       button.dataset.kind = node.kind;
       button.disabled = !selectableKinds.has(node.kind);
       const parts = nodeParts.get(node.id);
       parts.label.textContent = node.label;
-      parts.nodeKind.textContent = node.kind === "lane" ? "Agent" : node.kind;
-      if (node.kind === "task") {
+      parts.nodeKind.textContent =
+        node.kind === "lane"
+          ? "Agent"
+          : node.kind === "cluster"
+            ? "Group"
+            : node.kind;
+      const focusButton = focusButtons.get(node.id);
+      if (focusButton) {
+        const focused = next.scale?.focus?.id === node.id;
+        focusButton.hidden = node.kind === "cluster";
+        focusButton.textContent = focused ? "Clear focus" : "Focus";
+        focusButton.setAttribute(
+          "aria-label",
+          `${focused ? "Clear focus on" : "Focus on"} ${node.label}`,
+        );
+        focusButton.setAttribute("aria-pressed", String(focused));
+      }
+      if (node.kind === "cluster") {
+        const trouble = node.clusterTrouble ?? 0;
+        parts.primary.textContent = `${node.clusterCount ?? 0} ${node.clusterNoun ?? "nodes"}${trouble ? ` · ${trouble} blocked, paused or stale` : ""}`;
+        parts.secondary.textContent = node.clusterOpen
+          ? "Expanded. Choose to collapse this group."
+          : "Collapsed. Choose to show its members.";
+        button.setAttribute("aria-expanded", String(Boolean(node.clusterOpen)));
+        button.removeAttribute("aria-pressed");
+      } else button.removeAttribute("aria-expanded");
+      if (node.kind === "cluster") {
+        // handled above
+      } else if (node.kind === "task") {
         parts.primary.textContent = `Task status: ${node.taskStatus ?? "unknown"}`;
         parts.secondary.textContent = `Accepted: ${node.accepted ? "yes" : "no"}`;
       } else {
         parts.primary.textContent = `Process: ${node.processStatus ?? "unknown"} · Task status: ${node.taskStatus ?? "unknown"}`;
         parts.secondary.textContent = `Role: ${node.role ?? "unknown"} · Harness: ${node.harness ?? "unknown"} · Observed model: ${node.observedModel ?? "unknown"} · Task: ${node.taskId ?? "unknown"} · Accepted: ${node.accepted ? "yes" : "no"}`;
       }
-      button.setAttribute(
-        "aria-pressed",
-        String(selected?.kind === node.kind && selected?.id === node.id),
-      );
-      nodeOrder.push(button);
+      if (node.kind !== "cluster")
+        button.setAttribute(
+          "aria-pressed",
+          String(selected?.kind === node.kind && selected?.id === node.id),
+        );
+      nodeOrder.push(nodeItems.get(node.id) ?? button);
     }
     for (const [id, element] of nodeElements)
       if (!ids.has(id)) {
-        element.remove();
+        (nodeItems.get(id) ?? element).remove();
         nodeElements.delete(id);
         nodeParts.delete(id);
+        nodeItems.delete(id);
+        focusButtons.delete(id);
       }
     syncOrder(nodesHost, nodeOrder);
     const edges = suppliedEdges.filter(
@@ -442,6 +642,8 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
       root.remove();
       nodeElements.clear();
       nodeParts.clear();
+      nodeItems.clear();
+      focusButtons.clear();
       edgeElements.clear();
     },
   };

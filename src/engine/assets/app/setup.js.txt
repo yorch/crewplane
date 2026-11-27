@@ -236,6 +236,7 @@ function lanesPanel(config) {
         ],
         rows: rows.map((row) => ({ key: row.id, cells: laneCells(row) })),
         className: "lanes-table",
+        scrollable: true,
       }),
       el(
         "p",

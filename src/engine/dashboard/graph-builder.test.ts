@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGraph,
+  buildGraphBundle,
+  buildGraphModel,
+  EDGE_KINDS,
   type GraphInput,
   type Lane,
   type Message,
+  MODEL_MAX_EDGES,
+  MODEL_MAX_NODES,
   type Task,
 } from "./graph-builder.js";
 
@@ -208,5 +213,186 @@ describe("GRAPH-V1 builder", () => {
       expect(() => buildGraph(value as GraphInput, "dependencies")).toThrow(
         "Invalid graph input",
       );
+  });
+});
+
+describe("graph model for clusters, focus and paging", () => {
+  it("keeps the capped display graph unchanged and adds the larger model beside it", () => {
+    const tasks = Array.from({ length: 80 }, (_, i) => ({
+      ...task(`T${String(i).padStart(3, "0")}`),
+      phase: String(i % 4),
+      owner: `lane${i % 3}`,
+      dependsOn: i
+        ? [
+            {
+              taskId: `T${String(i - 1).padStart(3, "0")}`,
+              require: "accepted" as const,
+            },
+          ]
+        : [],
+    }));
+    const data = input({ tasks });
+    const display = buildGraph(data, "dependencies");
+    const model = buildGraphModel(data, "dependencies");
+    expect(display.nodes).toHaveLength(50);
+    expect(display.truncated).toEqual({ nodes: 30, edges: expect.any(Number) });
+    expect(model.nodes).toHaveLength(80);
+    expect(model.edges).toHaveLength(79);
+    expect(model.truncated).toEqual({ nodes: 0, edges: 0 });
+    expect(model.nodes[3]).toMatchObject({
+      id: "T003",
+      phase: "3",
+      owner: "lane0",
+    });
+    // Implied by the view or by the id: not repeated per node.
+    expect(model.nodes[3]).not.toHaveProperty("kind");
+    expect(model.nodes[3]).not.toHaveProperty("taskId");
+    // Grouping hints are model only; the display nodes are exactly as before.
+    expect(Object.keys(display.nodes[0] ?? {})).not.toContain("phase");
+    // Null fields are left out to keep the model small.
+    expect(Object.keys(model.nodes[0] ?? {})).not.toContain("role");
+    // Endpoints are node indexes; the label sits in the shared refs table.
+    const [from, to, kind, ref] = model.edges[0] ?? [];
+    expect([
+      model.nodes[from as number]?.id,
+      model.nodes[to as number]?.id,
+      EDGE_KINDS[kind as number],
+      model.refs[ref as number]?.[0],
+    ]).toEqual(["T001", "T000", "dependency", "requires accepted"]);
+    expect(model.refs).toHaveLength(1);
+  });
+  it("rejects bad grouping hints with the same fixed error", () => {
+    const bad = input({ tasks: [{ ...task("x"), phase: "p".repeat(300) }] });
+    expect(() => buildGraphModel(bad, "dependencies")).toThrow(
+      "Invalid graph input",
+    );
+    expect(() =>
+      buildGraphModel(
+        input({ tasks: [{ ...task("x"), owner: 5 as unknown as string }] }),
+        "dependencies",
+      ),
+    ).toThrow("Invalid graph input");
+  });
+  it("carries communication edges as tuples with thread links and open questions", () => {
+    const model = buildGraphModel(
+      input({
+        lanes: [lane("coordinator"), lane("F")],
+        messages: [
+          message("q", { kind: "question" }),
+          message("a", {
+            kind: "answer",
+            replyTo: "q",
+            from: "F",
+            to: "coordinator",
+          }),
+        ],
+        unansweredIds: ["q"],
+      }),
+      "communication",
+    );
+    expect(model.nodes.map((n) => n.id)).toEqual(["F", "coordinator"]);
+    const open = model.edges.find(
+      (e) => e[2] === EDGE_KINDS.indexOf("awaiting-answer"),
+    );
+    expect(open?.[4]).toBe(1);
+    expect(model.refs[open?.[3] as number]?.[1]).toBe("q");
+    expect(model.nodes[open?.[0] as number]?.id).toBe("coordinator");
+  });
+  it("bounds the model and counts what it left out", () => {
+    const tasks = Array.from({ length: 1000 }, (_, i) => ({
+      ...task(`T${String(i).padStart(4, "0")}`),
+      dependsOn: [0, 1, 2, 3].map((k) => ({
+        taskId: `T${String((i + k + 1) % 1000).padStart(4, "0")}`,
+        require: "ready" as const,
+      })),
+    }));
+    const lanes = Array.from({ length: 64 }, (_, i) => lane(`lane${i}`));
+    const model = buildGraphModel(input({ tasks, lanes }), "dependencies");
+    expect(model.nodes.length).toBeLessThanOrEqual(MODEL_MAX_NODES);
+    expect(model.edges.length).toBe(MODEL_MAX_EDGES);
+    expect(model.truncated.edges).toBe(4000 - MODEL_MAX_EDGES);
+  });
+  it("builds the largest accepted input within a generous budget", () => {
+    const tasks = Array.from({ length: 1000 }, (_, i) => ({
+      ...task(`T${i}`),
+      phase: String(i % 5),
+      owner: `lane${i % 64}`,
+      dependsOn: i
+        ? [{ taskId: `T${i - 1}`, require: "accepted" as const }]
+        : [],
+    }));
+    const lanes = Array.from({ length: 64 }, (_, i) => lane(`lane${i}`));
+    const messages = Array.from({ length: 1000 }, (_, i) =>
+      message(`m${i}`, {
+        to: i % 2 ? "all" : "lane3",
+        from: `lane${i % 64}`,
+        at: `2026-11-08T00:${String(i % 60).padStart(2, "0")}:00Z`,
+      }),
+    );
+    const data = input({ tasks, lanes, messages, unansweredIds: ["m1", "m2"] });
+    const started = performance.now();
+    for (const view of ["dependencies", "communication"] as const) {
+      const display = buildGraph(data, view);
+      const model = buildGraphModel(data, view);
+      expect(display.nodes.length).toBeLessThanOrEqual(50);
+      expect(display.edges.length).toBeLessThanOrEqual(100);
+      expect(model.nodes.length).toBeLessThanOrEqual(MODEL_MAX_NODES);
+      expect(model.edges.length).toBeLessThanOrEqual(MODEL_MAX_EDGES);
+    }
+    // Four builds measured a median of 38 ms; about 10x for shared machines.
+    expect(performance.now() - started).toBeLessThan(400);
+  });
+});
+
+describe("shared projection and the model ceiling", () => {
+  const sample = () =>
+    input({
+      tasks: [
+        {
+          ...task("A"),
+          phase: "1",
+          dependsOn: [{ taskId: "GONE", require: "ready" as const }],
+        },
+        {
+          ...task("B"),
+          dependsOn: [{ taskId: "A", require: "accepted" as const }],
+        },
+      ],
+      lanes: [lane("coordinator"), lane("F")],
+      messages: [message("q", { kind: "question", to: "all" })],
+      unansweredIds: ["q"],
+    });
+  it("the bundle equals the separate builders", () => {
+    const bundle = buildGraphBundle(sample());
+    for (const view of ["dependencies", "communication"] as const) {
+      expect(bundle.graphs[view]).toEqual(buildGraph(sample(), view));
+      expect(bundle.graphModels[view]).toEqual(buildGraphModel(sample(), view));
+    }
+  });
+  it("validates and projects each view once for all four sections", () => {
+    let reads = 0;
+    const counted = new Proxy(sample(), {
+      get(target, key, receiver) {
+        if (key === "version") reads++;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    buildGraphBundle(counted);
+    expect(reads).toBe(2);
+  });
+  it("the node ceiling is what a valid input can hold: 1000 tasks and 64 lanes", () => {
+    expect(MODEL_MAX_NODES).toBe(1064);
+    const tasks = Array.from({ length: 1000 }, (_, i) => task(`T${i}`));
+    const lanes = Array.from({ length: 64 }, (_, i) => lane(`l${i}`));
+    const data = input({ tasks, lanes });
+    expect(buildGraphModel(data, "dependencies").nodes).toHaveLength(1000);
+    expect(buildGraphModel(data, "communication").nodes).toHaveLength(64);
+    expect(buildGraphModel(data, "dependencies").truncated.nodes).toBe(0);
+  });
+  it("keeps references to things that are not nodes as string endpoints", () => {
+    const model = buildGraphModel(sample(), "dependencies");
+    const missing = model.edges.find((edge) => edge[1] === "GONE");
+    expect(missing).toBeDefined();
+    expect(typeof missing?.[0]).toBe("number");
   });
 });

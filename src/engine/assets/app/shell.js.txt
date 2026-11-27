@@ -4,6 +4,7 @@ import { applyControls } from "./filters.js";
 import { hrefFor, parseHash, routeScrollKey } from "./route.js";
 import { announceRoute, rememberFilters, updateNavLinks } from "./router.js";
 import { $, hooks, stackedLayout, store } from "./store.js";
+import { setBaseTitle } from "./title.js";
 import { activeView } from "./ui-state.js";
 
 export function showActiveView() {
@@ -12,7 +13,7 @@ export function showActiveView() {
     view.hidden = !store.data || view.id !== `view-${store.route.view}`;
   $("view-title").textContent = meta.title;
   $("view-subtitle").textContent = meta.subtitle;
-  document.title = `${meta.title} · Crewplane`;
+  setBaseTitle(`${meta.title} · Crewplane`);
   $("loading").hidden = Boolean(store.data);
 }
 

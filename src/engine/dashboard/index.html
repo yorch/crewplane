@@ -3,12 +3,15 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
     <title>Crewplane · Coordination</title>
+    <script src="/theme-boot.js"></script>
+    <link rel="stylesheet" href="/theme.css" />
     <link rel="stylesheet" href="/dashboard.css" />
     <link rel="stylesheet" href="/graph-renderer.css" />
     <script type="module" src="/graph-viewer.js"></script>
     <script type="module" src="/dashboard.js"></script>
-    <script src="/runs.js" defer></script>
+    <script type="module" src="/runs.js"></script>
   </head>
   <body>
     <a id="skip-link" class="skip-link" href="#main">Skip to content</a>
@@ -18,6 +21,11 @@
           <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M4.5 7.7L12 12l7.5-4.3M12 12v8.5" /></svg>
           <span class="brand-text">Crewplane</span>
         </a>
+        <button id="palette-open" class="search-button" type="button" aria-haspopup="dialog" aria-keyshortcuts="Control+K Meta+K /">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5" /><path d="M16 16l4.5 4.5" /></svg>
+          <span class="search-label">Search</span>
+          <kbd class="search-hint" aria-hidden="true">Ctrl K</kbd>
+        </button>
         <div id="connection-wrap" class="connection" data-state="connecting">
           <span class="connection-dot" aria-hidden="true"></span>
           <div class="connection-text">
@@ -45,6 +53,17 @@
             <li><a data-nav="setup" href="#/setup"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg><span class="nav-label">Setup &amp; config</span><span class="nav-count" data-count="setup" hidden></span></a></li>
             <li><a data-nav="system" href="#/system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></svg><span class="nav-label">System &amp; notes</span><span class="nav-count" data-count="system" hidden></span></a></li>
           </ul>
+          <div class="nav-tools">
+            <fieldset class="theme-switch" aria-label="Theme">
+              <button type="button" data-theme-choice="system" aria-pressed="true">System</button>
+              <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+              <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+            </fieldset>
+            <button id="prefs-open" class="nav-tool-button" type="button" aria-haspopup="dialog">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8" /><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" /></svg>
+              <span>Preferences</span>
+            </button>
+          </div>
         </nav>
         <p class="sidebar-foot">Read-only · local only</p>
       </div>
@@ -223,8 +242,25 @@
                 </div>
                 <div id="run-summary" class="run-summary"></div>
                 <div id="run-actions" class="run-actions"></div>
+                <fieldset id="run-tools" class="toolbar run-tools" aria-label="Timeline tools">
+                  <label class="field field-grow">Search loaded events<input id="run-search" type="search" maxlength="100" placeholder="Message, tool or status…" autocomplete="off" disabled /></label>
+                  <div class="toolbar-actions">
+                    <button id="run-first-error" type="button" disabled>Jump to first error</button>
+                    <button id="run-copy-json" type="button" disabled>Copy as JSON</button>
+                    <button id="run-download-json" type="button" disabled>Download JSON</button>
+                    <button id="run-compare-toggle" type="button" aria-expanded="false" aria-controls="run-compare" disabled>Compare with another run</button>
+                  </div>
+                </fieldset>
+                <fieldset id="run-kinds" class="chips" aria-label="Filter events by type"></fieldset>
+                <p id="run-filter-status" class="count" role="status"></p>
                 <!-- biome-ignore lint/a11y/noNoninteractiveTabindex: the scrollable timeline must be keyboard scrollable. -->
                 <ol id="run-events" class="timeline" tabindex="0" aria-label="Sanitized chronological run timeline" data-scroll-key="run-events"></ol>
+                <section id="run-compare" class="run-compare" aria-labelledby="run-compare-heading" hidden>
+                  <h3 id="run-compare-heading" tabindex="-1">Compare with another run</h3>
+                  <label class="field">Compare with<select id="run-compare-select"><option value="">Choose a run…</option></select></label>
+                  <p id="run-compare-status" class="note" role="status"></p>
+                  <div id="run-compare-body"></div>
+                </section>
                 <p id="run-note" class="note"></p>
                 <p class="note">Allowlisted operational metadata only. Raw stdout/stderr, private reasoning and unclassified model/tool text are omitted. Historical native logs are never exposed.</p>
               </section>
@@ -239,6 +275,25 @@
                   <option value="dependencies">Task dependencies</option>
                 </select>
               </label>
+            </fieldset>
+            <fieldset id="graph-scale" class="toolbar" aria-label="Graph scale options" hidden>
+              <label class="field">Group by
+                <select id="graph-group"><option value="none">No grouping</option></select>
+              </label>
+              <label class="field">Focus distance
+                <select id="graph-hops">
+                  <option value="1">1 hop</option>
+                  <option value="2">2 hops</option>
+                  <option value="3">3 hops</option>
+                </select>
+              </label>
+              <div class="toolbar-actions graph-pager">
+                <span id="graph-focus-state" class="count">No node focused. Use Focus on a node in the list.</span>
+                <button id="graph-focus-clear" class="text-button" type="button" hidden>Clear focus</button>
+                <button id="graph-prev" class="text-button" type="button" disabled>Previous 50</button>
+                <span id="graph-page-state" class="count" role="status"></span>
+                <button id="graph-next" class="text-button" type="button" disabled>Next 50</button>
+              </div>
             </fieldset>
             <section class="panel" aria-labelledby="coverage-heading">
               <div class="panel-head">

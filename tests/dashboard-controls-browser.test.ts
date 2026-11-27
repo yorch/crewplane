@@ -18,6 +18,7 @@ import { controlDirectory, ensureControlDirectory } from "../src/control.ts";
 import { main as coordination } from "../src/engine/agents.mjs";
 import { createDashboard, newSessionToken } from "../src/engine/dashboard.ts";
 import { createTraceStore } from "../src/engine/operational-traces.ts";
+import { failOnConsoleErrors } from "./support/console-errors.ts";
 
 // UI tests only: operator controls in a real browser against the real HTTP
 // server. A fake supervisor stands in for the process that consumes commands
@@ -218,7 +219,7 @@ async function open(base: string, fragment: string, view?: string) {
   });
   const errors: string[] = [];
   const posts: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
+  failOnConsoleErrors(page, errors);
   page.on("request", (request) => {
     if (request.method() === "POST") posts.push(request.url());
   });

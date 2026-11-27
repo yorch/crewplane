@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Config, State } from "../../contracts.ts";
 import { checkControlDirectory } from "../../control.ts";
 import { probeProcess } from "../../liveness.ts";
+import { readJsonStrict } from "./sanitize.ts";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
@@ -13,6 +14,23 @@ const strings = (v: unknown): string[] =>
   Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 const numbers = (v: unknown): number[] =>
   Array.isArray(v) ? v.filter((x): x is number => Number.isFinite(x)) : [];
+const finiteOrUndefined = (n: unknown): number | undefined =>
+  typeof n === "number" && Number.isFinite(n) ? n : undefined;
+// The loaded schedule is read by the scheduling explanation and the budgets
+// projection: arrays are arrays of strings and a number is a finite number or
+// absent, whatever the file held.
+function normalizeScheduling(v: unknown): State["scheduling"] | undefined {
+  if (!isObject(v)) return undefined;
+  return {
+    fingerprint: typeof v.fingerprint === "string" ? v.fingerprint : "",
+    allowedTasks: strings(v.allowedTasks),
+    enabledLanes: strings(v.enabledLanes),
+    maxParallel: finiteOrUndefined(v.maxParallel),
+    maxRunsPerHour: finiteOrUndefined(v.maxRunsPerHour),
+    maxRunMinutes: finiteOrUndefined(v.maxRunMinutes),
+    intervalSeconds: finiteOrUndefined(v.intervalSeconds),
+  } as State["scheduling"];
+}
 export function normalizeState(v: unknown): State | null {
   if (!isObject(v)) return null;
   const records: Record<string, unknown> = {};
@@ -36,6 +54,7 @@ export function normalizeState(v: unknown): State | null {
       ? v.controlLog.filter(isObject)
       : undefined,
     notices: isObject(v.notices) ? v.notices : {},
+    scheduling: normalizeScheduling(v.scheduling),
     records,
     ...(isObject(v.retiredRuns) ? { retiredRuns: retired } : {}),
   } as unknown as State;
@@ -78,19 +97,23 @@ export function projectHeadless(
     [loaded.maxRunsPerHour, loaded.maxRunMinutes, loaded.intervalSeconds].every(
       (n) => typeof n === "number" && Number.isFinite(n),
     );
+  // A number, or null when the file does not record one (never undefined or
+  // NaN: the page prints "not recorded" for null).
+  const finite = (n: unknown): number | null =>
+    typeof n === "number" && Number.isFinite(n) ? n : null;
   const budgets = hasLoadedBudgets
     ? {
-        maxParallel: loaded.maxParallel,
+        maxParallel: finite(loaded.maxParallel),
         maxRunsPerHour: loaded.maxRunsPerHour as number,
         maxRunMinutes: loaded.maxRunMinutes as number,
         intervalSeconds: loaded.intervalSeconds as number,
       }
     : config
       ? {
-          maxParallel: config.maxParallel,
-          maxRunsPerHour: config.maxRunsPerHour,
-          maxRunMinutes: config.maxRunMinutes,
-          intervalSeconds: config.intervalSeconds,
+          maxParallel: finite(config.maxParallel),
+          maxRunsPerHour: finite(config.maxRunsPerHour),
+          maxRunMinutes: finite(config.maxRunMinutes),
+          intervalSeconds: finite(config.intervalSeconds),
         }
       : null;
   return {
@@ -156,11 +179,11 @@ export function projectHeadless(
         entry?.reason && /^[A-Z_]{1,64}$/.test(entry.reason)
           ? entry.reason
           : null;
-      const rateLimited =
-        hasLoadedBudgets && budgets && runs.length >= budgets.maxRunsPerHour;
-      const next = rateLimited
-        ? runs[runs.length - budgets.maxRunsPerHour]
-        : undefined;
+      const hourly = hasLoadedBudgets
+        ? (budgets?.maxRunsPerHour ?? null)
+        : null;
+      const rateLimited = hourly !== null && runs.length >= hourly;
+      const next = rateLimited ? runs[runs.length - hourly] : undefined;
       const status =
         r?.status === "running"
           ? fresh && value?.running && processAlive === true
@@ -236,6 +259,36 @@ export function projectHeadless(
   };
 }
 
+/** desired.json is a few dozen bytes; anything bigger is not the supervisor's. */
+const desiredLimit = 4096;
+/**
+ * When the supervisor last recorded an intentional stop (a signal, Ctrl-C or a
+ * stop command), or null: no file, unsafe or oversized file, a start/rollout
+ * record, or an unparseable time. Only the validated time is returned.
+ */
+export async function readIntentionalStop(
+  control: string,
+): Promise<{ at: string } | null> {
+  try {
+    const desired = await readJsonStrict(
+      join(control, "desired.json"),
+      desiredLimit,
+    );
+    if (
+      !isObject(desired) ||
+      desired.desiredRunning !== false ||
+      desired.reason !== "intentional-stop" ||
+      typeof desired.at !== "string" ||
+      desired.at.length > 64
+    )
+      return null;
+    const time = Date.parse(desired.at);
+    return Number.isFinite(time) ? { at: new Date(time).toISOString() } : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function readHeadless(
   control: string,
   knownAgents: string[] = [],
@@ -254,17 +307,24 @@ export async function readHeadless(
       read<Config>("config.json").catch(() => null),
       read<State>("state.json"),
     ]);
-    return projectHeadless(
-      normalizeConfig(config),
-      normalizeState(state),
-      Date.now(),
-      (pid) => {
-        const state = probeProcess(pid);
-        return state === "unknown" ? null : state === "alive";
-      },
-      knownAgents,
-    );
+    return {
+      ...projectHeadless(
+        normalizeConfig(config),
+        normalizeState(state),
+        Date.now(),
+        (pid) => {
+          const state = probeProcess(pid);
+          return state === "unknown" ? null : state === "alive";
+        },
+        knownAgents,
+      ),
+      intentionalStop: await readIntentionalStop(control),
+    };
   } catch {
-    return { ...projectHeadless(null, null), state: "unavailable" };
+    return {
+      ...projectHeadless(null, null),
+      state: "unavailable",
+      intentionalStop: null as { at: string } | null,
+    };
   }
 }
