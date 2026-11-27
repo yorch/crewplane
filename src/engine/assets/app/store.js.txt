@@ -11,6 +11,8 @@ export const store = {
   /** Transport: "polling" until the event stream delivers, then "live". */
   mode: "polling",
   lastSuccess: null,
+  /** Counts snapshots applied (polled or pushed); a poll started before a newer one is discarded. */
+  applied: 0,
   internalNavigation: false,
   messageLimit: 100,
   messageLimitKey: "",

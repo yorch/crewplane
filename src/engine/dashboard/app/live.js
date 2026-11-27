@@ -5,55 +5,53 @@ import {
   setMode,
   showDisconnected,
 } from "./api.js";
-import { backoffDelay, createSseParser } from "./live-core.js";
+import {
+  backoffDelay,
+  createLiveSession,
+  createSseParser,
+  liveTuning,
+} from "./live-core.js";
 
 // Live updates over GET /api/events. EventSource cannot send the per-launch
 // session header, so this reads the stream with fetch(). Any failure drops the
 // page back to the existing 5s polling (the retained-snapshot banner behaves as
 // before) while reconnecting with capped exponential backoff and jitter.
-const IDLE_MS = 45000; // three missed 15s heartbeats
+//
+// Reconnecting is deliberately slow to speed up: the backoff counter resets
+// only after a snapshot was rendered or a stream stayed up for `stableMs`,
+// never because a connection opened or a heartbeat arrived. A board too large
+// to push (`resync`) keeps the stream open and the page polling. A tab hidden
+// for `hiddenGraceMs` closes its stream (the server serves at most 8) and
+// reopens it when the tab is shown again.
+const tuning = liveTuning(window.crewplaneLiveTuning);
+const session = createLiveSession({
+  applySnapshot,
+  markFresh,
+  showDisconnected,
+  setMode,
+});
 let started = false;
 let attempt = 0;
-let lastEventId = null;
-let failed = false;
-
-function handle(event) {
-  if (event.id) lastEventId = event.id;
-  let value;
-  try {
-    value = JSON.parse(event.data);
-  } catch {
-    throw new Error("Malformed live event");
-  }
-  if (event.event === "snapshot") {
-    failed = false;
-    try {
-      applySnapshot(value);
-    } catch (error) {
-      showDisconnected(`Render failed: ${error.message}`, "automatically");
-    }
-  } else if (event.event === "error") {
-    failed = true;
-    showDisconnected(
-      typeof value?.error === "string"
-        ? value.error
-        : "Dashboard data unavailable.",
-      "automatically",
-    );
-  } else if (event.event === "ping" && !failed && typeof value?.at === "string")
-    markFresh(value.at);
-}
+let connecting = false;
+let suspended = false;
+let current = null;
+let reconnectTimer;
+let hiddenTimer;
 
 async function connect() {
+  if (connecting || suspended) return;
+  connecting = true;
   const controller = new AbortController();
+  current = controller;
+  const openedAt = Date.now();
   let idle;
   const watch = () => {
     clearTimeout(idle);
-    idle = setTimeout(() => controller.abort(), IDLE_MS);
+    idle = setTimeout(() => controller.abort(), tuning.idleMs);
   };
-  let received = false;
   try {
     watch();
+    const lastEventId = session.lastEventId;
     const response = await window.crewplaneFetch("/api/events", {
       cache: "no-store",
       signal: controller.signal,
@@ -75,29 +73,52 @@ async function connect() {
       const { done, value } = await reader.read();
       if (done) break;
       watch();
-      for (const event of parser.feed(
-        decoder.decode(value, { stream: true }),
-      )) {
-        if (!received) {
-          received = true;
-          attempt = 0;
-          failed = false;
-          setMode("live");
-        }
-        handle(event);
-      }
+      for (const event of parser.feed(decoder.decode(value, { stream: true })))
+        if (session.handle(event) === "applied") attempt = 0;
     }
   } catch {
     // Fall through to polling; the reason is not user-actionable.
   } finally {
     clearTimeout(idle);
     controller.abort();
+    connecting = false;
+    current = null;
   }
+  if (suspended) return;
   setMode("polling");
+  const stable = Date.now() - openedAt >= tuning.stableMs;
+  if (stable) attempt = 0;
   attempt += 1;
-  setTimeout(connect, backoffDelay(attempt));
-  // Polling takes over at once, so the banner and snapshot stay current.
-  if (received) refresh();
+  reconnectTimer = setTimeout(
+    connect,
+    backoffDelay(
+      attempt,
+      Math.random,
+      tuning.backoffBaseMs,
+      tuning.backoffCapMs,
+    ),
+  );
+  // The 5s poll takes over by itself. Only a stream that had been healthy for
+  // a while is worth an immediate catch-up; a flapping one must not turn into
+  // a request per drop.
+  if (stable) refresh();
+}
+
+function suspend() {
+  suspended = true;
+  clearTimeout(reconnectTimer);
+  current?.abort();
+  setMode("polling");
+}
+
+function resume() {
+  clearTimeout(hiddenTimer);
+  if (!suspended) return;
+  suspended = false;
+  attempt = 0;
+  refresh();
+  if (document.hidden) hiddenTimer = setTimeout(suspend, tuning.hiddenGraceMs);
+  connect();
 }
 
 export function startLive() {
@@ -109,5 +130,12 @@ export function startLive() {
     typeof AbortController === "undefined"
   )
     return;
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      clearTimeout(hiddenTimer);
+      hiddenTimer = setTimeout(suspend, tuning.hiddenGraceMs);
+    } else resume();
+  });
+  if (document.hidden) hiddenTimer = setTimeout(suspend, tuning.hiddenGraceMs);
   connect();
 }

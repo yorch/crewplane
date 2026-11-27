@@ -1,3 +1,4 @@
+import type { Config } from "../../contracts.ts";
 import { controlDirectory } from "../../control.ts";
 import type { DoctorProblem } from "../../doctor.ts";
 import {
@@ -7,17 +8,65 @@ import {
 import {
   coordinatorOf,
   type ProjectPolicy,
+  type ReviewerRole,
   reviewerRoleOf,
   reviewersOf,
 } from "../../project.ts";
+import {
+  claudeMcpModes,
+  claudePermissionModes,
+  claudeSettingSourceValues,
+} from "../harness.ts";
 import { schedulingFingerprint } from "../scheduling.ts";
 import { readRuntime } from "./runtime-files.ts";
-import { amount, clean, count, scalar } from "./sanitize.ts";
+import { amount, clean, count, readJsonStrict } from "./sanitize.ts";
 
-const maxLanes = 64;
+/** Lanes inspected (and probed) and problems returned for one request. */
+export const maxLanes = 64;
+export const maxProblems = 100;
+/** The installed configuration is a few KiB; a file this large is not one. */
+const maxConfigBytes = 1024 * 1024;
 const envName = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+/** A value from a closed set, else null: nothing configured is echoed outside it. */
+const oneOf = (value: unknown, allowed: readonly string[]) =>
+  typeof value === "string" && allowed.includes(value) ? value : null;
+const listOf = (value: unknown, allowed: readonly string[]) =>
+  Array.isArray(value)
+    ? value.filter(
+        (item): item is string =>
+          typeof item === "string" && allowed.includes(item),
+      )
+    : null;
+/** Short list of names (tools, patterns): strings only, cleaned and bounded. */
+const names = (value: unknown) =>
+  Array.isArray(value)
+    ? value
+        .slice(0, 64)
+        .map((item) => clean(item, 200))
+        .filter((item): item is string => item !== null)
+    : null;
+const safePermissions = (value: unknown) => {
+  const text = clean(value, 64);
+  if (
+    text === "no-tools" ||
+    text === "auto-approve" ||
+    text === "harness-configured" ||
+    text === "harness-controlled"
+  )
+    return text;
+  if (
+    text?.startsWith("permission-mode:") &&
+    (claudePermissionModes as readonly string[]).includes(
+      text.slice("permission-mode:".length),
+    )
+  )
+    return text;
+  return "invalid";
+};
 
-const problem = (p: DoctorProblem) => ({
+const problem = (p: Omit<DoctorProblem, "code"> & { code: string }) => ({
   code: p.code,
   lane: p.lane === undefined ? null : clean(p.lane, 64),
   message: clean(p.message, 400) ?? "",
@@ -37,13 +86,21 @@ export async function configView(
     store: input.store,
     controlDir: controlDirectory(root),
     instructionsPath: input.policy.instructionsPath,
+    // The page is served from a request: bound the work and refuse symlinks
+    // and oversized files. `crewplane doctor` applies no such bounds.
+    limits: {
+      maxLanes,
+      maxProblems,
+      readJson: (path) => readJsonStrict(path, maxConfigBytes),
+    },
   });
-  const { config } = inspection;
-  const usable = config !== null && typeof config === "object";
-  const lanesConfig =
-    usable && config.lanes && typeof config.lanes === "object"
-      ? config.lanes
-      : {};
+  const { config: rawConfig } = inspection;
+  // Anything that is not a JSON object is "installed but unusable": doctor
+  // reports why, and nothing below reads fields from it.
+  const config = isRecord(rawConfig) ? (rawConfig as Config) : null;
+  const usable = config !== null;
+  const lanesConfig: Record<string, unknown> =
+    usable && isRecord(config.lanes) ? config.lanes : {};
   const { state } = await readRuntime(root);
   const loaded = state?.scheduling;
   const hasLoaded =
@@ -51,32 +108,69 @@ export async function configView(
     [loaded.maxRunsPerHour, loaded.maxRunMinutes, loaded.intervalSeconds].every(
       (n) => typeof n === "number" && Number.isFinite(n),
     );
-  const globalBudgets = hasLoaded
-    ? {
-        maxParallel: count(loaded.maxParallel),
-        maxRunsPerHour: count(loaded.maxRunsPerHour),
-        maxRunMinutes: count(loaded.maxRunMinutes),
-        intervalSeconds: count(loaded.intervalSeconds),
-      }
-    : usable
+  const budgetsOf = (source: {
+    maxParallel?: unknown;
+    maxRunsPerHour?: unknown;
+    maxRunMinutes?: unknown;
+    intervalSeconds?: unknown;
+  }) => ({
+    maxParallel: count(source.maxParallel),
+    maxRunsPerHour: count(source.maxRunsPerHour),
+    maxRunMinutes: count(source.maxRunMinutes),
+    intervalSeconds: count(source.intervalSeconds),
+  });
+  // One source for every effective cap: the installed configuration, which is
+  // what a lane's own value and the global default both come from. The loaded
+  // values (what the running supervisor enforces until it reloads) are shown
+  // beside them; the supervisor does not persist per-lane loaded caps, so they
+  // cannot be mixed into a lane's effective value.
+  const configuredBudgets = usable ? budgetsOf(config) : null;
+  const loadedBudgets = hasLoaded && loaded ? budgetsOf(loaded) : null;
+  // Role fields of a malformed configuration fall back to the defaults
+  // (doctor already reports the malformation).
+  const roleSource = (value: unknown) => ({
+    ...(isRecord(value) && typeof value.coordinator === "string"
+      ? { coordinator: value.coordinator }
+      : {}),
+    ...(isRecord(value) && Array.isArray(value.reviewers)
       ? {
-          maxParallel: count(config.maxParallel),
-          maxRunsPerHour: count(config.maxRunsPerHour),
-          maxRunMinutes: count(config.maxRunMinutes),
-          intervalSeconds: count(config.intervalSeconds),
+          reviewers: value.reviewers.filter(
+            (id): id is string => typeof id === "string",
+          ),
         }
-      : null;
-  const coordinator = coordinatorOf(config);
-  const reviewers = reviewersOf(config);
-  const digest = usable ? schedulingFingerprint(config) : null;
+      : {}),
+    ...(isRecord(value) && isRecord(value.reviewerRoles)
+      ? {
+          reviewerRoles: Object.fromEntries(
+            Object.entries(value.reviewerRoles).filter(
+              (entry): entry is [string, ReviewerRole] =>
+                entry[1] === "code" || entry[1] === "visual",
+            ),
+          ),
+        }
+      : {}),
+  });
+  const roles = roleSource(config);
+  const policyRoles = roleSource(input.policy);
+  const coordinator = coordinatorOf(roles);
+  const reviewers = reviewersOf(roles);
+  let digest: string | null = null;
+  let digestProblem: string | null = null;
+  if (usable)
+    try {
+      digest = schedulingFingerprint(config);
+    } catch {
+      // A malformed allowlist cannot be fingerprinted; the problems list says why.
+      digestProblem = "The configuration cannot be fingerprinted.";
+    }
   const sorted = (list: string[]) => JSON.stringify([...list].sort());
-  const policyReviewers = reviewersOf(input.policy);
+  const policyReviewers = reviewersOf(policyRoles);
   const rolesStale =
     usable &&
-    (coordinator !== coordinatorOf(input.policy) ||
+    (coordinator !== coordinatorOf(policyRoles) ||
       sorted(reviewers) !== sorted(policyReviewers) ||
       policyReviewers.some(
-        (id) => reviewerRoleOf(config, id) !== reviewerRoleOf(input.policy, id),
+        (id) => reviewerRoleOf(roles, id) !== reviewerRoleOf(policyRoles, id),
       ));
   const byId = new Map(inspection.harnesses.map((h) => [h.id, h]));
   const binaryOf = (harness: string) =>
@@ -84,15 +178,14 @@ export async function configView(
   const lanes = Object.entries(lanesConfig)
     .slice(0, maxLanes)
     .map(([id, raw]) => {
-      const lane = (
-        typeof raw === "object" && raw !== null ? raw : {}
-      ) as Record<string, unknown>;
+      const lane = isRecord(raw) ? raw : {};
       const report = byId.get(id);
       const reviewer = reviewers.includes(id);
       const effective = (own: number | null, global: number | null) =>
         own ?? global;
       const ownRuns = count(lane.maxRunsPerHour);
       const ownMinutes = count(lane.maxRunMinutes);
+      const configured = configuredBudgets;
       const base = {
         id: clean(id, 64) ?? "",
         enabled: lane.enabled === true,
@@ -103,7 +196,7 @@ export async function configView(
             : reviewer
               ? "reviewer"
               : "implementer",
-        reviewerRole: reviewer ? reviewerRoleOf(config, id) : null,
+        reviewerRole: reviewer ? reviewerRoleOf(roles, id) : null,
       };
       if (!report) return base;
       const bin = binaryOf(report.harness);
@@ -111,11 +204,10 @@ export async function configView(
       return {
         ...base,
         harness: report.harness,
-        model:
-          typeof model === "object" && model !== null
-            ? `${clean((model as { provider?: unknown }).provider, 64) ?? ""}/${clean((model as { id?: unknown }).id, 100) ?? ""}`
-            : clean(model, 128),
-        permissions: clean(report.permissions, 64),
+        model: isRecord(model)
+          ? `${clean(model.provider, 64) ?? ""}/${clean(model.id, 100) ?? ""}`
+          : clean(model, 128),
+        permissions: safePermissions(report.permissions),
         capabilities: report.capabilities,
         instructions: {
           configured: typeof lane.instructionsPath === "string",
@@ -125,16 +217,16 @@ export async function configView(
               : "invalid",
         },
         budgets: {
-          maxRunsPerHour: report.budgets.maxRunsPerHour,
-          maxRunMinutes: report.budgets.maxRunMinutes,
+          maxRunsPerHour: ownRuns,
+          maxRunMinutes: ownMinutes,
           maxCostUsdPerRun: amount(lane.maxCostUsdPerRun),
           effectiveMaxRunsPerHour: effective(
             ownRuns,
-            globalBudgets?.maxRunsPerHour ?? null,
+            configured?.maxRunsPerHour ?? null,
           ),
           effectiveMaxRunMinutes: effective(
             ownMinutes,
-            globalBudgets?.maxRunMinutes ?? null,
+            configured?.maxRunMinutes ?? null,
           ),
         },
         passEnv: (Array.isArray(report.passEnv) ? report.passEnv : [])
@@ -149,14 +241,23 @@ export async function configView(
             }
           : null,
         claude: report.claude
-          ? Object.fromEntries(
-              Object.entries(report.claude).map(([k, v]) => [k, scalar(v)]),
-            )
+          ? {
+              mcp: oneOf(report.claude.mcp, claudeMcpModes),
+              settingSources: listOf(
+                report.claude.settingSources,
+                claudeSettingSourceValues,
+              ),
+              tools: names(report.claude.tools),
+              allowedTools: names(report.claude.allowedTools),
+              disallowedTools: names(report.claude.disallowedTools),
+              maxCostUsdPerRun: amount(report.claude.maxCostUsdPerRun),
+            }
           : null,
         opencode: report.opencode
-          ? Object.fromEntries(
-              Object.entries(report.opencode).map(([k, v]) => [k, scalar(v)]),
-            )
+          ? {
+              agent: clean(report.opencode.agent, 100),
+              auto: report.opencode.auto === true,
+            }
           : null,
       };
     });
@@ -164,26 +265,36 @@ export async function configView(
     ...inspection.configProblems,
     ...inspection.binaryProblems,
   ].map(problem);
-  return {
-    version: 1,
-    installed: usable,
-    state: inspection.configState,
-    digest,
-    loadedDigest: state?.scheduling?.fingerprint ?? null,
-    digestsMatch:
-      digest !== null && typeof state?.scheduling?.fingerprint === "string"
-        ? state.scheduling.fingerprint === digest
-        : null,
-    ok: problems.length === 0,
-    problems,
-    warnings: inspection.globalInstructionsProblem
+  const warnings = [
+    ...(inspection.globalInstructionsProblem
       ? [
           problem({
             code: "INSTRUCTIONS_GLOBAL_UNAVAILABLE",
             message: inspection.globalInstructionsProblem,
           }),
         ]
-      : [],
+      : []),
+    ...(digestProblem
+      ? [problem({ code: "DIGEST_UNAVAILABLE", message: digestProblem })]
+      : []),
+  ];
+  return {
+    version: 1,
+    installed: usable,
+    state: inspection.configState,
+    digest,
+    loadedDigest:
+      typeof state?.scheduling?.fingerprint === "string"
+        ? clean(state.scheduling.fingerprint, 64)
+        : null,
+    digestsMatch:
+      digest !== null && typeof state?.scheduling?.fingerprint === "string"
+        ? state.scheduling.fingerprint === digest
+        : null,
+    ok: problems.length === 0,
+    problems,
+    warnings,
+    problemsTruncated: inspection.problemsTruncated,
     legacyLayout: inspection.legacyLayout,
     roles: usable
       ? {
@@ -192,11 +303,18 @@ export async function configView(
           stale: rolesStale,
         }
       : null,
-    budgets: globalBudgets
-      ? { ...globalBudgets, source: hasLoaded ? "loaded" : "configured-only" }
-      : null,
+    budgets: {
+      effectiveFrom: "configured",
+      configured: configuredBudgets,
+      loaded: loadedBudgets,
+      reloadPending:
+        digest !== null && typeof state?.scheduling?.fingerprint === "string"
+          ? state.scheduling.fingerprint !== digest
+          : null,
+    },
     lanes,
-    lanesTruncated: Object.keys(lanesConfig).length > maxLanes,
+    lanesTruncated:
+      inspection.lanesTruncated || Object.keys(lanesConfig).length > maxLanes,
     binaries: inspection.binaries.map((b) => ({
       harness: clean(b.harness, 32) ?? "",
       path: clean(b.path, 512),

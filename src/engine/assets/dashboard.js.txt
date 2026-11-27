@@ -82,5 +82,6 @@ setInterval(() => {
   if (!document.hidden && store.mode !== "live") refresh();
 }, 5000);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) refresh();
+  // While the stream delivers, a poll on return could only race a newer push.
+  if (!document.hidden && store.mode !== "live") refresh();
 });

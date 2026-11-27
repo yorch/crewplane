@@ -72,6 +72,27 @@ export interface ConfigInspection {
   binaries: BinaryStatus[];
   /** Why the global instructions file is unusable, or null. */
   globalInstructionsProblem: string | null;
+  /** True when `limits.maxLanes` stopped the per-lane inspection short. */
+  lanesTruncated: boolean;
+  /** True when `limits.maxProblems` dropped later problems. */
+  problemsTruncated: boolean;
+}
+
+/**
+ * Optional bounds for callers that serve this inspection to a client (the
+ * dashboard). `crewplane doctor` passes none, so it inspects everything and
+ * reads files exactly as before.
+ */
+export interface InspectionLimits {
+  /** Lanes inspected (and binaries probed for); later lanes are skipped. */
+  maxLanes?: number;
+  /** Problems returned, configuration problems first. */
+  maxProblems?: number;
+  /**
+   * Reads the stored configuration: parsed JSON, `null` when the file does not
+   * exist, a throw for anything unreadable (symlink, oversized, malformed).
+   */
+  readJson?: (path: string) => Promise<unknown>;
 }
 
 async function optionalJson(path: string): Promise<unknown> {
@@ -88,8 +109,13 @@ export async function inspectConfiguration(input: {
   store: string;
   controlDir: string;
   instructionsPath: string;
+  limits?: InspectionLimits;
 }): Promise<ConfigInspection> {
   const { root, store, controlDir } = input;
+  const limits = input.limits ?? {};
+  const maxLanes = limits.maxLanes ?? Number.POSITIVE_INFINITY;
+  const readJson = limits.readJson ?? optionalJson;
+  let lanesTruncated = false;
   const configProblems: DoctorProblem[] = [];
   const binaryProblems: DoctorProblem[] = [];
   let config: Config | null = null;
@@ -103,9 +129,7 @@ export async function inspectConfiguration(input: {
     });
   try {
     checkControlDirectory(controlDir);
-    config = (await optionalJson(
-      join(controlDir, "config.json"),
-    )) as Config | null;
+    config = (await readJson(join(controlDir, "config.json"))) as Config | null;
   } catch (error) {
     configState = "invalid";
     configProblems.push({
@@ -154,8 +178,13 @@ export async function inspectConfiguration(input: {
     return probe;
   };
   const harnesses: DoctorLaneReport[] = [];
+  let laneFailures = 0;
   if (config && typeof config.lanes === "object" && config.lanes)
     for (const [id, lane] of Object.entries(config.lanes)) {
+      if (harnesses.length + laneFailures >= maxLanes) {
+        lanesTruncated = true;
+        break;
+      }
       try {
         if (typeof lane !== "object" || lane === null || Array.isArray(lane))
           throw new Error("Lane is invalid");
@@ -207,6 +236,7 @@ export async function inspectConfiguration(input: {
               : null,
         });
       } catch (error) {
+        laneFailures += 1;
         binaryProblems.push({
           code: "CONFIG_INVALID",
           lane: id,
@@ -219,6 +249,18 @@ export async function inspectConfiguration(input: {
   const defaultBinary = config?.binary
     ? await probeFor("default", config.binary)
     : null;
+  let problemsTruncated = false;
+  if (limits.maxProblems !== undefined) {
+    const room = Math.max(0, limits.maxProblems - configProblems.length);
+    if (configProblems.length > limits.maxProblems) {
+      configProblems.length = limits.maxProblems;
+      problemsTruncated = true;
+    }
+    if (binaryProblems.length > room) {
+      binaryProblems.length = room;
+      problemsTruncated = true;
+    }
+  }
   return {
     config,
     configState,
@@ -232,5 +274,7 @@ export async function inspectConfiguration(input: {
       root,
       input.instructionsPath,
     ),
+    lanesTruncated,
+    problemsTruncated,
   };
 }

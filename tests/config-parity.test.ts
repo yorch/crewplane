@@ -104,8 +104,14 @@ function project() {
     change(stored);
     writeFileSync(path, JSON.stringify(stored));
   };
+  /** Replaces the stored configuration with any JSON text. */
+  const store = (text: string) => {
+    const path = storedConfig();
+    writeFileSync(path, text);
+    chmodSync(path, 0o600);
+  };
   /** Both views of the same project, in one environment. */
-  const compare = async () => {
+  const compare = async (query = "") => {
     const doctor = JSON.parse(run(["doctor"]).stdout) as DoctorReport;
     const previous: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(env)) {
@@ -119,11 +125,13 @@ function project() {
     );
     try {
       const port = (server.address() as AddressInfo).port;
-      const response = await fetch(`http://127.0.0.1:${port}/api/config`, {
-        headers: { "x-crewplane-session": token },
-      });
-      expect(response.status).toBe(200);
-      const view = (await response.json()) as {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/api/config${query}`,
+        { headers: { "x-crewplane-session": token } },
+      );
+      const text = await response.text();
+      expect(response.status, text.slice(0, 200)).toBe(200);
+      const view = JSON.parse(text) as {
         state: string;
         problems: Array<{ code: string; lane: string | null; message: string }>;
         lanes: Array<{
@@ -141,7 +149,7 @@ function project() {
           code: string | null;
         }>;
       };
-      return { doctor, view };
+      return { doctor, view, text };
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       for (const [key, value] of Object.entries(previous))
@@ -184,6 +192,7 @@ function project() {
     configure,
     init,
     edit,
+    store,
     compare,
     same,
   };
@@ -286,5 +295,148 @@ describe("GET /api/config matches crewplane doctor", () => {
     writeFileSync(join(store, "supervisor", "state.json"), "{}");
     const found = p.same(await p.compare());
     expect(found.map((item) => item.code)).toEqual(["LEGACY_LAYOUT"]);
+  });
+});
+
+describe("GET /api/config never fails for a configuration doctor reports", () => {
+  const lane = { enabled: true };
+  const shapes: Array<[string, (root: string) => unknown]> = [
+    [
+      "allowedTasks is a number",
+      (root) => ({ ...base(root), allowedTasks: 5 }),
+    ],
+    [
+      "allowedTasks is a string",
+      (root) => ({ ...base(root), allowedTasks: "CP-1" }),
+    ],
+    [
+      "allowedTasks is nested",
+      (root) => ({ ...base(root), allowedTasks: [[[[["CP-1"]]]]] }),
+    ],
+    ["reviewers is a string", (root) => ({ ...base(root), reviewers: "abc" })],
+    [
+      "reviewers is an object",
+      (root) => ({ ...base(root), reviewers: { a: 1 } }),
+    ],
+    [
+      "reviewerRoles is a string",
+      (root) => ({ ...base(root), reviewerRoles: "x" }),
+    ],
+    [
+      "coordinator is an object",
+      (root) => ({ ...base(root), coordinator: { a: 1 } }),
+    ],
+    ["lanes is a string", (root) => ({ ...base(root), lanes: "x" })],
+    ["lanes is null", (root) => ({ ...base(root), lanes: null })],
+    ["lanes is an array", (root) => ({ ...base(root), lanes: [1, 2] })],
+    [
+      "lane entries are not objects",
+      (root) => ({ ...base(root), lanes: { a: 5, b: [], c: null, d: "x" } }),
+    ],
+    [
+      "lane fields are objects",
+      (root) => ({
+        ...base(root),
+        lanes: {
+          a: {
+            ...lane,
+            passEnv: { a: 1 },
+            model: { x: { y: 1 } },
+            maxRunsPerHour: [1],
+            instructionsPath: { p: 1 },
+          },
+        },
+      }),
+    ],
+    ["the configuration is an array", () => [1, 2]],
+    ["the configuration is a number", () => 7],
+    ["the configuration is a string", () => "x"],
+    ["the configuration is null", () => null],
+  ];
+  const base = (root: string) => ({
+    version: 1,
+    root,
+    allowedTasks: ["CP-1"],
+    maxParallel: 1,
+    intervalSeconds: 1,
+    maxRunMinutes: 5,
+    maxRunsPerHour: 20,
+    confirmedStoppedAt: "2026-01-01T00:00:00Z",
+    lanes: { a: lane },
+  });
+  for (const [name, make] of shapes)
+    it(`answers 200 and agrees with doctor when ${name}`, async () => {
+      const p = project();
+      p.configure(p.config(p.fake("good"), { a: { enabled: true } }));
+      p.store(JSON.stringify(make(p.root)));
+      const result = await p.compare();
+      p.same(result);
+      expect(result.view.problems.length).toBeGreaterThan(0);
+    });
+});
+
+describe("GET /api/config never copies a configured value it did not sanitize", () => {
+  it("does not echo hostile lane values, in any field", async () => {
+    const p = project();
+    p.configure(
+      p.config(p.fake("good"), {
+        a: { enabled: true },
+        b: { enabled: true },
+        c: { enabled: true },
+      }),
+    );
+    const secret = "SENSITIVE-VALUE-DO-NOT-LEAK";
+    p.edit((stored) => {
+      Object.assign(stored.lanes.a, {
+        maxRunsPerHour: { v: secret },
+        maxRunMinutes: [secret],
+        maxCostUsdPerRun: { v: secret },
+        model: { provider: { v: secret }, id: [secret] },
+      });
+      Object.assign(stored.lanes.b, {
+        harness: "claude",
+        claudePermissionMode: secret,
+        claudeMcp: { v: secret },
+        claudeTools: [{ v: secret }],
+        claudeSettingSources: secret,
+        maxRunsPerHour: secret,
+        maxRunMinutes: -1,
+      });
+      Object.assign(stored.lanes.c, {
+        harness: "opencode",
+        opencodeAgent: { v: secret },
+        passEnv: [secret, { v: secret }, "OK_NAME"],
+      });
+    });
+    const { view, text } = await p.compare();
+    expect(text).not.toContain(secret);
+    const lanes = Object.fromEntries(view.lanes.map((l) => [l.id, l]));
+    expect(lanes.a).toBeDefined();
+    // Anything that is not a usable number reads as unknown, never as 0.
+    const budgets = (lanes.a as unknown as { budgets: Record<string, unknown> })
+      .budgets;
+    expect(budgets.maxRunsPerHour).toBeNull();
+    expect(budgets.maxRunMinutes).toBeNull();
+    expect(budgets.maxCostUsdPerRun).toBeNull();
+  });
+
+  it("reports a claude lane's permission mode only from the known set", async () => {
+    const p = project();
+    p.configure(p.config(p.fake("good"), { b: { enabled: true } }));
+    p.edit((stored) => {
+      Object.assign(stored.lanes.b, {
+        harness: "claude",
+        claudePermissionMode: "plan",
+        claudeMcp: "strict",
+        claudeSettingSources: ["project"],
+      });
+    });
+    const known = await p.compare();
+    expect(known.text).toContain("permission-mode:plan");
+    p.edit((stored) => {
+      stored.lanes.b.claudePermissionMode = "not-a-mode SENSITIVE";
+    });
+    const unknown = await p.compare();
+    expect(unknown.text).not.toContain("SENSITIVE");
   });
 });

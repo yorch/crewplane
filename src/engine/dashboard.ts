@@ -38,7 +38,7 @@ import {
 import { readRuntime } from "./dashboard/runtime-files.ts";
 import { type TraceCoverage, usageView } from "./dashboard/usage-view.ts";
 import { assetRoutes } from "./dashboard-assets.ts";
-import { createEvidenceStore } from "./evidence/store.ts";
+import { createEvidenceStore, evidenceRejected } from "./evidence/store.ts";
 import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
 
@@ -80,8 +80,10 @@ export function createDashboard(
     /** Live-update tuning; the defaults suit production, tests inject timers. */
     live?: {
       intervalMs?: number;
+      maxIntervalMs?: number;
       heartbeatMs?: number;
       maxClients?: number;
+      maxEventBytes?: number;
       maxBufferedBytes?: number;
       slowClientMs?: number;
       timers?: LiveTimers;
@@ -330,125 +332,140 @@ export function createDashboard(
         return;
       }
       if (request.url?.startsWith("/api/evidence")) {
-        const url = new URL(request.url, `http://${expectedHost}`);
-        const parts = url.pathname.split("/");
+        // Opening the store failing is a read failure (503), not a bad request.
         const store = await getEvidence();
-        let result: unknown;
-        const listParams = (allowed: string[]) => {
-          for (const key of url.searchParams.keys())
-            if (!allowed.includes(key)) return false;
-          return allowed.every(
-            (key) => url.searchParams.getAll(key).length < 2,
-          );
-        };
-        const filters = () => {
-          const task = url.searchParams.get("task");
-          const run = url.searchParams.get("run");
-          const cursor = url.searchParams.get("cursor");
-          const rawLimit = url.searchParams.get("limit");
-          if (
-            (task && !validTaskId(task)) ||
-            (run !== null && !/^qa_[a-f0-9]{32}$/.test(run)) ||
-            (cursor !== null && !/^(?:qa|ev)_[a-f0-9]{32}$/.test(cursor)) ||
-            (rawLimit !== null && !/^\d{1,3}$/.test(rawLimit))
-          )
-            return null;
-          return {
-            task: task || undefined,
-            run: run ?? undefined,
-            cursor: cursor ?? undefined,
-            limit: rawLimit === null ? undefined : Number(rawLimit),
+        try {
+          const url = new URL(request.url, `http://${expectedHost}`);
+          const parts = url.pathname.split("/");
+          let result: unknown;
+          const listParams = (allowed: string[]) => {
+            for (const key of url.searchParams.keys())
+              if (!allowed.includes(key)) return false;
+            return allowed.every(
+              (key) => url.searchParams.getAll(key).length < 2,
+            );
           };
-        };
-        if (url.pathname === "/api/evidence") {
-          const f = listParams(["task", "run", "limit", "cursor"])
-            ? filters()
-            : null;
-          if (!f || (f.limit !== undefined && (f.limit < 1 || f.limit > 20))) {
-            response.writeHead(400).end("Invalid request");
-            return;
-          }
-          if (f.run) {
-            // A single run by id, in the list shape (task filter still applies).
-            const manifest = await store.manifest(f.run);
-            result = {
-              runs:
-                manifest && (!f.task || manifest.task === f.task)
-                  ? [manifest]
-                  : [],
-              nextCursor: null,
-              retentionLimited: manifest?.truncated ?? false,
+          const filters = () => {
+            const task = url.searchParams.get("task");
+            const run = url.searchParams.get("run");
+            const cursor = url.searchParams.get("cursor");
+            const rawLimit = url.searchParams.get("limit");
+            if (
+              (task && !validTaskId(task)) ||
+              (run !== null && !/^qa_[a-f0-9]{32}$/.test(run)) ||
+              (cursor !== null && !/^(?:qa|ev)_[a-f0-9]{32}$/.test(cursor)) ||
+              (rawLimit !== null && !/^\d{1,3}$/.test(rawLimit))
+            )
+              return null;
+            return {
+              task: task || undefined,
+              run: run ?? undefined,
+              cursor: cursor ?? undefined,
+              limit: rawLimit === null ? undefined : Number(rawLimit),
             };
-          } else
-            result = await store.list({
-              ...(f.task ? { task: f.task } : {}),
-              ...(f.cursor ? { cursor: f.cursor } : {}),
-              ...(f.limit ? { limit: f.limit } : {}),
-            });
-        } else if (url.pathname === "/api/evidence/artifacts") {
-          const f = listParams(["task", "run", "limit", "cursor"])
-            ? filters()
-            : null;
-          if (
-            !f ||
-            (f.limit !== undefined &&
-              (f.limit < 1 || f.limit > evidenceListMaxLimit)) ||
-            (f.cursor !== undefined && !f.cursor.startsWith("ev_"))
+          };
+          if (url.pathname === "/api/evidence") {
+            const f = listParams(["task", "run", "limit", "cursor"])
+              ? filters()
+              : null;
+            // Run pages are cursored by run id only.
+            if (
+              !f ||
+              (f.limit !== undefined && (f.limit < 1 || f.limit > 20)) ||
+              (f.cursor !== undefined && !f.cursor.startsWith("qa_"))
+            ) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            if (f.run) {
+              // A single run by id, in the list shape (task filter still applies).
+              const manifest = await store.manifest(f.run);
+              result = {
+                runs:
+                  manifest && (!f.task || manifest.task === f.task)
+                    ? [manifest]
+                    : [],
+                nextCursor: null,
+                retentionLimited: manifest?.truncated ?? false,
+              };
+            } else
+              result = await store.list({
+                ...(f.task ? { task: f.task } : {}),
+                ...(f.cursor ? { cursor: f.cursor } : {}),
+                ...(f.limit ? { limit: f.limit } : {}),
+              });
+          } else if (url.pathname === "/api/evidence/artifacts") {
+            const f = listParams(["task", "run", "limit", "cursor"])
+              ? filters()
+              : null;
+            if (
+              !f ||
+              (f.limit !== undefined &&
+                (f.limit < 1 || f.limit > evidenceListMaxLimit)) ||
+              (f.cursor !== undefined && !f.cursor.startsWith("ev_"))
+            ) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            // The store retains at most 20 runs, so one page covers them all.
+            const all = f.run
+              ? [await store.manifest(f.run)].filter(
+                  (m): m is NonNullable<typeof m> => m !== null,
+                )
+              : (await store.list({ ...(f.task ? { task: f.task } : {}) }))
+                  .runs;
+            const list = evidenceArtifactList(
+              all.filter((m) => !f.task || m.task === f.task),
+              {
+                limit: f.limit ?? evidenceListDefaultLimit,
+                ...(f.cursor ? { cursor: f.cursor } : {}),
+              },
+            );
+            if (!list) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            result = list;
+          } else if (
+            parts.length === 5 &&
+            /^qa_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
+            parts[3] === "runs"
           ) {
-            response.writeHead(400).end("Invalid request");
+            result = await store.manifest(parts[4] ?? "");
+          } else if (
+            parts.length === 5 &&
+            /^ev_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
+            parts[3] === "artifacts"
+          ) {
+            const artifact = await store.read(parts[4] ?? "");
+            if (!artifact) {
+              response.writeHead(404).end("Not found");
+              return;
+            }
+            response.writeHead(
+              200,
+              evidenceArtifactHeaders(
+                artifact.artifact.mime,
+                artifact.artifact.artifactId,
+                artifact.content.length,
+              ),
+            );
+            response.end(artifact.content);
             return;
-          }
-          // The store retains at most 20 runs, so one page covers them all.
-          const all = f.run
-            ? [await store.manifest(f.run)].filter(
-                (m): m is NonNullable<typeof m> => m !== null,
-              )
-            : (await store.list({ ...(f.task ? { task: f.task } : {}) })).runs;
-          const list = evidenceArtifactList(
-            all.filter((m) => !f.task || m.task === f.task),
-            {
-              limit: f.limit ?? evidenceListDefaultLimit,
-              ...(f.cursor ? { cursor: f.cursor } : {}),
-            },
-          );
-          if (!list) {
-            response.writeHead(400).end("Invalid request");
-            return;
-          }
-          result = list;
-        } else if (
-          parts.length === 5 &&
-          /^qa_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
-          parts[3] === "runs"
-        ) {
-          result = await store.manifest(parts[4] ?? "");
-        } else if (
-          parts.length === 5 &&
-          /^ev_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
-          parts[3] === "artifacts"
-        ) {
-          const artifact = await store.read(parts[4] ?? "");
-          if (!artifact) {
+          } else {
             response.writeHead(404).end("Not found");
             return;
           }
-          response.writeHead(
-            200,
-            evidenceArtifactHeaders(
-              artifact.artifact.mime,
-              artifact.artifact.artifactId,
-              artifact.content.length,
-            ),
-          );
-          response.end(artifact.content);
+          response.setHeader("Content-Type", "application/json; charset=utf-8");
+          response.end(JSON.stringify(result));
           return;
-        } else {
-          response.writeHead(404).end("Not found");
+        } catch (error) {
+          // A request the store refuses (an unknown cursor, say) is the
+          // client's error everywhere; a failure to read is not.
+          if (!evidenceRejected(error)) throw error;
+          response.writeHead(400).end("Invalid request");
           return;
         }
-        response.setHeader("Content-Type", "application/json; charset=utf-8");
-        response.end(JSON.stringify(result));
-        return;
       }
       if (request.url?.startsWith("/api/runs")) {
         const url = new URL(request.url, `http://${expectedHost}`);

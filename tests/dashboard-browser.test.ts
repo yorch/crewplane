@@ -1147,6 +1147,13 @@ it("switches to live updates, pushes board changes without polling, and shows th
 
 it("falls back to polling when the event stream is blocked, with the banner semantics unchanged", async () => {
   const { page, errors } = await open("", 1440, async (target) => {
+    // Short reconnect delays, so the page notices the unblocked stream at once
+    // instead of after a production backoff (up to a minute).
+    await target.addInitScript(() => {
+      (
+        window as unknown as { crewplaneLiveTuning: unknown }
+      ).crewplaneLiveTuning = { backoffBaseMs: 50, backoffCapMs: 200 };
+    });
     await target.route("**/api/events", (route) => route.abort());
   });
   await page.locator('#connection-wrap[data-mode="polling"]').waitFor();
@@ -1173,7 +1180,7 @@ it("falls back to polling when the event stream is blocked, with the banner sema
   // Unblocking the stream is picked up by the reconnect loop.
   await page.unroute("**/api/events");
   await page.locator('#connection-wrap[data-mode="live"]').waitFor({
-    timeout: 20000,
+    timeout: 10000,
   });
   expect(errors).toEqual([]);
   await page.close();

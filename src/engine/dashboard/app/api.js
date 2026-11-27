@@ -80,6 +80,7 @@ export function markFresh(at) {
   $("error").hidden = true;
 }
 export function applySnapshot(next) {
+  store.applied += 1;
   const { updatedAt, ...content } = next;
   const signature = JSON.stringify(content);
   const firstLoad = !store.data;
@@ -140,6 +141,9 @@ export async function refresh() {
   if (store.busy) return;
   store.busy = true;
   $("refresh").setAttribute("aria-busy", "true");
+  // A snapshot pushed while this request was in flight is newer than its
+  // answer: the answer (or failure) is dropped instead of overwriting it.
+  const started = store.applied;
   let next;
   try {
     const response = await window.crewplaneFetch("/api/snapshot", {
@@ -149,12 +153,13 @@ export async function refresh() {
     if (!response.ok) throw new Error(await snapshotError(response));
     next = await response.json();
   } catch (error) {
-    showDisconnected(error.message);
+    if (store.applied === started) showDisconnected(error.message);
     return;
   } finally {
     store.busy = false;
     $("refresh").removeAttribute("aria-busy");
   }
+  if (store.applied !== started) return;
   try {
     applySnapshot(next);
   } catch (error) {

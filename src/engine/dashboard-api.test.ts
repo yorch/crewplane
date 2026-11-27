@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest, type IncomingMessage } from "node:http";
@@ -215,11 +216,15 @@ describe("GET /api/config", () => {
           stale: true,
         },
         budgets: {
-          maxParallel: 2,
-          maxRunsPerHour: 12,
-          maxRunMinutes: 30,
-          intervalSeconds: 5,
-          source: "configured-only",
+          effectiveFrom: "configured",
+          configured: {
+            maxParallel: 2,
+            maxRunsPerHour: 12,
+            maxRunMinutes: 30,
+            intervalSeconds: 5,
+          },
+          loaded: null,
+          reloadPending: null,
         },
       });
       expect(body.digest).toMatch(/^[a-f0-9]{64}$/);
@@ -295,6 +300,128 @@ describe("GET /api/config", () => {
 
   it("rejects parameters", async () => {
     expect((await get("/api/config?x=1")).status).toBe(400);
+  });
+
+  const validConfig = (extra: Record<string, unknown> = {}) => ({
+    version: 1,
+    root,
+    binary: fakeBinary("codex"),
+    allowedTasks: ["CP-1"],
+    maxParallel: 2,
+    intervalSeconds: 5,
+    maxRunMinutes: 30,
+    maxRunsPerHour: 12,
+    confirmedStoppedAt: "2026-01-01T00:00:00Z",
+    lanes: { a: { enabled: true }, b: { enabled: true, maxRunsPerHour: 3 } },
+    ...extra,
+  });
+
+  it("computes every effective cap from the installed configuration and labels the loaded values beside them", async () => {
+    writeControl("config.json", validConfig());
+    writeControl("state.json", {
+      version: 2,
+      running: true,
+      scheduling: {
+        fingerprint: "f".repeat(64),
+        allowedTasks: ["CP-1"],
+        enabledLanes: ["a"],
+        maxParallel: 1,
+        maxRunsPerHour: 99,
+        maxRunMinutes: 7,
+        intervalSeconds: 9,
+      },
+    });
+    const pending = (await json("/api/config")).body;
+    expect(pending.budgets).toEqual({
+      effectiveFrom: "configured",
+      configured: {
+        maxParallel: 2,
+        maxRunsPerHour: 12,
+        maxRunMinutes: 30,
+        intervalSeconds: 5,
+      },
+      loaded: {
+        maxParallel: 1,
+        maxRunsPerHour: 99,
+        maxRunMinutes: 7,
+        intervalSeconds: 9,
+      },
+      reloadPending: true,
+    });
+    const lane = (id: string) =>
+      pending.lanes.find((l: { id: string }) => l.id === id).budgets;
+    // Neither lane's effective cap borrows the loaded global (99 / 7).
+    expect(lane("a")).toMatchObject({
+      effectiveMaxRunsPerHour: 12,
+      effectiveMaxRunMinutes: 30,
+    });
+    expect(lane("b")).toMatchObject({
+      maxRunsPerHour: 3,
+      effectiveMaxRunsPerHour: 3,
+      effectiveMaxRunMinutes: 30,
+    });
+    expect(pending.digestsMatch).toBe(false);
+    writeControl("state.json", {
+      version: 2,
+      running: true,
+      scheduling: {
+        fingerprint: pending.digest,
+        allowedTasks: ["CP-1"],
+        enabledLanes: ["a"],
+        maxParallel: 2,
+        maxRunsPerHour: 12,
+        maxRunMinutes: 30,
+        intervalSeconds: 5,
+      },
+    });
+    expect((await json("/api/config")).body.budgets.reloadPending).toBe(false);
+    rmSync(join(controlDir, "state.json"), { force: true });
+  });
+
+  it("inspects a bounded number of lanes and says so", async () => {
+    const lanes = Object.fromEntries(
+      Array.from({ length: 150 }, (_, i) => [
+        `lane${String(i).padStart(3, "0")}`,
+        { enabled: true },
+      ]),
+    );
+    writeControl("config.json", validConfig({ lanes }));
+    const { status, body } = await json("/api/config");
+    expect(status).toBe(200);
+    expect(body.lanes).toHaveLength(64);
+    expect(body.lanesTruncated).toBe(true);
+    expect(body.problemsTruncated).toBe(false);
+  });
+
+  it("refuses a symlinked or oversized configuration file instead of reading it", async () => {
+    const target = join(root, "elsewhere.json");
+    writeFileSync(target, JSON.stringify(validConfig()), { mode: 0o600 });
+    rmSync(join(controlDir, "config.json"), { force: true });
+    symlinkSync(target, join(controlDir, "config.json"));
+    let { status, body } = await json("/api/config");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ installed: false, state: "invalid" });
+    expect(body.problems[0].code).toBe("CONFIG_INVALID");
+    expect(JSON.stringify(body)).not.toContain("elsewhere");
+    rmSync(join(controlDir, "config.json"), { force: true });
+    writeControl(
+      "config.json",
+      validConfig({ padding: "x".repeat(2 * 1024 * 1024) }),
+    );
+    ({ status, body } = await json("/api/config"));
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ installed: false, state: "invalid" });
+  });
+
+  it("gives no digest, with a warning, for a configuration that cannot be fingerprinted", async () => {
+    writeControl("config.json", validConfig({ allowedTasks: 5 }));
+    const { status, body } = await json("/api/config");
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ digest: null, digestsMatch: null });
+    expect(body.warnings.map((w: { code: string }) => w.code)).toContain(
+      "DIGEST_UNAVAILABLE",
+    );
+    expect(body.problems[0].code).toBe("CONFIG_INVALID");
   });
 });
 
@@ -424,7 +551,9 @@ describe("GET /api/usage", () => {
     const { status, body } = await json("/api/usage");
     expect(status).toBe(200);
     expect(body.total.runsLastHour).toBeNull();
-    expect(body.total.maxRunsPerHour).toBeNull();
+    expect(body.total).not.toHaveProperty("maxRunsPerHour");
+    expect(body.caps).toMatchObject({ source: null, perLaneDefault: null });
+    expect(body.total.series.every((v: unknown) => v === null)).toBe(true);
     expect(body.total.tokens).toMatchObject({
       semantics: "reported-counters-not-billing-totals",
       input: null,
@@ -512,9 +641,14 @@ describe("GET /api/usage", () => {
     expect(lane("claudey").runs).toMatchObject({
       lastHour: 1,
       cap: 10,
-      capSource: "global",
+      capSource: "default",
     });
-    expect(body.total).toMatchObject({ runsLastHour: 4, maxRunsPerHour: 10 });
+    expect(body.total).toMatchObject({ runsLastHour: 4 });
+    expect(body.caps).toMatchObject({
+      source: "configured",
+      perLaneDefault: { maxRunsPerHour: 10, maxRunMinutes: 20 },
+      loaded: null,
+    });
     expect(body.total.tokens).toMatchObject({ input: 1200, output: null });
     expect(body.coverage.counters.state).toBe("available");
   });
@@ -532,15 +666,17 @@ describe("GET /api/usage", () => {
       state: "available",
       retainedRuns: 1,
       retentionLimited: false,
-      complete: true,
+      complete: false,
     });
     expect(body.total.series).toHaveLength(24);
-    expect(body.total.series.at(-1)).toBe(1);
+    // The only retained run is the oldest one: no bucket has a run older than
+    // it, so nothing is measured (a new install reports no data, not zeros).
+    expect(body.total.series.every((v: unknown) => v === null)).toBe(true);
     expect(
       body.lanes
         .find((l: { lane: string }) => l.lane === "builder")
-        .series.at(-1),
-    ).toBe(1);
+        .series.every((v: unknown) => v === null),
+    ).toBe(true);
     expect((await get("/api/usage?x=1")).status).toBe(400);
   });
 });
@@ -602,6 +738,11 @@ describe("evidence additions", () => {
       "?limit=x",
       "?run=nope",
       "?cursor=nope",
+      "?cursor=",
+      `?cursor=ev_${"0".repeat(32)}`,
+      `?cursor=qa_${"0".repeat(32)}`,
+      `?cursor=qa_${"G".repeat(32)}`,
+      `?cursor=${"qa_".repeat(40)}`,
       "?task=../x",
       "?bogus=1",
       "?limit=1&limit=2",
@@ -782,6 +923,49 @@ describe("GET /api/events", () => {
     } finally {
       stream.close();
     }
+  });
+
+  it("replaces a snapshot above the size limit with a data-free resync event", async () => {
+    const small = createDashboard(root, {
+      session: { token },
+      live: { intervalMs: 40, heartbeatMs: 120, maxEventBytes: 300 },
+    });
+    await new Promise<void>((resolve) => small.listen(0, "127.0.0.1", resolve));
+    const smallPort = (small.address() as AddressInfo).port;
+    const received = await new Promise<string>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: smallPort,
+          path: "/api/events",
+          headers: auth,
+        },
+        (res) => {
+          let buffer = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            buffer += chunk;
+            if (buffer.split("event: ping").length > 3) {
+              req.destroy();
+              resolve(buffer);
+            }
+          });
+          res.on("error", () => {});
+        },
+      );
+      req.on("error", () => {});
+      req.setTimeout(5000, () => reject(new Error("timed out")));
+      req.end();
+    });
+    await new Promise<void>((resolve) => small.close(() => resolve()));
+    expect(received).not.toContain("event: snapshot");
+    const resyncs = received
+      .split("\n\n")
+      .filter((frame) => frame.includes("event: resync\n"));
+    expect(resyncs).toHaveLength(1);
+    expect(resyncs[0]).not.toMatch(/^id:/m);
+    expect(resyncs[0]).toContain("snapshot-too-large");
+    expect(received).not.toContain('"tasks"');
   });
 
   it("honours Last-Event-ID and ignores a malformed one", async () => {

@@ -51,8 +51,16 @@ export const scalar = (value: unknown, max = 200): unknown => {
 };
 
 const maxJsonBytes = 16 * 1024 * 1024;
-/** Read a control-plane JSON file without following a final symlink or reading unbounded data. */
-export async function readJsonFile(path: string): Promise<unknown | null> {
+/**
+ * Reads a control-plane JSON file without following a final symlink or reading
+ * more than `limit` bytes: the parsed value, `null` when the file does not
+ * exist, and a throw for anything else (not a regular file, too large,
+ * unreadable, not JSON).
+ */
+export async function readJsonStrict(
+  path: string,
+  limit = maxJsonBytes,
+): Promise<unknown | null> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(
@@ -60,11 +68,21 @@ export async function readJsonFile(path: string): Promise<unknown | null> {
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
     );
     const info = await handle.stat();
-    if (!info.isFile() || info.size > maxJsonBytes) return null;
+    if (!info.isFile() || info.size > limit)
+      throw new Error("Invalid private state; inspect before recovery");
     return JSON.parse(await handle.readFile("utf8"));
-  } catch {
-    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("Invalid private state; inspect before recovery");
   } finally {
     await handle?.close();
+  }
+}
+/** Like `readJsonStrict`, but anything unusable (missing included) is null. */
+export async function readJsonFile(path: string): Promise<unknown | null> {
+  try {
+    return await readJsonStrict(path);
+  } catch {
+    return null;
   }
 }

@@ -1,14 +1,23 @@
 import { EventEmitter } from "node:events";
+import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it } from "vitest";
-import { createLiveHub, type LiveTimers } from "./live.ts";
+import { MAX_EVENT_CHARS } from "./app/live-core.js";
+import {
+  createLiveHub,
+  type LiveTimers,
+  MAX_EVENT_BYTES,
+  MAX_INTERVAL_MS,
+} from "./live.ts";
 
 /** Manually driven timers: nothing runs until a test fires it. */
 function fakeTimers() {
   let next = 1;
   const timeouts = new Map<number, () => void>();
+  const delays: number[] = [];
   const intervals = new Map<number, () => void>();
   const timers: LiveTimers = {
-    setTimeout: (fn) => {
+    setTimeout: (fn, ms) => {
+      delays.push(ms);
       timeouts.set(next, fn);
       return next++;
     },
@@ -21,6 +30,7 @@ function fakeTimers() {
   };
   return {
     timers,
+    delays,
     active: () => timeouts.size + intervals.size,
     fireTimeouts: () => {
       for (const [id, fn] of [...timeouts]) {
@@ -296,5 +306,251 @@ describe("live hub", () => {
     await settle();
     expect(h.calls()).toBe(0);
     expect(h.clock.active()).toBe(0);
+  });
+});
+
+const pings = (sink: FakeSink) =>
+  sink.events("ping").map(
+    (f) =>
+      JSON.parse(/^data: (.+)$/m.exec(f)?.[1] ?? "null") as {
+        at: string | null;
+        id: string | null;
+        kind: string | null;
+      },
+  );
+
+/** A hub whose computation the test resolves by hand. */
+function manual() {
+  const clock = fakeTimers();
+  let now = 5_000_000;
+  const waiting: Array<(value: { hash: string; data: string }) => void> = [];
+  const failing: Array<(error: Error) => void> = [];
+  let calls = 0;
+  const hub = createLiveHub({
+    timers: clock.timers,
+    now: () => now,
+    errorMessage: "unreadable",
+    compute: () =>
+      new Promise((resolve, reject) => {
+        calls += 1;
+        waiting.push(resolve);
+        failing.push(reject);
+      }),
+  });
+  return {
+    hub,
+    clock,
+    calls: () => calls,
+    advance: (ms: number) => {
+      now += ms;
+    },
+    now: () => now,
+    resolve: async (hash: string, data = JSON.stringify({ hash })) => {
+      waiting.shift()?.({ hash, data });
+      failing.shift();
+      await settle();
+    },
+    reject: async () => {
+      failing.shift()?.(new Error("boom"));
+      waiting.shift();
+      await settle();
+    },
+  };
+}
+
+describe("live hub: stale cache after idle", () => {
+  it("never serves a computation that spans the last client leaving to a later joiner", async () => {
+    const h = manual();
+    const first = new FakeSink();
+    h.hub.add(first);
+    await h.resolve("v1");
+    first.destroy(); // idle: cache must not be trusted any more
+    const second = new FakeSink();
+    h.hub.add(second); // starts a computation that has not finished
+    expect(h.calls()).toBe(2);
+    second.destroy(); // idle again while it is in flight
+    await h.resolve("v2"); // finishes after everyone left: must not become fresh
+    const late = new FakeSink();
+    h.hub.add(late);
+    // Nothing from before the last client left may be served as current.
+    expect(late.events("snapshot")).toHaveLength(0);
+    expect(h.calls()).toBe(3);
+    await h.resolve("v3");
+    expect(late.events("snapshot")).toHaveLength(1);
+    expect(late.events("snapshot")[0]).toContain('"hash":"v3"');
+  });
+
+  it("re-reads when a client joined during a computation that predates it", async () => {
+    const h = manual();
+    const first = new FakeSink();
+    h.hub.add(first);
+    first.destroy();
+    const joined = new FakeSink();
+    h.hub.add(joined);
+    expect(h.calls()).toBe(1);
+    await h.resolve("old"); // started before `joined` could have been counted... but after idle
+    expect(joined.events("snapshot")).toHaveLength(0);
+    expect(h.calls()).toBe(2);
+    await h.resolve("new");
+    expect(joined.events("snapshot")[0]).toContain('"hash":"new"');
+  });
+});
+
+describe("live hub: heartbeat semantics", () => {
+  it("reports the time of the last successful read, not the time of the ping", async () => {
+    const h = manual();
+    const sink = new FakeSink();
+    h.hub.add(sink);
+    const readAt = h.now();
+    await h.resolve("a");
+    h.advance(60_000);
+    h.clock.fireTimeouts(); // next read starts and never finishes
+    h.advance(60_000);
+    h.clock.fireIntervals();
+    const beat = pings(sink).at(-1);
+    expect(beat?.at).toBe(new Date(readAt).toISOString());
+    expect(beat?.kind).toBe("snapshot");
+    expect(beat?.id).toMatch(/^[a-f0-9]{8}-1$/);
+  });
+
+  it("carries no time before the first successful read and none for a failing board", async () => {
+    const h = manual();
+    const sink = new FakeSink();
+    h.hub.add(sink);
+    expect(pings(sink)[0]).toEqual({ at: null, id: null, kind: null });
+    h.clock.fireIntervals();
+    expect(pings(sink).at(-1)?.at).toBeNull();
+    await h.reject();
+    h.clock.fireIntervals();
+    expect(pings(sink).at(-1)).toMatchObject({ at: null, kind: "error" });
+  });
+
+  it("tells a reconnecting client that it is current once the first read confirms it", async () => {
+    const h = manual();
+    const first = new FakeSink();
+    h.hub.add(first);
+    await h.resolve("a");
+    const id = /^id: (.+)$/m.exec(first.events("snapshot")[0] ?? "")?.[1];
+    first.destroy();
+    const again = new FakeSink();
+    h.hub.add(again, id);
+    expect(pings(again).at(-1)?.kind).toBeNull();
+    await h.resolve("a");
+    expect(again.events("snapshot")).toHaveLength(0);
+    expect(pings(again).at(-1)).toMatchObject({ id, kind: "snapshot" });
+    expect(pings(again).at(-1)?.at).toEqual(expect.any(String));
+  });
+});
+
+describe("live hub: adaptive interval", () => {
+  it("waits at least five times as long as the last read took, up to a ceiling", async () => {
+    const h = manual();
+    h.hub.add(new FakeSink());
+    h.advance(3000); // the read took 3s
+    await h.resolve("a");
+    expect(h.clock.delays.at(-1)).toBe(15000);
+    h.clock.fireTimeouts();
+    h.advance(100); // fast read: back to the configured 1s
+    await h.resolve("a");
+    expect(h.clock.delays.at(-1)).toBe(1000);
+    h.clock.fireTimeouts();
+    h.advance(60_000);
+    await h.resolve("a");
+    expect(h.clock.delays.at(-1)).toBe(MAX_INTERVAL_MS);
+  });
+});
+
+describe("live hub: oversized snapshots", () => {
+  const big = (n: number) => JSON.stringify({ pad: "x".repeat(n) });
+  it("sends one data-free resync instead of the snapshot, then recovers when it fits", async () => {
+    const clock = fakeTimers();
+    const sizes = [20, 200, 300, 20];
+    let calls = 0;
+    const hub = createLiveHub({
+      timers: clock.timers,
+      errorMessage: "x",
+      maxEventBytes: 100,
+      compute: async () => {
+        const n = sizes[Math.min(calls++, sizes.length - 1)] as number;
+        return { hash: `h${calls}`, data: big(n) };
+      },
+    });
+    const sink = new FakeSink();
+    hub.add(sink);
+    await settle();
+    expect(sink.events("snapshot")).toHaveLength(1);
+    for (let i = 0; i < 2; i++) {
+      clock.fireTimeouts();
+      await settle();
+    }
+    expect(sink.events("snapshot")).toHaveLength(1);
+    const resyncs = sink.events("resync");
+    expect(resyncs).toHaveLength(1); // once per episode, not per change
+    expect(resyncs[0]).not.toMatch(/^id:/m);
+    expect(resyncs[0]).toContain("snapshot-too-large");
+    expect(sink.text()).not.toContain("x".repeat(100));
+    expect(pings(sink).length).toBeGreaterThan(0);
+    expect(sink.destroyed).toBe(false);
+    clock.fireTimeouts();
+    await settle();
+    expect(sink.events("snapshot")).toHaveLength(2);
+  });
+
+  it("answers a late joiner and a reconnect with resync while the board stays too large", async () => {
+    const clock = fakeTimers();
+    const hub = createLiveHub({
+      timers: clock.timers,
+      errorMessage: "x",
+      maxEventBytes: 100,
+      compute: async () => ({ hash: "h", data: big(500) }),
+    });
+    hub.add(new FakeSink());
+    await settle();
+    const late = new FakeSink();
+    hub.add(late, "deadbeef-1");
+    expect(late.events("resync")).toHaveLength(1);
+    expect(late.events("snapshot")).toHaveLength(0);
+  });
+
+  it("keeps the client parser limit above the largest event the server sends", () => {
+    expect(MAX_EVENT_CHARS).toBeGreaterThan(MAX_EVENT_BYTES);
+  });
+});
+
+describe("live hub: buffered-bytes limit on a real socket", () => {
+  it("closes a client whose unflushed frame exceeds the limit, long before the slow-client timeout", async () => {
+    const sockets: Socket[] = [];
+    const server = createServer((socket) => sockets.push(socket));
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    const { port } = server.address() as { port: number };
+    const client = connect(port, "127.0.0.1");
+    client.pause(); // never reads: the kernel buffers fill, the rest queues in node
+    client.on("error", () => {});
+    await new Promise((done) => client.once("connect", done));
+    while (sockets.length === 0) await settle();
+    const [socket] = sockets as [Socket];
+    const clock = fakeTimers();
+    const hub = createLiveHub({
+      timers: clock.timers,
+      errorMessage: "x",
+      maxBufferedBytes: 256 * 1024,
+      slowClientMs: 3_600_000,
+      compute: async () => ({
+        hash: "big",
+        data: JSON.stringify({ pad: "x".repeat(32 * 1024 * 1024) }),
+      }),
+      maxEventBytes: 64 * 1024 * 1024,
+    });
+    try {
+      hub.add(socket);
+      for (let i = 0; i < 100 && hub.clients > 0; i++)
+        await new Promise((done) => setTimeout(done, 20));
+      expect(hub.clients).toBe(0);
+      expect(socket.destroyed).toBe(true);
+    } finally {
+      hub.close();
+      client.destroy();
+      server.close();
+    }
   });
 });

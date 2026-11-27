@@ -39,11 +39,32 @@ export function usageView(
   const records: RecordState[] = Object.values(state?.records ?? {}).filter(
     (r): r is RecordState => typeof r === "object" && r !== null,
   );
+  // One source for every cap, so a lane's cap and the default it falls back to
+  // can never come from two different configurations: the installed
+  // configuration when it is readable, else (global defaults only; no lane has
+  // its own cap then) the values the running supervisor loaded. The loaded
+  // values are shown beside the configured ones, never mixed into them.
   const loaded = state?.scheduling;
-  const globalRuns =
-    positive(loaded?.maxRunsPerHour) ?? positive(config?.maxRunsPerHour);
-  const globalMinutes =
-    positive(loaded?.maxRunMinutes) ?? positive(config?.maxRunMinutes);
+  const loadedCaps = loaded
+    ? {
+        maxRunsPerHour: positive(loaded.maxRunsPerHour),
+        maxRunMinutes: positive(loaded.maxRunMinutes),
+      }
+    : null;
+  const configuredCaps = config
+    ? {
+        maxRunsPerHour: positive(config.maxRunsPerHour),
+        maxRunMinutes: positive(config.maxRunMinutes),
+      }
+    : null;
+  const capSource = configuredCaps
+    ? "configured"
+    : loadedCaps
+      ? "loaded"
+      : null;
+  const defaults = configuredCaps ?? loadedCaps;
+  const globalRuns = defaults?.maxRunsPerHour ?? null;
+  const globalMinutes = defaults?.maxRunMinutes ?? null;
   const lanes = [
     ...new Set([
       ...Object.keys(config?.lanes ?? {}),
@@ -62,12 +83,16 @@ export function usageView(
   const oldestTrace = traces?.runs.length
     ? Math.min(...traces.runs.map((r) => Date.parse(r.startedAt)))
     : null;
-  // A bucket is trustworthy when no retention pruning was observed, or when it
-  // starts after the oldest retained run (newer runs are never pruned first).
+  // A bucket is measured only when the trace store demonstrably existed for
+  // all of it: some retained run started before the bucket did (or, when
+  // retention pruned older runs, strictly before it), and no page was missed.
+  // A store that did not exist yet, or holds no run older than the bucket,
+  // says nothing about it: unknown, never a measured zero.
   const covered = (start: number) =>
     traces !== null &&
     !traces.incomplete &&
-    (!traces.retentionLimited || (oldestTrace !== null && start > oldestTrace));
+    oldestTrace !== null &&
+    (traces.retentionLimited ? start > oldestTrace : start >= oldestTrace);
   const seriesFor = (lane: string | null) =>
     bucketStarts.map((start) =>
       covered(start)
@@ -86,9 +111,12 @@ export function usageView(
       .flatMap((r) => (Array.isArray(r.runs) ? r.runs : []))
       .concat(state?.retiredRuns?.[lane] ?? [])
       .filter((at) => typeof at === "number" && at <= now && at > now - hour);
-    const laneRuns = positive(laneConfig?.maxRunsPerHour);
+    // Lane-own caps exist only in the installed configuration.
+    const laneRuns =
+      capSource === "configured" ? positive(laneConfig?.maxRunsPerHour) : null;
     const cap = laneRuns ?? globalRuns;
-    const laneMinutes = positive(laneConfig?.maxRunMinutes);
+    const laneMinutes =
+      capSource === "configured" ? positive(laneConfig?.maxRunMinutes) : null;
     const finished = own
       .flatMap((r) => {
         const started = Date.parse(r.startedAt ?? "");
@@ -109,8 +137,13 @@ export function usageView(
       })
       .sort((a, b) => (b.finishedAt ?? "").localeCompare(a.finishedAt ?? ""))
       .slice(0, recentLimit);
-    const input = own.filter((r) => r.inputTokensKnown === true);
-    const output = own.filter((r) => r.outputTokensKnown === true);
+    // Only a record whose counter is a usable number reports the dimension.
+    const input = own.filter(
+      (r) => r.inputTokensKnown === true && count(r.inputTokens) !== null,
+    );
+    const output = own.filter(
+      (r) => r.outputTokensKnown === true && count(r.outputTokens) !== null,
+    );
     const costCap = amount(laneConfig?.maxCostUsdPerRun);
     const costs = own
       .flatMap((r) => {
@@ -133,7 +166,7 @@ export function usageView(
       runs: {
         lastHour: state ? stamps.length : null,
         cap,
-        capSource: laneRuns !== null ? "lane" : cap !== null ? "global" : null,
+        capSource: laneRuns !== null ? "lane" : cap !== null ? "default" : null,
         remaining:
           state && cap !== null ? Math.max(0, cap - stamps.length) : null,
       },
@@ -179,13 +212,29 @@ export function usageView(
       runsLastHour: state
         ? (sum(laneViews.map((l) => l.runs.lastHour)) ?? 0)
         : null,
-      maxRunsPerHour: globalRuns,
       tokens: {
         semantics: "reported-counters-not-billing-totals",
         input: tokensIn,
         output: tokensOut,
       },
       series: seriesFor(null),
+    },
+    caps: {
+      source: capSource,
+      // The configured `maxRunsPerHour` applies to each lane separately; it is
+      // the default a lane without its own cap falls back to, not a total.
+      perLaneDefault: defaults
+        ? {
+            maxRunsPerHour: defaults.maxRunsPerHour,
+            maxRunMinutes: defaults.maxRunMinutes,
+          }
+        : null,
+      loaded: loadedCaps,
+      loadedDiffers:
+        configuredCaps && loadedCaps
+          ? configuredCaps.maxRunsPerHour !== loadedCaps.maxRunsPerHour ||
+            configuredCaps.maxRunMinutes !== loadedCaps.maxRunMinutes
+          : null,
     },
     lanes: laneViews,
     coverage: {
@@ -207,10 +256,9 @@ export function usageView(
           oldestTrace === null ? null : new Date(oldestTrace).toISOString(),
         retentionLimited: traces?.retentionLimited ?? null,
         incomplete: traces?.incomplete ?? null,
-        complete: traces
-          ? !traces.retentionLimited && !traces.incomplete
-          : false,
-        note: "A bucket is null when retained trace history does not cover it; zero is only reported for covered buckets.",
+        // True when no bucket of the window is unknown.
+        complete: bucketStarts.every(covered),
+        note: "A bucket is null when retained trace history does not cover it (no store yet, no retained run older than the bucket, or older runs pruned); zero is only reported for covered buckets.",
       },
       ledger: {
         connected: false,
