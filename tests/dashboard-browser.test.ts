@@ -898,3 +898,103 @@ it("does not rewrite the URL back to Runs when another view was already navigate
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
+
+it("restores scroll and 'How to read' disclosures after a full reload, but not after a fresh navigation", async () => {
+  const { page, errors } = await open("#/tasks?layout=board", 700);
+  await page.setViewportSize({ width: 700, height: 260 });
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  const tall = await page.evaluate(
+    () => document.documentElement.scrollHeight - window.innerHeight,
+  );
+  expect(tall).toBeGreaterThan(60);
+  const info = page.locator('details[data-key="info-tasks"]');
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+  await info.locator("summary").click();
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+  await page.evaluate(() => window.scrollTo(0, 80));
+  const scrolled = await page.evaluate(() => window.scrollY);
+  expect(scrolled).toBeGreaterThan(0);
+  const board = page.locator("#tasks");
+  const overflowing = await board.evaluate(
+    (node) => node.scrollWidth > node.clientWidth,
+  );
+  expect(overflowing).toBe(true);
+  await board.evaluate((node) => {
+    node.scrollLeft = 40;
+  });
+  const boardLeft = await board.evaluate((node) => node.scrollLeft);
+  expect(boardLeft).toBeGreaterThan(0);
+
+  await page.reload();
+  await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+  await until(
+    async () => (await page.evaluate(() => window.scrollY)) === scrolled,
+    "window scroll restored",
+  );
+  expect(await board.evaluate((node) => node.scrollLeft)).toBe(boardLeft);
+  // Polls keep the restored state.
+  await page.waitForTimeout(5500);
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrolled);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+
+  // The agents disclosure is remembered independently, and closing is remembered too.
+  await info.locator("summary").click();
+  await page.goto(`${base}#/agents`);
+  await page.locator("#view-agents:not([hidden])").waitFor();
+  const agentsInfo = page.locator('details[data-key="info-agents"]');
+  await agentsInfo.locator("summary").click();
+  await page.reload();
+  await page.locator("#view-agents:not([hidden])").waitFor();
+  expect(
+    await agentsInfo.evaluate((node: HTMLDetailsElement) => node.open),
+  ).toBe(true);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+
+  // A fresh navigation in the same tab starts at the top with disclosures closed.
+  await page.goto("about:blank");
+  await page.goto(`${base}#/tasks`);
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+  expect(
+    await agentsInfo.evaluate((node: HTMLDetailsElement) => node.open),
+  ).toBe(false);
+
+  // Garbage in storage is ignored: the page still loads normally.
+  await page.evaluate(() => {
+    window.sessionStorage.setItem("crewplane-ui-state", "{not json");
+  });
+  await page.reload();
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  await page.evaluate(() => {
+    window.sessionStorage.setItem(
+      "crewplane-ui-state",
+      JSON.stringify({
+        v: 1,
+        view: "tasks",
+        scroll: { tasks: 1e30, "x y": 5 },
+        panes: { "task-board": ["a", {}] },
+        open: ["info-tasks", "<script>"],
+      }),
+    );
+  });
+  await page.reload();
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(errors).toEqual([]);
+  await page.close();
+}, 60000);

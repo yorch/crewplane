@@ -13,6 +13,7 @@ import { discoverProject, validId, validTaskId } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
 import { control } from "./control-policy.ts";
+import { assetRoutes } from "./dashboard-assets.ts";
 import { createEvidenceStore } from "./evidence/store.ts";
 import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
@@ -60,6 +61,7 @@ export function createDashboard(
   const getEvidence = lazyStore(async () =>
     createEvidenceStore(join(await storeOf(root), "evidence")),
   );
+  const routes = assetRoutes();
   return createServer(async (request, response) => {
     const address = response.socket?.localPort;
     const expectedHost = `127.0.0.1:${address}`;
@@ -274,22 +276,13 @@ export function createDashboard(
         }
         return;
       }
-      const routes: Record<string, [string, string]> = {
-        "/": ["index.html", "text/html"],
-        "/dashboard.js": ["dashboard.js", "text/javascript"],
-        "/runs.js": ["run-viewer.js", "text/javascript"],
-        "/graph-viewer.js": ["graph-viewer.js", "text/javascript"],
-        "/graph-renderer.js": ["graph-renderer.js", "text/javascript"],
-        "/graph-renderer.css": ["graph-renderer.css", "text/css"],
-        "/dashboard.css": ["dashboard.css", "text/css"],
-      };
-      const route = routes[request.url ?? ""];
+      const route = routes.get(request.url ?? "");
       if (!route) {
         response.writeHead(404).end("Not found");
         return;
       }
-      response.setHeader("Content-Type", `${route[1]}; charset=utf-8`);
-      response.end(embeddedAssets[route[0]]);
+      response.setHeader("Content-Type", `${route.type}; charset=utf-8`);
+      response.end(embeddedAssets[route.name]);
     } catch {
       response.writeHead(503, { "Content-Type": "application/json" }).end(
         JSON.stringify({
