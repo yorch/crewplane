@@ -1,4 +1,6 @@
 import { agentRecords } from "./agents.js";
+import { needsAttention } from "./audit-core.js";
+import { configResource, logResource } from "./aux.js";
 import { badge, healthBadge, processBadge, taskBadge } from "./badges.js";
 import { decisionBlock } from "./controls.js";
 import { el, emptyState, firstLine, link } from "./dom.js";
@@ -9,6 +11,18 @@ import { hrefFor } from "./route.js";
 import { $, store } from "./store.js";
 import { date } from "./time.js";
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** Refused, out-of-date and invalid commands from the last day, newest first. */
+function recentRefusals(now = Date.now()) {
+  return [...(logResource.state.data?.entries ?? [])]
+    .filter(
+      (entry) =>
+        needsAttention(entry) &&
+        Number.isFinite(Date.parse(entry.at ?? "")) &&
+        now - Date.parse(entry.at) <= DAY_MS,
+    )
+    .sort((a, b) => b.seq - a.seq);
+}
 function attentionItems() {
   const items = [];
   const add = (weight, tone, type, title, note, href) =>
@@ -129,6 +143,26 @@ function attentionItems() {
         hrefFor("tasks", { task: task.id }),
       );
   }
+  const config = configResource.state.data;
+  if (config?.problems?.length)
+    add(
+      1,
+      "danger",
+      "Setup",
+      `Configuration problems (${config.problems.length}${config.problemsTruncated ? "+" : ""})`,
+      `${config.problems[0].code}${config.problems[0].lane ? ` on ${config.problems[0].lane}` : ""}${config.problems.length > 1 ? " and more" : ""}`,
+      hrefFor("setup"),
+    );
+  const recent = recentRefusals();
+  if (recent.length)
+    add(
+      3,
+      "warning",
+      "Control log",
+      `Refused or out-of-date commands (${recent.length})`,
+      `Latest: ${recent[0].action ?? "command"} · ${recent[0].reason ?? recent[0].outcome} in the last 24 hours`,
+      hrefFor("audit"),
+    );
   for (const orphan of store.data.orphanAssignments ?? [])
     add(
       6,
@@ -330,6 +364,16 @@ function renderShortcuts() {
     ["Run history", null, hrefFor("runs")],
     ["Relationships", null, hrefFor("relationships")],
     ["Project notes", null, hrefFor("system")],
+    [
+      "Setup & config",
+      configResource.state.data
+        ? configResource.state.data.problems.length
+        : null,
+      hrefFor("setup"),
+    ],
+    ["Usage & cost", null, hrefFor("usage")],
+    ["Evidence", null, hrefFor("evidence")],
+    ["Control log", null, hrefFor("audit")],
   ];
   $("shortcuts").replaceChildren(
     ...links.map(([label, value, href]) => {

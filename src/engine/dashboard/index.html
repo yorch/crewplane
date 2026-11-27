@@ -39,6 +39,10 @@
             <li><a data-nav="messages" href="#/messages"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z" /></svg><span class="nav-label">Messages</span><span class="nav-count" data-count="messages" hidden></span></a></li>
             <li><a data-nav="runs" href="#/runs"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4" /></svg><span class="nav-label">Runs</span><span class="nav-count" data-count="runs" hidden></span></a></li>
             <li><a data-nav="relationships" href="#/relationships"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="12" r="2.5" /><circle cx="6" cy="18" r="2.5" /><path d="M8.2 7.2l7.6 3.6M8.2 16.8l7.6-3.6" /></svg><span class="nav-label">Relationships</span><span class="nav-count" data-count="relationships" hidden></span></a></li>
+            <li><a data-nav="usage" href="#/usage"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg><span class="nav-label">Usage &amp; cost</span><span class="nav-count" data-count="usage" hidden></span></a></li>
+            <li><a data-nav="evidence" href="#/evidence"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="14" rx="2" /><circle cx="9" cy="10.5" r="1.7" /><path d="M4 17l5-4.5 3.5 3 3-2.5 4.5 4" /></svg><span class="nav-label">Evidence</span><span class="nav-count" data-count="evidence" hidden></span></a></li>
+            <li><a data-nav="audit" href="#/audit"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h9l3 3V20.5H6zM9 11h6M9 14.5h6M9 18h4" /></svg><span class="nav-label">Control log</span><span class="nav-count" data-count="audit" hidden></span></a></li>
+            <li><a data-nav="setup" href="#/setup"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></svg><span class="nav-label">Setup &amp; config</span><span class="nav-count" data-count="setup" hidden></span></a></li>
             <li><a data-nav="system" href="#/system"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></svg><span class="nav-label">System &amp; notes</span><span class="nav-count" data-count="system" hidden></span></a></li>
           </ul>
         </nav>
@@ -51,6 +55,7 @@
           <p id="view-subtitle" class="view-subtitle"></p>
         </header>
         <div id="error" class="banner" role="alert" hidden></div>
+        <p id="copy-status" class="sr-only" role="status"></p>
         <main id="main" tabindex="-1">
           <div id="loading" class="loading" role="status">Loading the coordination snapshot…</div>
 
@@ -245,6 +250,76 @@
               <p class="note">Full task board remains available. Display data grants no execution authority.</p>
             </section>
             <div id="graph-host"></div>
+          </section>
+
+          <section id="view-usage" class="view" aria-labelledby="view-title" hidden>
+            <fieldset class="toolbar" aria-label="Usage options">
+              <label class="field">Chart for<select id="usage-lane"><option value="">All agents</option></select></label>
+              <div class="toolbar-actions">
+                <button id="usage-refresh" class="text-button" type="button">Refresh</button>
+              </div>
+            </fieldset>
+            <div id="usage-body"></div>
+          </section>
+
+          <section id="view-evidence" class="view" aria-labelledby="view-title" hidden>
+            <fieldset class="toolbar" aria-label="Filter evidence">
+              <label class="field field-grow">Task<input id="evidence-task" type="search" maxlength="96" placeholder="Task ID, for example CP-101" autocomplete="off" aria-describedby="evidence-task-help" /></label>
+              <label class="field">Run<select id="evidence-run"><option value="">All runs</option></select></label>
+              <div class="toolbar-actions">
+                <button id="evidence-refresh" class="text-button" type="button">Refresh</button>
+                <button id="evidence-clear" class="text-button" type="button" hidden>Clear filters</button>
+              </div>
+            </fieldset>
+            <p id="evidence-task-help" class="field-help"></p>
+            <div class="view-meta">
+              <span id="evidence-count" class="count" role="status"></span>
+              <span id="evidence-note" class="inline-note"></span>
+              <details class="info" data-key="info-evidence">
+                <summary>How to read this gallery</summary>
+                <p>Each card is one captured screenshot or recording. Images up to 2 MiB load as they scroll into view; larger files, videos and unfamiliar types wait for a click. Files are fetched with your dashboard session and shown from memory, never opened as web addresses. Capturing happens elsewhere, with crewplane evidence append.</p>
+              </details>
+            </div>
+            <div id="evidence-list"></div>
+          </section>
+
+          <section id="view-audit" class="view" aria-labelledby="view-title" hidden>
+            <fieldset class="toolbar" aria-label="Filter the control log">
+              <label class="field">Outcome
+                <select id="audit-outcome">
+                  <option value="">All outcomes</option>
+                  <option value="applied">Applied</option>
+                  <option value="noop">No change</option>
+                  <option value="refused">Refused</option>
+                  <option value="stale">Out of date</option>
+                  <option value="invalid">Not applied</option>
+                </select>
+              </label>
+              <label class="field">Issued by<select id="audit-issuer"><option value="">All issuers</option></select></label>
+              <label class="field">Agent<select id="audit-lane"><option value="">All agents</option></select></label>
+              <div class="toolbar-actions">
+                <label class="check"><input id="audit-follow" type="checkbox" checked /> Follow newer commands</label>
+                <button id="audit-clear" class="text-button" type="button" hidden>Clear filters</button>
+              </div>
+            </fieldset>
+            <div class="view-meta">
+              <span id="audit-count" class="count" role="status"></span>
+              <span id="audit-note" class="inline-note"></span>
+              <details class="info" data-key="info-audit">
+                <summary>How to read the control log</summary>
+                <p>Each row is a command someone queued (from the command line or the dashboard) and the single outcome the supervisor recorded for it. A command is only a request until the supervisor records it; refused, out-of-date and not-applied commands changed nothing. The supervisor keeps only the latest 200 commands.</p>
+              </details>
+            </div>
+            <div id="audit-split" class="split">
+              <div class="split-main">
+                <div id="audit-list"></div>
+              </div>
+              <aside id="audit-detail" class="detail-pane" data-scroll-key="audit-detail" aria-label="Command details" hidden></aside>
+            </div>
+          </section>
+
+          <section id="view-setup" class="view" aria-labelledby="view-title" hidden>
+            <div id="setup-body"></div>
           </section>
 
           <section id="view-system" class="view" aria-labelledby="view-title" hidden>

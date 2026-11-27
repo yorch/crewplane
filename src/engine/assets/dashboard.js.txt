@@ -2,7 +2,16 @@
 // content security policy is unchanged). It wires the modules in ./app/ and
 // starts polling; the views live in their own modules.
 import { refresh } from "./app/api.js";
+import { setFollow } from "./app/audit.js";
+import {
+  configResource,
+  logResource,
+  refreshAux,
+  usageResource,
+} from "./app/aux.js";
 import { refreshControls, startControls } from "./app/controls.js";
+import { refreshEvidence } from "./app/evidence.js";
+import { evidenceLink } from "./app/evidence-link.js";
 import {
   applyControls,
   fillFilterOptions,
@@ -38,6 +47,9 @@ hooks.commitSnapshot = (firstLoad) => {
   }
   render();
   refreshControls();
+  // Setup, Usage and the Control log read their own routes; the snapshot
+  // changing is the cue to look again (debounced and throttled).
+  refreshAux();
 };
 // Runs after the crewplane-graphs event, so the graph viewer has drawn and the
 // page has its final height before the saved scroll position is applied.
@@ -47,6 +59,7 @@ hooks.afterGraphs = (firstLoad) => {
 
 window.crewplane = {
   formatTime: date,
+  evidenceLink,
   hrefFor,
   navigate,
   setParams: setRouteParams,
@@ -63,6 +76,24 @@ for (const [id, layout] of [
   $(id).addEventListener("click", () => {
     storeLayout(layout);
     setRouteParams({ layout });
+  });
+$("audit-follow").addEventListener("change", () => {
+  setFollow($("audit-follow").checked);
+  render();
+});
+$("evidence-refresh").addEventListener("click", refreshEvidence);
+$("usage-refresh").addEventListener("click", () =>
+  usageResource.load({ force: true }),
+);
+// A finished read re-renders what shows it. A read in flight changes nothing.
+for (const [resource, views] of [
+  [configResource, null],
+  [usageResource, ["usage"]],
+  [logResource, ["overview", "audit"]],
+])
+  resource.onChange((state) => {
+    if (state.status === "loading" || !store.data) return;
+    if (views === null || views.includes(store.route.view)) render();
   });
 for (const query of [compactLayout, stackedLayout])
   query.addEventListener("change", render);
@@ -84,6 +115,17 @@ startControls();
 setInterval(() => {
   if (!document.hidden) refreshControls();
 }, 10000);
+// The control log follows new commands, and usage ages out of the hour window,
+// only while their view is open and the tab is visible.
+let usageTick = 0;
+setInterval(() => {
+  if (document.hidden) return;
+  // New commands are always read (cheap, by cursor); following only decides
+  // whether they are inserted under the reader.
+  if (store.route.view === "audit") logResource.load();
+  if (store.route.view === "usage" && ++usageTick % 6 === 0)
+    usageResource.load();
+}, 5000);
 // Polling is the fallback transport: it pauses only while the event stream is
 // delivering (see app/live.js).
 setInterval(() => {

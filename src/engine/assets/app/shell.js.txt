@@ -1,5 +1,5 @@
 import { adoptFragmentToken, refresh } from "./api.js";
-import { SELECTION_PARAM, VIEW_META } from "./config.js";
+import { MODAL_VIEWS, SELECTION_PARAM, VIEW_META } from "./config.js";
 import { applyControls } from "./filters.js";
 import { hrefFor, parseHash, routeScrollKey } from "./route.js";
 import { announceRoute, rememberFilters, updateNavLinks } from "./router.js";
@@ -27,6 +27,12 @@ function placeFocus(previous, focusTarget) {
   const before = previous.params[selection];
   const after = store.route.params[selection];
   if (store.route.view === "runs" && previous.view === "runs") return;
+  // A modal view manages its own focus when an item opens or closes.
+  if (
+    MODAL_VIEWS.includes(store.route.view) &&
+    previous.view === store.route.view
+  )
+    return;
   if (previous.view !== store.route.view) {
     $("view-title").focus({ preventScroll: true });
     return;
@@ -37,9 +43,12 @@ function placeFocus(previous, focusTarget) {
       .querySelector("[data-focus-key='detail-heading']")
       ?.focus({ preventScroll: true });
   } else if (before) {
-    const prefix = { tasks: "task", agents: "agent", messages: "message" }[
-      store.route.view
-    ];
+    const prefix = {
+      tasks: "task",
+      agents: "agent",
+      messages: "message",
+      audit: "audit",
+    }[store.route.view];
     const target = activeView().querySelector(
       `[data-focus-key="${CSS.escape(`${prefix}:${before}`)}"]`,
     );
@@ -54,7 +63,9 @@ function placeScroll(previous, traversal) {
     );
     return;
   }
-  const selection = SELECTION_PARAM[store.route.view];
+  const selection = MODAL_VIEWS.includes(store.route.view)
+    ? undefined
+    : SELECTION_PARAM[store.route.view];
   if (previous.view !== store.route.view) window.scrollTo(0, 0);
   else if (
     stackedLayout.matches &&

@@ -37,7 +37,12 @@ export function applyControls() {
     if (view === store.route.view)
       setControl($(id), store.route.params[key] ?? "");
 }
-function fillSelect(select, allLabel, values, format = (value) => value) {
+export function fillSelect(
+  select,
+  allLabel,
+  values,
+  format = (value) => value,
+) {
   const selected = select.value;
   const options =
     selected && !values.includes(selected) ? [...values, selected] : values;

@@ -220,6 +220,21 @@ const CODES = {
   DECISION_NEEDS_RESOLVE:
     "This pause is a decision. Approve or deny it instead of retrying.",
   INVALID: "The supervisor could not read the command.",
+  ROLLOUT: "A rollout drain was requested; the supervisor will drain.",
+  STOP_WINS:
+    "The operator stop is in force, so the rollout was refused. Start the supervisor from the command line first.",
+  // Rejected before queueing (the dashboard's own refusals; they can also be
+  // read back from an entry written by the CLI).
+  INVALID_CONTROL: "The command was malformed and was not queued.",
+  UNKNOWN_AGENT: "The agent is not configured, so the command was refused.",
+  CLI_ONLY:
+    "This action is only available from the command line; the dashboard refuses it.",
+  PIN_REQUIRED:
+    "The command did not say which revision, run or session it applies to, so it was refused.",
+  LEGACY_LAYOUT:
+    "An older supervisor layout is still present, so a command that could widen what runs was refused. Resolve it from the command line.",
+  UNSUPPORTED_ACTION: "That action is not supported.",
+  REQUEST_ID_REUSED: "The request id was already used for a different command.",
 };
 const OUTCOME = {
   applied: "Applied",
@@ -230,6 +245,12 @@ const OUTCOME = {
 };
 export function outcomeLabel(outcome) {
   return OUTCOME[outcome] ?? "Unknown";
+}
+/** Plain-language reason for a recorded code, or null when the code is not one this page knows. */
+export function reasonText(code, outcome) {
+  if (typeof code !== "string" || !/^[A-Z_]{1,64}$/.test(code)) return null;
+  const key = code === "HELD" && outcome !== "applied" ? "HELD_REFUSED" : code;
+  return Object.hasOwn(CODES, key) ? CODES[key] : null;
 }
 /** Plain-language explanation of a recorded outcome. */
 export function explainOutcome(entry) {

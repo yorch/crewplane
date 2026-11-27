@@ -191,7 +191,7 @@ const raw = (path: string) =>
     },
   );
 
-it("serves each embedded file with its content type, nosniff and the unchanged strict policy", async () => {
+it("serves each embedded file with its content type, nosniff and the strict policy (blob: only for images and media)", async () => {
   for (const name of scanned) {
     const path = name === "index.html" ? "/" : `/${name}`;
     const response = await fetch(`http://127.0.0.1:${port}${path}`);
@@ -205,8 +205,10 @@ it("serves each embedded file with its content type, nosniff and the unchanged s
       `${expected}; charset=utf-8`,
     );
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(response.headers.get("content-security-policy")).toContain(
-      "default-src 'none'; script-src 'self'; style-src 'self';",
+    // Only img-src and media-src admit blob: (the evidence gallery shows
+    // fetched artifacts from object URLs); everything else is unchanged.
+    expect(response.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
     );
     expect(await response.text(), path).toBe(embeddedAssets[name]);
   }

@@ -9,6 +9,9 @@ import { routeScrollKey } from "./route.js";
 import { store } from "./store.js";
 
 let pending = null;
+let late = null;
+let lateOpen = new Set();
+let lateOpenTries = 0;
 
 function storage() {
   try {
@@ -83,6 +86,43 @@ export function restoreAfterFirstRender() {
         : undefined;
       if (position) [node.scrollLeft, node.scrollTop] = position;
     }
+  // Disclosures of views that load their own data do not exist yet either.
+  lateOpen = new Set(saved.open);
+  for (const type of ["wheel", "touchstart", "keydown", "mousedown"])
+    window.addEventListener(
+      type,
+      () => {
+        late = null;
+        lateOpen = new Set();
+      },
+      { once: true, passive: true },
+    );
   const y = saved.scroll[routeScrollKey(store.route)];
-  if (y !== undefined) window.scrollTo(0, y);
+  if (y === undefined) return;
+  window.scrollTo(0, y);
+  // A view that loads its own data (Setup, Usage, Evidence, Control log) is
+  // still short at this point; keep trying while its content arrives, until
+  // the position is reached or the reader scrolls.
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  if (y > max + 2) {
+    late = { y, tries: 0 };
+  }
+}
+
+/** Called after every render: completes a scroll restore that was waiting for content. */
+export function applyLateScroll() {
+  if (lateOpen.size && ++lateOpenTries <= 12)
+    for (const key of [...lateOpen]) {
+      const node = document.querySelector(
+        `details.info[data-key="${CSS.escape(key)}"]`,
+      );
+      if (!node) continue;
+      node.open = true;
+      lateOpen.delete(key);
+    }
+  else lateOpen = new Set();
+  if (!late) return;
+  window.scrollTo(0, late.y);
+  late.tries += 1;
+  if (window.scrollY >= late.y - 2 || late.tries >= 12) late = null;
 }

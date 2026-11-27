@@ -2,12 +2,16 @@ import {
   ENUM_PARAMS,
   MAX_HASH_LENGTH,
   MAX_PARAM_LENGTH,
+  MODAL_VIEWS,
+  PARAM_PATTERNS,
   ROUTE_PARAMS,
   SELECTION_PARAM,
 } from "./config.js";
 
-function cleanParam(key, value) {
+function cleanParam(view, key, value) {
   if (value.length > MAX_PARAM_LENGTH || /\p{Cc}/u.test(value)) return null;
+  const pattern = PARAM_PATTERNS[view]?.[key];
+  if (pattern && !pattern.test(value)) return null;
   const allowed = ENUM_PARAMS[key];
   return allowed && !allowed.includes(value) ? null : value;
 }
@@ -30,7 +34,7 @@ export function parseHash(hash) {
   for (const key of ROUTE_PARAMS[view]) {
     const value = query.get(key);
     if (value === null || value === "") continue;
-    const clean = cleanParam(key, value);
+    const clean = cleanParam(view, key, value);
     if (clean !== null) params[key] = clean;
   }
   return { view, params, valid: true };
@@ -43,6 +47,8 @@ export function hrefFor(view, params = {}) {
   return `#/${view}${suffix ? `?${suffix}` : ""}`;
 }
 export function routeScrollKey(value) {
-  const selection = SELECTION_PARAM[value.view];
+  const selection = MODAL_VIEWS.includes(value.view)
+    ? undefined
+    : SELECTION_PARAM[value.view];
   return `${value.view}${selection && value.params[selection] ? ":detail" : ""}`;
 }

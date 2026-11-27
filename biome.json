@@ -26,6 +26,14 @@
   },
   "overrides": [
     {
+      "includes": ["tests/dashboard-views-browser.test.ts"],
+      "linter": {
+        "rules": {
+          "performance": { "useDomNodeTextContent": "off" }
+        }
+      }
+    },
+    {
       "includes": ["site/**/*.astro"],
       "linter": {
         "rules": {
