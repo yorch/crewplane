@@ -80,7 +80,7 @@ unless a lane already reported the same path. `warnings` has the same shape but
 never affects `ok` or the exit code: `INSTRUCTIONS_GLOBAL_UNAVAILABLE` reports
 a missing or unusable global instructions file. `config` is `valid`, `invalid`
 or `not-configured`; `runtime` is `compiled` for a standalone executable and
-`bun` otherwise. Credentials and provider operation are not probed. Pin
+`bun` otherwise. Credentials and provider operation are not probed. The configuration, lane and binary checks live in `src/doctor-config.ts` and are shared with the dashboard's `GET /api/config`. Pin
 mismatches, unsafe stores and a non-repository or missing `git` are refused
 before `doctor` runs, as for any project command (exit 1, nothing on stdout).
 
@@ -117,3 +117,56 @@ so scripts cannot separate "bad flag" from "not configured" or "wrong release".
 Several always-false fields (`activation`, `started`, `servicesStarted`,
 `init.running`) are reported as if they were observations. `agent list` exposes
 prose in `configState` and `harness`, which the dashboard parses.
+
+## Dashboard HTTP API
+
+The dashboard serves public embedded assets and a set of data routes under `/api/`. Rules shared by every data route:
+
+- **Auth.** A per-launch session token in the `x-crewplane-session` header is required on every `/api/*` request when the dashboard is launched by `crewplane dashboard`; without a matching header the answer is `401 {"error":"Session missing or expired. ..."}`. A token in the query string or any other header is never accepted. Host must be exactly `127.0.0.1:PORT` and a present `Origin` must be `http://127.0.0.1:PORT`, otherwise `403`. The Host/Origin check runs first.
+- **Method.** Data routes accept `GET` only (`405` otherwise). The single write is the opt-in `POST /api/control` (see docs/USAGE.md), which this section does not change.
+- **Errors.** `400` for unknown, repeated, malformed or out-of-range parameters (the body never echoes the offending value), `503 {"error": ...}` when the board cannot be read, `404` for unknown paths. Every response sends `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and the strict CSP.
+- **Data.** Responses are explicit allowlisted projections. They never contain environment values, tokens, file contents, raw provider payloads or private reasoning. Persisted strings are stripped of control characters and length-bounded; clients still render them with `textContent` only. `null` means unknown or not applicable and is never `0`.
+
+Existing routes are unchanged: `GET /api/snapshot`, `GET /api/runs[?task&lane&harness&before&limit]`, `GET /api/runs/:runId[?after&limit]`.
+
+### `GET /api/events` (server-sent events)
+
+`Content-Type: text/event-stream`, no parameters. Because `EventSource` cannot send the session header, clients read it with `fetch()` and a `ReadableStream`. Frames:
+
+| Frame                                                                           | Meaning                                                                                                                         |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `retry: 3000`                                                                   | Reconnect hint, sent first.                                                                                                     |
+| `event: ping` / `data: {"at": ISO}`                                             | Sent on connect and every 15s. Proves liveness; carries no board data.                                                          |
+| `id: <boot>-<n>` / `event: snapshot` / `data: <the /api/snapshot body>`         | The board changed. Sent once on connect and then only when the serialized snapshot content (excluding `updatedAt`) changes.     |
+| `id: ...` / `event: error` / `data: {"error": <the /api/snapshot 503 message>}` | The board is unreadable. Sent once per failure episode; the stream stays open and the next readable snapshot is always re-sent. |
+
+Limits: one shared computation per server, run every 1s (never overlapping) only while at least one client is connected, and none otherwise; at most 8 clients, a ninth gets `503 {"error": ...}` with `Retry-After: 5`; a client whose socket buffer exceeds 4 MiB, or that cannot accept writes for 10s, is closed, and a client that is merely behind receives only the latest event (updates are coalesced, never queued). `Last-Event-ID` equal to the current event id suppresses the redundant initial snapshot; an unknown or malformed id is ignored. Event ids are scoped to one server launch. The stream carries snapshot changes only; run traces keep polling `/api/runs/:runId`. Closing the server ends every stream and clears every timer.
+
+### `GET /api/config`
+
+No parameters (`400` otherwise). Built by the same inspection as `crewplane doctor` (`src/doctor-config.ts`), so problem codes, messages and per-binary results cannot drift; a parity test compares them for the same project. Update-cache and releases-directory problems (`CACHE_DIR_INVALID`, `RELEASES_ROOT_INVALID`) belong to the CLI environment and are not reported.
+
+Shape: `version` (1), `installed` (config.json readable), `state` (`valid` | `invalid` | `not-configured`), `digest` (the scheduling fingerprint of the installed config: SHA-256 of its key-sorted JSON, or `null`), `loadedDigest` and `digestsMatch` (against the running supervisor's loaded fingerprint, `null` when unknown), `ok`, `problems` (`{code, lane|null, message}` in doctor order, same closed code set including `CONFIG_MISSING`, `CONFIG_INVALID`, `BINARY_*` incl. `BINARY_UNSAFE`, `INSTRUCTIONS_INVALID`, `LEGACY_LAYOUT`), `warnings`, `legacyLayout`, `roles` (`{coordinator, reviewers, stale}`; `stale` is true when the installed roles differ from committed project policy), `budgets` (`maxParallel`, `maxRunsPerHour`, `maxRunMinutes`, `intervalSeconds` and `source`: `loaded` from the running supervisor or `configured-only`), `lanes` (at most 64: `id`, `enabled`, `valid`, `role` `coordinator|reviewer|implementer`, `reviewerRole`, `harness`, `model`, `permissions`, `capabilities`, `instructions {configured, status: none|ok|invalid}` (never the path), `budgets {maxRunsPerHour, maxRunMinutes, maxCostUsdPerRun, effectiveMaxRunsPerHour, effectiveMaxRunMinutes}`, `passEnv` (variable names only, at most 64, names that are not plain identifiers are dropped), `binary {path, ok, code, problem}`, `claude`, `opencode`), `binaries` (one per harness in use plus `default`: `{harness, path, ok, code, problem}`), `credentials: "not-probed"` and `binariesExecuted: false`. A lane that failed validation appears with `valid: false` and no harness data.
+
+### `GET /api/control-log?limit=N&after=SEQ`
+
+Projection of the supervisor's bounded audit log (`state.controlLog`, at most the latest 200 entries). `limit` is 1 to 200 (default 50); `after` is a sequence number (digits, at most 9). Without `after` the newest `limit` entries are returned; with it, the first `limit` entries newer than `after`. Entries are always ascending by `seq`. Response: `version`, `available` (state.json readable), `entries`, `latestSeq`, `retainedFrom`, `retained`, `hasMore` (only with `after`), `nextAfter` (pass it as `after` to continue).
+
+Entry: `{seq, at, issuer, action, scope: instance|lane|task|run, target, lane, task, run, outcome: applied|noop|refused|stale|invalid, reason}`. `lane`/`task`/`run` repeat `target` for the matching scope and are otherwise `null`. `reason` is the supervisor's outcome code (for example `STALE_REVISION`), bounded to 96 characters. An unknown outcome reads `invalid`.
+
+### `GET /api/usage`
+
+No parameters (`400` otherwise). Uses only retained records; nothing is estimated. Token and cost figures are **reported counters and per-invocation observations, not billing totals**.
+
+- `total`: `runsLastHour`, `maxRunsPerHour`, `tokens {semantics, input, output}`, `series` (24 hourly buckets, oldest first, aligned to `window.bucketStarts`).
+- `lanes[]` (at most 64): `runs {lastHour, cap, capSource: lane|global|null, remaining}`, `durations {maxRunMinutes, recent[] {task, startedAt, finishedAt, durationMs, status}, recordedRuns}` (latest run of each retained record, newest 10), `tokens {semantics, input, output, recordsReportingInput, recordsReportingOutput, retainedRecords}` (sum over retained records whose provider reported the dimension, else `null`), `cost {semantics, maxCostUsdPerRun, recent[] {task, at, costUsd, overCap}, maxObservedUsd, anyOverCap}` (`overCap` is `null` without a configured cap), `series`.
+- `coverage`: `counters` (source supervisor state records; terminal records are compacted away, so counters are not lifetime totals), `durations`, `series` (source operational traces: `retainedRuns`, `oldestRetainedAt`, `retentionLimited`, `incomplete`, `complete`) and `ledger {connected: false}`: the detailed usage ledger is not written by the runtime and is not read.
+- A series bucket is `null` when retained trace history does not cover it (retention pruned older runs, or the trace store is unreadable) and a number, including a measured `0`, only when it is covered.
+
+### Evidence routes
+
+All existing evidence routes keep their shape. Added:
+
+- `GET /api/evidence[?task&run&limit&cursor]`: `run` (an opaque `qa_` id) narrows to that run in the same list shape (empty when absent or when `task` disagrees); `limit` is 1 to 20 (default 20) runs; `cursor` is the `nextCursor` of a previous page. Unknown or repeated parameters are `400`.
+- `GET /api/evidence/artifacts[?task&run&limit&cursor]`: flat artifact metadata for a gallery, newest run first, without content. `limit` 1 to 200 (default 100); `cursor` is an `ev_` artifact id (the previous `nextCursor`). Entry: `{id, kind: image|video, mime, size, createdAt, task, run, lane, testedCommit, sha256, route, scenario, step, browser, viewport, outcome, findingIds, recheckOf, url}`.
+- `GET /api/evidence/artifacts/:artifactId` serves stored bytes with `Content-Type` from a four-value allowlist (`image/png`, `image/jpeg`, `image/webp`, `video/webm`; anything else is `application/octet-stream` as an `attachment`), `Content-Disposition` with a fixed filename, `Content-Length`, `Content-Security-Policy: default-src 'none'; sandbox`, `X-Content-Type-Options: nosniff` and `Cross-Origin-Resource-Policy: same-origin`. Because the route needs the session header, a gallery must fetch artifacts and display them from a `blob:` URL, which the current page CSP (`img-src 'self'`, `media-src 'self'`) does not yet allow.

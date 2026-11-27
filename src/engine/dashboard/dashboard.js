@@ -7,6 +7,7 @@ import {
   fillFilterOptions,
   wireFilters,
 } from "./app/filters.js";
+import { startLive } from "./app/live.js";
 import {
   restoreAfterFirstRender,
   startReloadPersistence,
@@ -74,8 +75,11 @@ updateNavLinks();
 showActiveView();
 announceRoute();
 refresh();
+startLive();
+// Polling is the fallback transport: it pauses only while the event stream is
+// delivering (see app/live.js).
 setInterval(() => {
-  if (!document.hidden) refresh();
+  if (!document.hidden && store.mode !== "live") refresh();
 }, 5000);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) refresh();

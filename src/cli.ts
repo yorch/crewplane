@@ -21,12 +21,8 @@ import {
   legacySupervisorDirectory,
   rebindControl,
 } from "./control.ts";
-import {
-  type DoctorProblem,
-  effectiveBinary,
-  failureMessage,
-  inspectBinary,
-} from "./doctor.ts";
+import { type DoctorProblem, failureMessage } from "./doctor.ts";
+import { inspectConfiguration } from "./doctor-config.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
 import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
@@ -35,11 +31,6 @@ import type {
   EvidenceRunInput,
 } from "./engine/evidence/contract.ts";
 import { createEvidenceStore } from "./engine/evidence/store.ts";
-import {
-  harnessCapabilities,
-  instructionFileProblem,
-  validHarness,
-} from "./engine/harness.ts";
 import { serve, validateConfig } from "./engine/supervisor.ts";
 import { monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
@@ -51,7 +42,6 @@ import {
   describeAdoption,
   escapeJsonText,
   isLive,
-  legacyPresent,
   migrateControl,
   readBoundedJson,
   resolveControlTarget,
@@ -101,18 +91,6 @@ const optional = async (path: string) => {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("Invalid private state; inspect before recovery");
-  }
-};
-const lanePermissions = (lane: Config["lanes"][string]) => {
-  switch (lane.harness ?? "codex") {
-    case "pi":
-      return "no-tools";
-    case "claude":
-      return `permission-mode:${lane.claudePermissionMode}`;
-    case "opencode":
-      return lane.opencodeAuto === true ? "auto-approve" : "harness-configured";
-    default:
-      return "harness-controlled";
   }
 };
 const readConfig = async (directory: string) => {
@@ -703,47 +681,14 @@ async function main() {
   }
   if (command === "doctor") {
     if (rest.length) throw new Error("doctor takes no options");
-    const problems: DoctorProblem[] = [];
-    let config: Config | null = null;
-    let configState = "not-configured";
-    const legacyLayout = legacyPresent(legacySupervisorDirectory(ctx.store));
-    if (legacyLayout)
-      problems.push({
-        code: "LEGACY_LAYOUT",
-        message:
-          "Legacy supervisor state is in the project store and is not used; run `crewplane migrate`",
-      });
-    try {
-      checkControlDirectory(controlDir);
-      config = (await optional(
-        join(controlDir, "config.json"),
-      )) as Config | null;
-    } catch (error) {
-      configState = "invalid";
-      problems.push({
-        code: "CONFIG_INVALID",
-        message: failureMessage(error, "Configuration is unreadable"),
-      });
-    }
-    if (config) {
-      try {
-        // Binaries are probed per lane below, so a missing one must not hide
-        // the first other configuration error.
-        validateConfig(config, { checkBinary: false });
-        configState = "valid";
-      } catch (error) {
-        configState = "invalid";
-        problems.push({
-          code: "CONFIG_INVALID",
-          message: failureMessage(error, "Configuration is invalid"),
-        });
-      }
-    } else if (configState === "not-configured")
-      problems.push({
-        code: "CONFIG_MISSING",
-        message:
-          "Project is not configured; run crewplane configure --file PATH",
-      });
+    const inspection = await inspectConfiguration({
+      root,
+      store: ctx.store,
+      controlDir,
+      instructionsPath: policy.instructionsPath,
+    });
+    const problems: DoctorProblem[] = [...inspection.configProblems];
+    const { legacyLayout, configState } = inspection;
     // Retention failures only reach the update cache; surface them here, since a
     // silently stalled self-update is otherwise invisible.
     let updateCache: Awaited<ReturnType<typeof readUpdateCache>> = {
@@ -773,86 +718,9 @@ async function main() {
     } catch {
       // Project discovery already ran git, so this is not expected to fail.
     }
-    const reportedPaths = new Set<string>();
-    const probeFor = async (harness: string, path?: string, lane?: string) => {
-      const { probe, code } = await inspectBinary(path, harness);
-      if (code && !(probe.path !== null && reportedPaths.has(probe.path))) {
-        problems.push({
-          code,
-          ...(lane === undefined ? {} : { lane }),
-          message: probe.problem ?? "binary unusable",
-        });
-        if (probe.path !== null) reportedPaths.add(probe.path);
-      }
-      return probe;
-    };
-    const harnesses: unknown[] = [];
-    if (config && typeof config.lanes === "object" && config.lanes)
-      for (const [id, lane] of Object.entries(config.lanes)) {
-        try {
-          if (typeof lane !== "object" || lane === null || Array.isArray(lane))
-            throw new Error("Lane is invalid");
-          const harness = lane.harness ?? "codex";
-          if (!validHarness(harness)) throw new Error("Unsupported harness");
-          const instructions = lane.instructionsPath
-            ? (instructionFileProblem(root, lane.instructionsPath) ?? "ok")
-            : "none";
-          if (instructions !== "none" && instructions !== "ok")
-            problems.push({
-              code: "INSTRUCTIONS_INVALID",
-              lane: id,
-              message: instructions,
-            });
-          harnesses.push({
-            id,
-            harness,
-            binary: await probeFor(
-              harness,
-              effectiveBinary(config ?? {}, harness),
-              id,
-            ),
-            capabilities: harnessCapabilities[harness],
-            permissions: lanePermissions(lane),
-            model: lane.piModel ?? lane.model ?? null,
-            instructions,
-            passEnv: lane.passEnv ?? [],
-            budgets: {
-              maxRunsPerHour: lane.maxRunsPerHour ?? null,
-              maxRunMinutes: lane.maxRunMinutes ?? null,
-            },
-            claude:
-              lane.harness === "claude"
-                ? {
-                    mcp: lane.claudeMcp ?? null,
-                    settingSources: lane.claudeSettingSources ?? null,
-                    tools: lane.claudeTools ?? null,
-                    allowedTools: lane.claudeAllowedTools ?? null,
-                    disallowedTools: lane.claudeDisallowedTools ?? null,
-                    maxCostUsdPerRun: lane.maxCostUsdPerRun ?? null,
-                  }
-                : null,
-            opencode:
-              lane.harness === "opencode"
-                ? {
-                    agent: lane.opencodeAgent ?? null,
-                    auto: lane.opencodeAuto === true,
-                  }
-                : null,
-          });
-        } catch (error) {
-          problems.push({
-            code: "CONFIG_INVALID",
-            lane: id,
-            message: failureMessage(error, "Lane is invalid"),
-          });
-        }
-      }
-    // The top-level binary is probed itself, even when no lane resolves to it;
-    // a failure already reported for the same path by a lane is not repeated.
-    const defaultBinary = config?.binary
-      ? await probeFor("default", config.binary)
-      : null;
-    const globalProblem = instructionFileProblem(root, policy.instructionsPath);
+    problems.push(...inspection.binaryProblems);
+    const { harnesses, defaultBinary } = inspection;
+    const globalProblem = inspection.globalInstructionsProblem;
     // A missing global file is reported at prompt time, not a hard failure.
     const warnings: DoctorProblem[] = globalProblem
       ? [{ code: "INSTRUCTIONS_GLOBAL_UNAVAILABLE", message: globalProblem }]

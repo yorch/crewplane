@@ -56,6 +56,29 @@ function setConnection(state, text) {
   $("connection-wrap").dataset.state = state;
   if ($("connection").textContent !== text) $("connection").textContent = text;
 }
+// The transport shows beside the check time ("Checked 10:00:01 · live updates"),
+// so the primary "Live" / "Disconnected" status and its banner are unchanged.
+const modeLabel = { live: "live updates", polling: "polling" };
+let checkedAt = null;
+function paintChecked() {
+  if (checkedAt === null) return;
+  $("connection-time").textContent =
+    `Checked ${checkedAt} · ${modeLabel[store.mode]}`;
+}
+export function setMode(mode) {
+  store.mode = mode;
+  $("connection-wrap").dataset.mode = mode;
+  if ($("connection-wrap").dataset.state === "live") paintChecked();
+}
+// A stream heartbeat proves the retained snapshot is still current.
+export function markFresh(at) {
+  if (!store.data) return;
+  store.lastSuccess = Date.now();
+  setConnection("live", "Live");
+  checkedAt = date(at);
+  paintChecked();
+  $("error").hidden = true;
+}
 export function applySnapshot(next) {
   const { updatedAt, ...content } = next;
   const signature = JSON.stringify(content);
@@ -96,21 +119,22 @@ export function applySnapshot(next) {
   store.lastSuccess = Date.now();
   refreshRelativeTimes();
   setConnection("live", "Live");
-  $("connection-time").textContent = `Checked ${date(updatedAt)}`;
+  checkedAt = date(updatedAt);
+  paintChecked();
   $("error").hidden = true;
 }
-function showDisconnected(message) {
+export function showDisconnected(message, retry = "every 5s") {
   setConnection("disconnected", "Disconnected");
-  $("connection-time").textContent = "Retrying every 5s";
+  $("connection-time").textContent = `Retrying ${retry}`;
   const context = store.lastSuccess
     ? `Showing the last snapshot from ${date(store.lastSuccess)}; it may be out of date.`
     : "No snapshot has been received yet.";
-  const text = `${message} ${context} Retrying every 5s.`;
+  const text = `${message} ${context} Retrying ${retry}.`;
   if ($("error").textContent !== text) $("error").textContent = text;
   $("error").hidden = false;
   if (!store.data)
     $("loading").textContent =
-      "Waiting for the dashboard server. Retrying every 5s.";
+      `Waiting for the dashboard server. Retrying ${retry}.`;
 }
 export async function refresh() {
   if (store.busy) return;

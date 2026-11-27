@@ -8,6 +8,8 @@ export const store = {
   route: { view: "overview", params: {}, valid: true },
   fingerprint: undefined,
   busy: false,
+  /** Transport: "polling" until the event stream delivers, then "live". */
+  mode: "polling",
   lastSuccess: null,
   internalNavigation: false,
   messageLimit: 100,
