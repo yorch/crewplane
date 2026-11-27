@@ -1,4 +1,5 @@
 import { processBadge, progressBadge } from "./badges.js";
+import { laneControls } from "./controls.js";
 import {
   closeLink,
   detailHeading,
@@ -232,6 +233,7 @@ function renderAgentDetail(all) {
     closeLink(closeHref, "Close agent details"),
     header,
     section("Quick links", links),
+    ...[laneControls(agent.lane)].filter(Boolean),
     section(
       "Current task",
       fields([

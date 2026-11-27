@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { plannedTasks, snapshot } from "../board.ts";
@@ -10,6 +10,7 @@ import {
 } from "../control.ts";
 import { sha256Hex } from "../hash.ts";
 import { publishJson } from "../io.ts";
+import { isLive, supervisorLiveness } from "../migrate.ts";
 import {
   discoverProject,
   projectPolicy,
@@ -18,12 +19,19 @@ import {
 } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
-import { control } from "./control-policy.ts";
+import { type Control, control } from "./control-policy.ts";
 import { configView } from "./dashboard/config-view.ts";
 import {
   controlLogView,
   parseControlLogQuery,
 } from "./dashboard/control-log.ts";
+import {
+  controlsView,
+  createControlGuard,
+  fingerprint,
+  parseControlRequest,
+  wideningVerbs,
+} from "./dashboard/controls.ts";
 import {
   evidenceArtifactHeaders,
   evidenceArtifactList,
@@ -77,6 +85,8 @@ export function createDashboard(
      * users.
      */
     session?: { token: string };
+    /** Controls rate limit and replay window (tests inject a clock). */
+    controlGuard?: Parameters<typeof createControlGuard>[0];
     /** Live-update tuning; the defaults suit production, tests inject timers. */
     live?: {
       intervalMs?: number;
@@ -97,6 +107,7 @@ export function createDashboard(
     createEvidenceStore(join(await storeOf(root), "evidence")),
   );
   const routes = assetRoutes();
+  const guard = createControlGuard(options.controlGuard);
   const unreadable =
     "Could not read coordination data. Check task cards and local board, then retry.";
   // One computation serves every event-stream client; it only runs while a
@@ -143,6 +154,13 @@ export function createDashboard(
         response.writeHead(403).end("Forbidden");
         return;
       }
+      const reply = (status: number, body: unknown, headers = {}) => {
+        response.writeHead(status, {
+          "Content-Type": "application/json; charset=utf-8",
+          ...headers,
+        });
+        response.end(JSON.stringify(body));
+      };
       try {
         let size = 0;
         const chunks: Buffer[] = [];
@@ -158,30 +176,64 @@ export function createDashboard(
         try {
           body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
         } catch {
-          response.writeHead(400).end("Invalid JSON");
-          return;
+          return reply(400, { error: "Invalid JSON", code: "INVALID_JSON" });
         }
-        const raw = (body ?? {}) as Record<string, unknown>;
-        if (raw.action !== "pause" && raw.action !== "cancel") {
-          response.writeHead(400).end("Unsupported control");
-          return;
-        }
-        const value = control({
-          v: 2,
-          action: raw.action,
-          ...(typeof raw.lane === "string" ? { lane: raw.lane } : {}),
-          ...(typeof raw.run === "string" ? { run: raw.run } : {}),
-          ...(raw.all === true ? { all: true } : {}),
-          ...(typeof raw.expectRev === "number"
-            ? { expectRev: raw.expectRev }
-            : {}),
-          issuer: "dashboard",
+        // The same read model the CLI consults: the supervisor generation the
+        // operator is bound to and the configured agents.
+        const runtime = await readRuntime(root);
+        const parsed = parseControlRequest(body, {
+          generation: runtime.state?.generation,
+          lanes: runtime.config ? Object.keys(runtime.config.lanes) : null,
           at: new Date().toISOString(),
         });
-        if (value.action === "invalid") {
-          response.writeHead(400).end("Invalid control");
-          return;
+        if (!parsed.ok)
+          return reply(400, { error: parsed.message, code: parsed.code });
+        const value = parsed.value;
+        const id = parsed.requestId ?? randomUUID();
+        const print = fingerprint(value);
+        const answer = (
+          replay: boolean,
+          afterSeq: number,
+          running: boolean,
+        ) => ({
+          queued: value.action,
+          id,
+          status: "queued",
+          outcome: null,
+          afterSeq,
+          supervisor: running ? "running" : "not-running",
+          ...(running
+            ? {}
+            : {
+                warning:
+                  value.action === "pause"
+                    ? "No supervisor is running; the pause applies when a supervisor starts."
+                    : `No supervisor is running; this ${value.action} is bound to the current generation and will be refused as stale by the next start.`,
+              }),
+          ...(replay ? { replay: true } : {}),
+        });
+        const cached = guard.recall(id);
+        if (cached) {
+          if (cached.fingerprint !== print)
+            return reply(409, {
+              error: "This requestId was already used for a different command.",
+              code: "REQUEST_ID_REUSED",
+            });
+          return reply(200, { ...(cached.body as object), replay: true });
         }
+        const afterSeq = runtime.state?.controlSeq ?? 0;
+        // The supervisor remembers consumed command ids: a replay of one is
+        // answered from the log, never queued again.
+        if (runtime.state?.commands.includes(`${id}.json`))
+          return reply(200, {
+            queued: value.action,
+            id,
+            status: "queued",
+            outcome: null,
+            afterSeq: 0,
+            supervisor: "unknown",
+            replay: true,
+          });
         // Commands are authority: they go to the private control directory.
         const identity = discoverProject(root);
         const controlDir = controlDirectory(identity.primary);
@@ -193,16 +245,66 @@ export function createDashboard(
             primaryRoot: identity.primary,
             gitCommon: identity.common,
           },
-          { narrowing: true },
+          { narrowing: !wideningVerbs.has(value.action) },
         );
         const directory = join(controlDir, "commands");
         await mkdir(directory, { recursive: true, mode: 0o700 });
-        const id = randomUUID();
-        await publishJson(join(directory, `${id}.json`), value);
-        response.writeHead(200, {
-          "Content-Type": "application/json; charset=utf-8",
-        });
-        response.end(JSON.stringify({ queued: value.action, id }));
+        const pending = (await readdir(directory)).filter((name) =>
+          name.endsWith(".json"),
+        ).length;
+        if (pending >= guard.maxPending)
+          return reply(
+            429,
+            {
+              error:
+                "Too many commands are waiting for the supervisor. Wait for them to be recorded.",
+              code: "QUEUE_FULL",
+            },
+            { "Retry-After": "10" },
+          );
+        const slot = guard.reserve();
+        if (!slot.ok)
+          return reply(
+            429,
+            {
+              error: "Too many controls in the last minute. Retry shortly.",
+              code: "RATE_LIMITED",
+            },
+            { "Retry-After": String(slot.retryAfter) },
+          );
+        try {
+          await publishJson(join(directory, `${id}.json`), value, {
+            exclusive: true,
+          });
+        } catch (error) {
+          guard.release();
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          // Another request (or process) already queued this id: same
+          // command, same answer; a different command under it is a conflict.
+          let existing: Control | null = null;
+          try {
+            existing = control(
+              JSON.parse(await readFile(join(directory, `${id}.json`), "utf8")),
+            );
+          } catch {
+            existing = null;
+          }
+          if (!existing || fingerprint(existing) !== print)
+            return reply(409, {
+              error: "This requestId was already used for a different command.",
+              code: "REQUEST_ID_REUSED",
+            });
+          return reply(200, answer(true, afterSeq, true));
+        }
+        let running = false;
+        try {
+          running = isLive(supervisorLiveness(controlDir));
+        } catch {
+          running = false;
+        }
+        const result = answer(false, afterSeq, running);
+        guard.remember(id, print, result);
+        return reply(200, result);
       } catch {
         if (!response.headersSent)
           response.writeHead(503, { "Content-Type": "application/json" });
@@ -284,6 +386,19 @@ export function createDashboard(
               policy: projectPolicy(root),
             }),
           );
+        }
+        if (url.pathname === "/api/controls") {
+          if (url.search)
+            return json({ error: "Invalid controls request" }, 400);
+          if (!options.controls)
+            return json(controlsView(false, null, null, { running: false }));
+          const { state, config } = await readRuntime(root);
+          const fresh =
+            state?.running === true &&
+            Number.isFinite(Date.parse(state.checkedAt)) &&
+            Date.now() - Date.parse(state.checkedAt) <=
+              ((config?.intervalSeconds ?? 10) * 2 + 5) * 1000;
+          return json(controlsView(true, state, config, { running: fresh }));
         }
         if (url.pathname === "/api/control-log") {
           const query = parseControlLogQuery(url.searchParams);

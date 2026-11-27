@@ -1,4 +1,5 @@
 import { badge } from "./badges.js";
+import { decisionBlock } from "./controls.js";
 import {
   closeLink,
   detailHeading,
@@ -139,7 +140,9 @@ function renderMessageList(index) {
   if (showOpen) {
     const list = el("ol", undefined, "message-rows");
     list.append(...questions.map((m) => messageRow(m, true, index)));
+    const decisions = decisionBlock();
     $("questions").replaceChildren(
+      ...(decisions ? [decisions] : []),
       questions.length
         ? list
         : emptyNode(

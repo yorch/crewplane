@@ -6,7 +6,7 @@ import {
   spawn,
   spawnSync,
 } from "node:child_process";
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -654,6 +654,93 @@ try {
   dashboard.kill("SIGTERM");
   await closed(dashboard);
   abort.abort();
+  // Operator controls through the compiled executable: opt-in, token and
+  // Origin guarded, queued (never applied synchronously) in the private
+  // control directory, and replay-safe.
+  {
+    const logsBefore = nativeLogs.length;
+    const controlPort = await new Promise<number>((resolve) => {
+      const s = createServer();
+      s.listen(0, "127.0.0.1", () => {
+        const a = s.address();
+        s.close(() => resolve(typeof a === "object" && a ? a.port : 0));
+      });
+    });
+    const controlled = start(
+      "dashboard",
+      "--port",
+      String(controlPort),
+      "--controls",
+      "true",
+    );
+    await until(
+      async () => nativeLogs.slice(logsBefore).includes("Controls URL"),
+      "controls dashboard URL",
+    );
+    const fresh = nativeLogs.slice(logsBefore);
+    const match = new RegExp(
+      `http://127.0.0.1:${controlPort}/#token=([A-Za-z0-9_-]+)&controls=([A-Za-z0-9_-]+)`,
+    ).exec(fresh);
+    assert(match, "controls URL printed");
+    const [, readToken = "", controlsToken = ""] = match;
+    assert.notEqual(readToken, controlsToken);
+    const origin = `http://127.0.0.1:${controlPort}`;
+    const capability = (await (
+      await fetch(`${origin}/api/controls`, {
+        headers: { "x-crewplane-session": readToken },
+      })
+    ).json()) as { enabled: boolean; verbs: string[] };
+    assert.equal(capability.enabled, true);
+    assert(capability.verbs.includes("resolve"));
+    assert(!JSON.stringify(capability).includes(controlsToken));
+    const post = (body: unknown, token = controlsToken) =>
+      fetch(`${origin}/api/control`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+          "x-crewplane-token": token,
+        },
+        body: JSON.stringify(body),
+      });
+    assert.equal(
+      (await post({ action: "pause", lane: "builder" }, readToken)).status,
+      403,
+    );
+    assert.equal(
+      (
+        await post({
+          action: "resume",
+          lane: "builder",
+          requestId: randomUUID(),
+        })
+      ).status,
+      400,
+    );
+    const requestId = randomUUID();
+    const queued = (await (
+      await post({ action: "nudge", lane: "builder", text: "hi", requestId })
+    ).json()) as { id: string; status: string; outcome: unknown };
+    assert.equal(queued.id, requestId);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.outcome, null);
+    const again = (await (
+      await post({ action: "nudge", lane: "builder", text: "hi", requestId })
+    ).json()) as { replay?: boolean };
+    assert.equal(again.replay, true);
+    const commandsDirectory = join(controlOf(root), "commands");
+    const file = join(commandsDirectory, `${requestId}.json`);
+    const command_ = JSON.parse(readFileSync(file, "utf8")) as {
+      action: string;
+      issuer: string;
+    };
+    assert.equal(command_.action, "nudge");
+    assert.equal(command_.issuer, "dashboard");
+    // The fixture has no supervisor: leave nothing for a later start to find.
+    rmSync(file);
+    controlled.kill("SIGTERM");
+    await closed(controlled);
+  }
   command("watchdog", "once");
   assert.equal(JSON.parse(command("watchdog", "status")).recovery, "none");
   // Simulate a dead supervisor's persisted running-without-child state and lease.

@@ -1,4 +1,5 @@
 import { healthBadge } from "./badges.js";
+import { supervisorControls } from "./controls.js";
 import { el, fields, section } from "./dom.js";
 import { $, store } from "./store.js";
 import { date, timeEl } from "./time.js";
@@ -73,6 +74,8 @@ export function renderSystem() {
         )
       : el("p", "Supervisor budgets unavailable", "note"),
   );
+  const stop = supervisorControls();
+  if (stop) $("headless-budgets").append(stop);
   const monitor = store.data.monitor;
   const watchdog = store.data.watchdog;
   $("monitor-status").replaceChildren(

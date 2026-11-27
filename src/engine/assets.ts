@@ -3,63 +3,67 @@ import asset0 from "./assets/app/agents.js.txt" with { type: "text" };
 import asset1 from "./assets/app/api.js.txt" with { type: "text" };
 import asset2 from "./assets/app/badges.js.txt" with { type: "text" };
 import asset3 from "./assets/app/config.js.txt" with { type: "text" };
-import asset4 from "./assets/app/dom.js.txt" with { type: "text" };
-import asset5 from "./assets/app/filters.js.txt" with { type: "text" };
-import asset6 from "./assets/app/labels.js.txt" with { type: "text" };
-import asset7 from "./assets/app/links.js.txt" with { type: "text" };
-import asset8 from "./assets/app/live-core.js.txt" with { type: "text" };
-import asset9 from "./assets/app/live.js.txt" with { type: "text" };
-import asset10 from "./assets/app/messages.js.txt" with { type: "text" };
-import asset11 from "./assets/app/overview.js.txt" with { type: "text" };
-import asset12 from "./assets/app/persist.js.txt" with { type: "text" };
-import asset13 from "./assets/app/relationships.js.txt" with { type: "text" };
-import asset14 from "./assets/app/reload-state.js.txt" with { type: "text" };
-import asset15 from "./assets/app/render.js.txt" with { type: "text" };
-import asset16 from "./assets/app/route.js.txt" with { type: "text" };
-import asset17 from "./assets/app/router.js.txt" with { type: "text" };
-import asset18 from "./assets/app/shell.js.txt" with { type: "text" };
-import asset19 from "./assets/app/store.js.txt" with { type: "text" };
-import asset20 from "./assets/app/system.js.txt" with { type: "text" };
-import asset21 from "./assets/app/tasks.js.txt" with { type: "text" };
-import asset22 from "./assets/app/time.js.txt" with { type: "text" };
-import asset23 from "./assets/app/ui-state.js.txt" with { type: "text" };
-import asset24 from "./assets/dashboard.css.txt" with { type: "text" };
-import asset25 from "./assets/dashboard.js.txt" with { type: "text" };
-import asset26 from "./assets/graph-renderer.css.txt" with { type: "text" };
-import asset27 from "./assets/graph-renderer.js.txt" with { type: "text" };
-import asset28 from "./assets/graph-viewer.js.txt" with { type: "text" };
-import asset29 from "./assets/index.html.txt" with { type: "text" };
-import asset30 from "./assets/run-viewer.js.txt" with { type: "text" };
+import asset4 from "./assets/app/controls-core.js.txt" with { type: "text" };
+import asset5 from "./assets/app/controls.js.txt" with { type: "text" };
+import asset6 from "./assets/app/dom.js.txt" with { type: "text" };
+import asset7 from "./assets/app/filters.js.txt" with { type: "text" };
+import asset8 from "./assets/app/labels.js.txt" with { type: "text" };
+import asset9 from "./assets/app/links.js.txt" with { type: "text" };
+import asset10 from "./assets/app/live-core.js.txt" with { type: "text" };
+import asset11 from "./assets/app/live.js.txt" with { type: "text" };
+import asset12 from "./assets/app/messages.js.txt" with { type: "text" };
+import asset13 from "./assets/app/overview.js.txt" with { type: "text" };
+import asset14 from "./assets/app/persist.js.txt" with { type: "text" };
+import asset15 from "./assets/app/relationships.js.txt" with { type: "text" };
+import asset16 from "./assets/app/reload-state.js.txt" with { type: "text" };
+import asset17 from "./assets/app/render.js.txt" with { type: "text" };
+import asset18 from "./assets/app/route.js.txt" with { type: "text" };
+import asset19 from "./assets/app/router.js.txt" with { type: "text" };
+import asset20 from "./assets/app/shell.js.txt" with { type: "text" };
+import asset21 from "./assets/app/store.js.txt" with { type: "text" };
+import asset22 from "./assets/app/system.js.txt" with { type: "text" };
+import asset23 from "./assets/app/tasks.js.txt" with { type: "text" };
+import asset24 from "./assets/app/time.js.txt" with { type: "text" };
+import asset25 from "./assets/app/ui-state.js.txt" with { type: "text" };
+import asset26 from "./assets/dashboard.css.txt" with { type: "text" };
+import asset27 from "./assets/dashboard.js.txt" with { type: "text" };
+import asset28 from "./assets/graph-renderer.css.txt" with { type: "text" };
+import asset29 from "./assets/graph-renderer.js.txt" with { type: "text" };
+import asset30 from "./assets/graph-viewer.js.txt" with { type: "text" };
+import asset31 from "./assets/index.html.txt" with { type: "text" };
+import asset32 from "./assets/run-viewer.js.txt" with { type: "text" };
 export const embeddedAssets: Record<string, string> = {
   "app/agents.js": asset0,
   "app/api.js": asset1,
   "app/badges.js": asset2,
   "app/config.js": asset3,
-  "app/dom.js": asset4,
-  "app/filters.js": asset5,
-  "app/labels.js": asset6,
-  "app/links.js": asset7,
-  "app/live-core.js": asset8,
-  "app/live.js": asset9,
-  "app/messages.js": asset10,
-  "app/overview.js": asset11,
-  "app/persist.js": asset12,
-  "app/relationships.js": asset13,
-  "app/reload-state.js": asset14,
-  "app/render.js": asset15,
-  "app/route.js": asset16,
-  "app/router.js": asset17,
-  "app/shell.js": asset18,
-  "app/store.js": asset19,
-  "app/system.js": asset20,
-  "app/tasks.js": asset21,
-  "app/time.js": asset22,
-  "app/ui-state.js": asset23,
-  "dashboard.css": asset24,
-  "dashboard.js": asset25,
-  "graph-renderer.css": asset26,
-  "graph-renderer.js": asset27,
-  "graph-viewer.js": asset28,
-  "index.html": asset29,
-  "run-viewer.js": asset30,
+  "app/controls-core.js": asset4,
+  "app/controls.js": asset5,
+  "app/dom.js": asset6,
+  "app/filters.js": asset7,
+  "app/labels.js": asset8,
+  "app/links.js": asset9,
+  "app/live-core.js": asset10,
+  "app/live.js": asset11,
+  "app/messages.js": asset12,
+  "app/overview.js": asset13,
+  "app/persist.js": asset14,
+  "app/relationships.js": asset15,
+  "app/reload-state.js": asset16,
+  "app/render.js": asset17,
+  "app/route.js": asset18,
+  "app/router.js": asset19,
+  "app/shell.js": asset20,
+  "app/store.js": asset21,
+  "app/system.js": asset22,
+  "app/tasks.js": asset23,
+  "app/time.js": asset24,
+  "app/ui-state.js": asset25,
+  "dashboard.css": asset26,
+  "dashboard.js": asset27,
+  "graph-renderer.css": asset28,
+  "graph-renderer.js": asset29,
+  "graph-viewer.js": asset30,
+  "index.html": asset31,
+  "run-viewer.js": asset32,
 };

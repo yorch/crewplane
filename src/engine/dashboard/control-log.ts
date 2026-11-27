@@ -45,6 +45,10 @@ export function controlLogView(state: State | null, query: ControlLogQuery) {
       const outcome = outcomes.find((o) => o === item.outcome) ?? "invalid";
       return [
         {
+          id:
+            typeof item.id === "string" && /^[a-f0-9-]{36}$/.test(item.id)
+              ? item.id
+              : null,
           seq,
           at: instant(item.at),
           issuer: clean(item.issuer, 64),

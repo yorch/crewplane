@@ -1,6 +1,6 @@
 # Dashboard design
 
-The dashboard is a read-only operations cockpit for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged by the redesign itself (later hardening added a per-launch session header on `/api/*`; see docs/USAGE.md), and its views display data from `/api/snapshot` and `/api/runs`. The transport and read-only data routes added afterwards are described under Transport.
+The dashboard is a read-only operations cockpit (with opt-in operator controls, see "Operator controls") for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged by the redesign itself (later hardening added a per-launch session header on `/api/*`; see docs/USAGE.md), and its views display data from `/api/snapshot` and `/api/runs`. The transport and read-only data routes added afterwards are described under Transport.
 
 ## Information architecture
 
@@ -87,9 +87,18 @@ The Runs view (`run-viewer.js`) and the relationship diagram (`graph-viewer.js`,
 
 `scripts/embed.ts` scans `src/engine/dashboard` recursively for `.html`, `.js` and `.css` files (never `*.test.*` or server-side TypeScript such as `graph-builder.ts`), sorts the names, copies each to `src/engine/assets/<name>.txt` and writes `src/engine/assets.ts` (a generated file, excluded from Biome). The assets directory is rebuilt from scratch on every run, so removed files do not linger. Adding a module is just adding a file. The server routes `/` to `index.html` and `/<name>` to each embedded name (plus `/runs.js` for the run viewer) by exact match against that set, with the content type taken from the extension (`text/javascript` for modules) and `nosniff` kept; every other path, including traversal attempts and query strings, is a 404. Tests check that the embedded set equals the directory scan, that every import specifier in an embedded script resolves to an embedded file, and that the server serves or refuses paths accordingly. CI reruns the embed script and fails if `git status --porcelain` shows anything under `src/engine/assets` or `assets.ts`: stale or hand-edited copies (modified), copies never committed for a new source (untracked), missing copies, and orphan copies whose source is gone (deleted by the rebuild).
 
+## Operator controls
+
+The controls layer (`app/controls.js`, pure rules in `app/controls-core.js`) exists only when `GET /api/controls` says enabled and the page holds the controls token; otherwise there is no UI change, no dialog element and no control request. The sidebar footer says which mode applies.
+
+- Contextual placement: Agents detail (Pause/Resume, Retry, Nudge, and per task Approve/Deny, Retry with new session, Confirm cleanup and retry, Cancel run), Runs (Cancel run for the selected active run), Overview attention and Messages ("Decisions waiting for you" with Approve/Deny), System (Stop supervisor). Buttons appear only for verbs the read model says are meaningful.
+- Every action opens one modal `<dialog>` (no inline styles or handlers, so the CSP is unchanged) labelled by its title and described by the sentence that restates what will happen and which revision, run or session it is pinned to. Focus moves to the note field (or the first field), Tab wraps inside the dialog, Escape or "Keep as is" closes it, and focus returns to the trigger (found again by key when a snapshot rebuilt it). The note is required exactly where the CLI requires text; confirm-cleanup needs an explicit acknowledgement checkbox; cancel and stop need the target name or `stop` typed. Problems are announced in an `alert`; invalid fields get `aria-invalid`.
+- After confirming, a polite live region shows `Queued: ...` and then the recorded outcome with its reason code in plain language (applied, no change, refused, out of date), refreshing the board and pins. Stale outcomes say the agent changed after the page was opened. If nothing is recorded within 30 seconds it says so and that a command is refused as stale if the supervisor starts later.
+- Accessibility: 44px minimum targets, visible focus, text and borders (not colour alone) distinguish outcomes, forced-colors rules draw explicit borders, and all dynamic text uses `textContent`.
+
 ## Limitations
 
-- The dashboard remains read-only: there are no execution, reply or control actions.
+- The dashboard is read-only unless started with `--controls true` and opened from the controls URL; there are no reply actions and nothing starts agents or the supervisor.
 - Browser reload restores the view, filters and open item, plus scroll and the "How to read…" disclosures (see Reload persistence). Other disclosures, such as the task card text, are preserved across polls but start closed after a full page load. The run timeline loads after the first render, so its scroll position after a reload is best effort.
 - Run timelines keep the latest 500 events client-side, and tailing fetches 100 events per poll.
 - The all-messages list renders 100 rows at a time, with a button to show more.

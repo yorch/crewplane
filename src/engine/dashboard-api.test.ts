@@ -479,6 +479,7 @@ describe("GET /api/control-log", () => {
     });
     expect((await json("/api/control-log")).body.entries).toHaveLength(7);
     expect((await json("/api/control-log")).body.entries[0]).toEqual({
+      id: "00000000-0000-4000-8000-000000000001",
       seq: 1,
       at: "2026-11-08T12:00:00.000Z",
       issuer: "dashboard",
