@@ -134,7 +134,7 @@ beforeAll(async () => {
     JSON.stringify({
       version: 1,
       root,
-      binary: "/bin/true",
+      binary: process.execPath,
       allowedTasks: [],
       maxParallel: 2,
       intervalSeconds: 10,
