@@ -5,8 +5,11 @@
 import { reasonText } from "./controls-core.js";
 
 export const LOG_CAP = 200;
-/** Entries kept client-side; retained history is bounded by the supervisor at 200. */
-export const KEEP = 400;
+/**
+ * Entries kept client-side: exactly what the supervisor retains, so "N of M
+ * retained" and a `?seq=` detail never claim more than the server still holds.
+ */
+export const KEEP = LOG_CAP;
 export const PAGE = 50;
 
 const OUTCOMES = {
@@ -89,7 +92,12 @@ export function mergeLog(previous, body, { replace }) {
   const base = replace ? [] : previous.entries;
   const bySeq = new Map(base.map((entry) => [entry.seq, entry]));
   for (const entry of incoming) bySeq.set(entry.seq, entry);
+  // What the supervisor no longer retains is dropped, not kept as "extra".
+  const from = Number.isSafeInteger(body?.retainedFrom)
+    ? body.retainedFrom
+    : null;
   const entries = [...bySeq.values()]
+    .filter((entry) => from === null || entry.seq >= from)
     .sort((a, b) => a.seq - b.seq)
     .slice(-KEEP);
   const last = entries.at(-1)?.seq ?? null;
@@ -114,11 +122,38 @@ export function logPath(model) {
     ? `/api/control-log?limit=${LOG_CAP}`
     : `/api/control-log?after=${model.cursor}&limit=${LOG_CAP}`;
 }
-/** A cursor ahead of the log's latest sequence means the log was reset: read it again from the start. */
-export const logWasReset = (model, body) =>
-  model.cursor !== null &&
-  Number.isSafeInteger(body?.latestSeq) &&
-  body.latestSeq < model.cursor;
+/**
+ * Whether the log is no longer the one the held entries came from, so it must
+ * be read again from the start. A cursor read only returns newer entries, so a
+ * reset is recognised from what the answer says about the log itself:
+ * - the latest sequence is behind the cursor (restarted and not yet past it);
+ * - the oldest retained sequence is beyond the cursor + 1 (entries were lost
+ *   unseen: a gap) or before the oldest entry held (older than anything read);
+ * - the entry the server holds at the cursor or at its oldest retained
+ *   sequence has a different id than the one held (restarted and grew past the
+ *   cursor, which sequence numbers alone cannot show).
+ */
+export function logWasReset(model, body) {
+  if (model.cursor === null) return false;
+  if (Number.isSafeInteger(body?.latestSeq) && body.latestSeq < model.cursor)
+    return true;
+  const from = body?.retainedFrom;
+  if (Number.isSafeInteger(from)) {
+    if (from > model.cursor + 1) return true;
+    const oldest = model.entries[0]?.seq;
+    if (oldest !== undefined && from < oldest) return true;
+    if (typeof body.retainedFromId === "string") {
+      const held = model.entries.find((entry) => entry.seq === from);
+      if (typeof held?.id === "string" && held.id !== body.retainedFromId)
+        return true;
+    }
+  }
+  if (typeof body?.afterId === "string") {
+    const held = model.entries.find((entry) => entry.seq === model.cursor);
+    if (typeof held?.id === "string" && held.id !== body.afterId) return true;
+  }
+  return false;
+}
 
 /** Filters (all optional, exact match) newest first. */
 export function filterEntries(entries, params = {}) {

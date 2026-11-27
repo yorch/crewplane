@@ -13,8 +13,26 @@ export const BLOB_TYPES = Object.freeze({
   "image/webp": { kind: "image", extension: "webp" },
   "video/webm": { kind: "video", extension: "webm" },
 });
-/** Most object URLs held at once; older ones are revoked first. */
+/**
+ * Object URLs held at once; older ones are revoked first. The cap follows the
+ * number of cards on screen (so a large viewport does not evict what it is
+ * showing) but never exceeds HARD_MAX_OBJECT_URLS.
+ */
 export const MAX_OBJECT_URLS = 12;
+export const HARD_MAX_OBJECT_URLS = 36;
+/** Bytes held by object URLs at most (the blobs live in memory), videos included. */
+export const MAX_OBJECT_BYTES = 64 * 1024 * 1024;
+/** Videos can be large; only this many are held at once. */
+export const MAX_OBJECT_VIDEOS = 2;
+/** How many object URLs to hold for `visible` cards on screen. */
+export const urlCapFor = (visible) =>
+  Math.min(
+    HARD_MAX_OBJECT_URLS,
+    Math.max(
+      MAX_OBJECT_URLS,
+      (Number.isSafeInteger(visible) ? visible : 0) + 2,
+    ),
+  );
 /** Images up to this size load as they scroll into view; larger ones wait for a click. */
 export const AUTO_LOAD_MAX_BYTES = 2 * 1024 * 1024;
 /** Nothing larger than the store's own per-artifact limit is fetched. */
@@ -107,15 +125,21 @@ export const outcomeTone = (outcome) =>
 /**
  * Object URLs held for artifacts, bounded and revoked deterministically.
  * `create` and `revoke` are URL.createObjectURL / revokeObjectURL in the page.
- * Pinned keys (the open lightbox) are never evicted; the least recently used
- * other key is revoked first and reported through `onEvict` so its card can go
- * back to a Load button.
+ * Bounded three ways: a count (`max`, a number or a function so it can follow
+ * the cards on screen), the bytes held (`maxBytes`) and the videos held
+ * (`maxVideos`). Pinned keys (the open lightbox) are never evicted; among the
+ * others, keys `isVisible` reports are evicted last, then the least recently
+ * used first. Evictions are reported through `onEvict` so a card can go back
+ * to a Load button.
  */
 /**
  * @param {{
- *   create: (blob: unknown) => string,
+ *   create: (blob: any) => string,
  *   revoke: (url: string) => void,
- *   max?: number,
+ *   max?: number | (() => number),
+ *   maxBytes?: number,
+ *   maxVideos?: number,
+ *   isVisible?: (key: string) => boolean,
  *   onEvict?: (key: string) => void,
  * }} options
  */
@@ -123,47 +147,70 @@ export function createObjectUrlCache({
   create,
   revoke,
   max = MAX_OBJECT_URLS,
+  maxBytes = MAX_OBJECT_BYTES,
+  maxVideos = MAX_OBJECT_VIDEOS,
+  isVisible = () => false,
   onEvict = () => {},
 }) {
-  const held = new Map(); // key -> url, oldest first
+  const held = new Map(); // key -> { url, bytes, video }, oldest first
   const pinned = new Set();
+  const limit = () => (typeof max === "function" ? max() : max);
+  let bytes = 0;
+  const videos = () => [...held.values()].filter((item) => item.video).length;
   function drop(key) {
-    const url = held.get(key);
-    if (url === undefined) return false;
+    const item = held.get(key);
+    if (item === undefined) return false;
     held.delete(key);
     pinned.delete(key);
-    revoke(url);
+    bytes -= item.bytes;
+    revoke(item.url);
     return true;
   }
-  function makeRoom() {
-    while (held.size >= max) {
-      const victim = [...held.keys()].find((key) => !pinned.has(key));
-      if (victim === undefined) return false;
-      drop(victim);
-      onEvict(victim);
+  const victim = (only) => {
+    const candidates = [...held.keys()].filter(
+      (key) => !pinned.has(key) && (!only || held.get(key)?.video),
+    );
+    return (
+      candidates.find((key) => !isVisible(key)) ?? candidates[0] ?? undefined
+    );
+  };
+  function makeRoom(size, video) {
+    while (
+      held.size >= limit() ||
+      (held.size > 0 && bytes + size > maxBytes) ||
+      (video && videos() >= maxVideos)
+    ) {
+      const overVideos = video && videos() >= maxVideos;
+      const key = victim(overVideos);
+      if (key === undefined) return false;
+      drop(key);
+      onEvict(key);
     }
     return true;
   }
   return {
-    /** Stores a blob and returns its URL, or null when every slot is pinned. */
+    /** Stores a blob and returns its URL, or null when everything held is pinned. */
     acquire(key, blob) {
-      if (held.has(key)) {
-        const url = held.get(key);
+      const existing = held.get(key);
+      if (existing) {
         held.delete(key);
-        held.set(key, url);
-        return url;
+        held.set(key, existing);
+        return existing.url;
       }
-      if (!makeRoom()) return null;
+      const size = Number.isSafeInteger(blob?.size) ? blob.size : 0;
+      const video = String(blob?.type ?? "").startsWith("video/");
+      if (!makeRoom(size, video)) return null;
       const url = create(blob);
-      held.set(key, url);
+      held.set(key, { url, bytes: size, video });
+      bytes += size;
       return url;
     },
     get(key) {
-      const url = held.get(key);
-      if (url === undefined) return null;
+      const item = held.get(key);
+      if (item === undefined) return null;
       held.delete(key);
-      held.set(key, url);
-      return url;
+      held.set(key, item);
+      return item.url;
     },
     has: (key) => held.has(key),
     release: drop,
@@ -178,7 +225,89 @@ export function createObjectUrlCache({
     get size() {
       return held.size;
     },
+    get bytes() {
+      return bytes;
+    },
     keys: () => [...held.keys()],
+  };
+}
+
+/**
+ * Whether a response may become a blob: its declared length (when present) and
+ * the bytes actually read must both equal the size recorded for the artifact
+ * and stay within the viewing limit. A missing or unreadable Content-Length is
+ * not a length of 0; it is simply not declared, and only the bytes read count.
+ * Returns an error message, or null when acceptable.
+ * @param {{ declared: string | null, size: number, read?: number }} lengths
+ */
+export function lengthProblem({ declared, size, read }) {
+  const tooLarge = "The artifact is larger than the viewing limit.";
+  const mismatch = "The artifact's length does not match what was recorded.";
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_VIEW_BYTES)
+    return tooLarge;
+  if (declared !== null && declared !== undefined && declared !== "") {
+    const length = /^\d{1,12}$/.test(String(declared).trim())
+      ? Number(declared)
+      : Number.NaN;
+    if (!Number.isSafeInteger(length)) return mismatch;
+    if (length > MAX_VIEW_BYTES) return tooLarge;
+    if (length !== size) return mismatch;
+  }
+  if (read !== undefined) {
+    if (read > MAX_VIEW_BYTES) return tooLarge;
+    if (read !== size) return mismatch;
+  }
+  return null;
+}
+
+/**
+ * A queue that runs at most `limit` jobs at once. `reset()` (leaving the view)
+ * forgets the running jobs (they were aborted and may finish whenever) and
+ * settles every queued job without running it: a generation counter keeps a
+ * finishing old job from freeing a slot it no longer holds, which would drive
+ * the running count negative and let more than `limit` jobs run.
+ */
+export function createFetchQueue(limit) {
+  let generation = 0;
+  let running = 0;
+  const waiting = [];
+  return {
+    schedule(job) {
+      return new Promise((resolve) => {
+        const start = () => {
+          const mine = generation;
+          running += 1;
+          let work;
+          try {
+            work = Promise.resolve(job());
+          } catch {
+            work = Promise.resolve();
+          }
+          work
+            .catch(() => {})
+            .finally(() => {
+              if (mine === generation) {
+                running -= 1;
+                waiting.shift()?.start();
+              }
+              resolve();
+            });
+        };
+        if (running < limit) start();
+        else waiting.push({ start, resolve });
+      });
+    },
+    reset() {
+      generation += 1;
+      running = 0;
+      for (const item of waiting.splice(0)) item.resolve();
+    },
+    get running() {
+      return running;
+    },
+    get queued() {
+      return waiting.length;
+    },
   };
 }
 

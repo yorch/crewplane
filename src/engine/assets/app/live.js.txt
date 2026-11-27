@@ -25,7 +25,7 @@ import {
 // reopens it when the tab is shown again.
 const tuning = liveTuning(window.crewplaneLiveTuning);
 const session = createLiveSession({
-  applySnapshot,
+  applySnapshot: (value) => applySnapshot(value, { stream: true }),
   markFresh,
   showDisconnected,
   setMode,

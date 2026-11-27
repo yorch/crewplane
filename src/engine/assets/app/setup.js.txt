@@ -388,5 +388,7 @@ export function renderSetup() {
 }
 
 export function openSetup() {
-  configResource.load();
+  // A view opening always starts a read that begins after it opens; a request
+  // already in flight may have started before (see resource.load).
+  configResource.load({ force: true });
 }

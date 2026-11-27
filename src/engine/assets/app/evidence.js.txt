@@ -4,7 +4,10 @@
 // them. The page fetches the bytes, wraps them in a Blob whose type comes from
 // the artifact's allowlisted metadata (and must agree with the response), and
 // shows them from a blob: URL. Every object URL is held by one bounded cache
-// (at most 12), revoked when evicted, when the view is left and on page hide.
+// (12 URLs, more when more cards are on screen up to a hard maximum; at most
+// 64 MiB and two videos), evicting off-screen cards first, revoked when
+// evicted, when the view is left and on page hide. The declared Content-Length
+// and the bytes read must both equal the recorded size before a blob is made.
 // Large images, videos and anything not previewable never load by themselves.
 // The page never navigates to a blob URL: downloads use an <a download> with a
 // fixed safe filename. All artifact text is rendered with textContent.
@@ -15,16 +18,18 @@ import {
   altText,
   blobKind,
   blobTypeFor,
+  createFetchQueue,
   createObjectUrlCache,
   ID_PATTERNS,
+  lengthProblem,
   listPath,
   loadPolicy,
-  MAX_VIEW_BYTES,
   mergeArtifacts,
   neighbor,
   outcomeTone,
   safeFilename,
   stepAvailability,
+  urlCapFor,
 } from "./evidence-core.js";
 import { clearButton, fillSelect, syncClear } from "./filters.js";
 import { formatBytes, shortHash } from "./format.js";
@@ -50,13 +55,14 @@ const gallery = {
   loadedAt: null,
   generation: 0,
   seeks: 0,
+  notice: null,
 };
-const runs = new Map(); // run id -> task, accumulated so the Run filter keeps its options
+const runs = new Map(); // run id -> task, for the runs in the current result only
 const blobs = new Map(); // artifact id -> { status, message }
 const cards = new Map(); // artifact id -> card element
 const inflight = new Map(); // artifact id -> AbortController
-const waiting = []; // queued loads when MAX_FETCHES are running
-let running = 0;
+const queue = createFetchQueue(MAX_FETCHES);
+const visible = new Set(); // artifact ids whose card is (nearly) on screen
 let listTimer = null;
 let listController = null;
 let observer = null;
@@ -72,6 +78,8 @@ const idOf = (key) => key.replace(/#download$/, "");
 const cache = createObjectUrlCache({
   create: (blob) => URL.createObjectURL(blob),
   revoke: (url) => URL.revokeObjectURL(url),
+  max: () => urlCapFor(visible.size),
+  isVisible: (key) => visible.has(idOf(key)),
   onEvict: (key) => {
     const id = idOf(key);
     const state = blobs.get(id) ?? { status: "idle", message: "" };
@@ -100,19 +108,34 @@ const queryKey = () => JSON.stringify(routeQuery());
 const mediaKind = (artifact) => blobKind(artifact.mime);
 
 // ---- Fetching bytes ---------------------------------------------------------
-function schedule(job) {
-  return new Promise((resolve) => {
-    const start = () => {
-      running += 1;
-      job().finally(() => {
-        running -= 1;
-        resolve();
-        waiting.shift()?.();
-      });
-    };
-    if (running < MAX_FETCHES) start();
-    else waiting.push(start);
-  });
+const schedule = (job) => queue.schedule(job);
+
+/** Reads a body, stopping as soon as it grows past `limit` bytes. */
+async function readBounded(response, limit) {
+  if (!response.body?.getReader) {
+    const bytes = await response.arrayBuffer();
+    return bytes.byteLength > limit ? null : bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes.buffer;
 }
 
 async function fetchBytes(artifact, signal) {
@@ -123,12 +146,21 @@ async function fetchBytes(artifact, signal) {
   if (response.status === 404)
     throw new Error("This artifact is no longer retained.");
   if (!response.ok) throw new Error("The artifact could not be read.");
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_VIEW_BYTES)
-    throw new Error("The artifact is larger than the viewing limit.");
-  const bytes = await response.arrayBuffer();
-  if (bytes.byteLength > MAX_VIEW_BYTES)
-    throw new Error("The artifact is larger than the viewing limit.");
+  // The declared length (when there is one) must equal the recorded size
+  // before a byte is read; the bytes read must equal it afterwards.
+  const declared = response.headers.get("content-length");
+  const before = lengthProblem({ declared, size: artifact.size });
+  if (before) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(before);
+  }
+  const bytes = await readBounded(response, artifact.size);
+  const after = lengthProblem({
+    declared,
+    size: artifact.size,
+    read: bytes === null ? artifact.size + 1 : bytes.byteLength,
+  });
+  if (after) throw new Error(after);
   return { bytes, type: response.headers.get("content-type") };
 }
 
@@ -204,11 +236,12 @@ function loadBlob(artifact, { download = false } = {}) {
 }
 
 // ---- Gallery data -----------------------------------------------------------
-async function loadList({ append = false, limit } = {}) {
+async function loadList({ append = false, limit, notice = null } = {}) {
   clearTimeout(listTimer);
   listController?.abort();
   const controller = new AbortController();
   listController = controller;
+  gallery.notice = notice;
   if (!append) {
     gallery.generation += 1;
     gallery.seeks = 0;
@@ -227,6 +260,9 @@ async function loadList({ append = false, limit } = {}) {
     );
     if (generation !== gallery.generation) return;
     gallery.artifacts = mergeArtifacts(gallery.artifacts, page, { append });
+    // The Run filter offers the runs of what is listed now, not of every
+    // query this page has ever made.
+    runs.clear();
     for (const item of gallery.artifacts)
       if (ID_PATTERNS.run.test(item.run ?? "")) runs.set(item.run, item.task);
     gallery.nextCursor =
@@ -240,6 +276,20 @@ async function loadList({ append = false, limit } = {}) {
     gallery.loadedAt = Date.now();
   } catch (error) {
     if (controller.signal.aborted || generation !== gallery.generation) return;
+    if (append && error?.status === 400 && gallery.nextCursor) {
+      // The cursor named an artifact the store has since pruned. What is on
+      // screen stays (and keeps its place) while the list is read again from
+      // the start, far enough to cover what was already loaded.
+      gallery.nextCursor = null;
+      return loadList({
+        limit: Math.min(
+          SEEK_LIMIT,
+          Math.max(PAGE_LIMIT, gallery.artifacts.length),
+        ),
+        notice:
+          "The list changed while you were browsing (older evidence was removed), so it was loaded again from the start.",
+      });
+    }
     gallery.status = "error";
     gallery.error = { status: error?.status ?? 0, message: error?.message };
   }
@@ -388,7 +438,6 @@ function paintMedia(artifact, host) {
     })();
   const hadFocus = host.contains(document.activeElement);
   host.replaceChildren(content);
-  if (content.dataset?.autoLoad && observer) observer.observe(content);
   if (hadFocus)
     host.parentElement
       ?.querySelector(
@@ -812,20 +861,42 @@ function closeLightbox() {
 }
 
 // ---- View -------------------------------------------------------------------
+// Every card's media box stays observed while it is in the grid: that tells the
+// object-URL cache which previews are on screen (evicted last, and the cap
+// grows with them) and loads an image that scrolls into view.
 function ensureObserver() {
   if (observer || typeof IntersectionObserver === "undefined") return;
   observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        observer.unobserve(entry.target);
-        const artifact = find(entry.target.dataset.autoLoad);
-        if (artifact && stateOf(artifact.id).status === "idle")
+        const id =
+          entry.target.closest("[data-artifact-id]")?.dataset.artifactId;
+        if (!id) continue;
+        if (!entry.isIntersecting) {
+          visible.delete(id);
+          continue;
+        }
+        visible.add(id);
+        const artifact = find(id);
+        if (
+          artifact &&
+          loadPolicy(artifact) === "auto" &&
+          stateOf(id).status === "idle"
+        )
           loadBlob(artifact);
       }
     },
     { rootMargin: "200px" },
   );
+}
+const mediaOf = (card) => card.querySelector(".evidence-media");
+/** Stops observing cards that left the grid (their nodes may be gone). */
+function forgetCards(keep) {
+  for (const [id, card] of cards) {
+    if (keep?.has(id)) continue;
+    observer?.unobserve(mediaOf(card));
+    visible.delete(id);
+  }
 }
 
 function fillRunFilter() {
@@ -846,12 +917,18 @@ function renderGrid() {
     gallery.artifacts.map((item) => item.id),
     gallery.nextCursor,
     gallery.error?.message,
+    gallery.notice,
     params.task,
     params.run,
   ]);
   if (key === lastGridKey && host.firstElementChild) return;
   lastGridKey = key;
   const nodes = [];
+  if (gallery.notice) {
+    const bar = el("div", gallery.notice, "banner banner-inline");
+    bar.setAttribute("role", "status");
+    nodes.push(bar);
+  }
   if (gallery.status === "error" && gallery.artifacts.length)
     nodes.push(staleNote(gallery.error, gallery.loadedAt, () => loadList()));
   if (!gallery.artifacts.length) {
@@ -874,6 +951,7 @@ function renderGrid() {
       nodes.push(empty);
     }
     host.replaceChildren(...nodes);
+    forgetCards();
     cards.clear();
     return;
   }
@@ -884,8 +962,11 @@ function renderGrid() {
     next.set(artifact.id, card);
     grid.append(card);
   }
+  forgetCards(next);
+  const added = [...next].filter(([id]) => !cards.has(id));
   cards.clear();
   for (const [id, card] of next) cards.set(id, card);
+  for (const [, card] of added) observer?.observe(mediaOf(card));
   nodes.push(grid);
   if (gallery.nextCursor) {
     const more = el("button", "Load more", "more-button");
@@ -942,11 +1023,11 @@ export function leaveEvidence() {
   cache.clear();
   for (const controller of inflight.values()) controller.abort();
   inflight.clear();
-  waiting.length = 0;
-  running = 0;
+  queue.reset();
   listController?.abort();
   clearTimeout(listTimer);
   observer?.disconnect();
+  visible.clear();
   for (const [id, state] of blobs)
     blobs.set(id, {
       status: "idle",

@@ -175,6 +175,18 @@ it("builds lane rows with effective caps, env names and binary status", () => {
   });
 });
 
+it("formats the per-run cost cap like every other dollar amount", () => {
+  const cost = (value: number) =>
+    laneRows({
+      lanes: [
+        lane({ budgets: { ...lane().budgets, maxCostUsdPerRun: value } }),
+      ],
+    })[0]?.caps.find(([label]: string[]) => label === "Cost per run")?.[1];
+  expect(cost(5)).toBe("$5.00");
+  expect(cost(0.5)).toBe("$0.50");
+  expect(cost(0.004)).toBe("$0.0040");
+});
+
 it("shows unsafe binaries with the lane's reason and unvalidated lanes as not inspected", () => {
   const rows = laneRows({
     lanes: [
@@ -267,7 +279,14 @@ it("shortens the digest for reading while keeping the full one for copying", () 
   expect(digestFacts({ digest: null }).match).toMatch(
     /cannot be fingerprinted/,
   );
+  expect(digestFacts({ digest: null, state: "invalid" }).match).toMatch(
+    /cannot be fingerprinted/,
+  );
   expect(digestFacts({ digest: "<x>" }).short).toBeNull();
+  // Nothing installed is not a failure to fingerprint.
+  expect(digestFacts({ digest: null, state: "not-configured" }).match).toBe(
+    "No configuration is installed, so there is no digest to compare.",
+  );
 });
 
 it("surfaces the stale-roles hint and truncation markers", () => {

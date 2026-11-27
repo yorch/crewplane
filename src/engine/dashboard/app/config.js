@@ -89,8 +89,8 @@ export const PARAM_PATTERNS = {
     lane: /^[A-Za-z0-9._:-]{1,64}$/,
   },
 };
-// Evidence opens artifacts in a modal; its selection never scrolls or focuses a pane.
 PARAM_PATTERNS.usage = { lane: /^[A-Za-z0-9._:-]{1,64}$/ };
+// Evidence opens artifacts in a modal; its selection never scrolls or focuses a pane.
 export const MODAL_VIEWS = ["evidence"];
 export const SELECTION_PARAM = {
   tasks: "task",

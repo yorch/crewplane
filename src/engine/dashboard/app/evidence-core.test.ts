@@ -6,17 +6,23 @@ import {
   baseType,
   blobKind,
   blobTypeFor,
+  createFetchQueue,
   createObjectUrlCache,
+  HARD_MAX_OBJECT_URLS,
   ID_PATTERNS,
+  lengthProblem,
   listPath,
   loadPolicy,
+  MAX_OBJECT_BYTES,
   MAX_OBJECT_URLS,
+  MAX_OBJECT_VIDEOS,
   MAX_VIEW_BYTES,
   mergeArtifacts,
   neighbor,
   outcomeTone,
   safeFilename,
   stepAvailability,
+  urlCapFor,
 } from "./evidence-core.js";
 
 const id = (n: number) => `ev_${n.toString(16).padStart(32, "0")}`;
@@ -261,4 +267,146 @@ it("steps through the list for the lightbox arrows", () => {
     previous: false,
     next: false,
   });
+});
+
+it("holds at most two videos and a byte budget, whatever the count", () => {
+  let next = 0;
+  const revoked: string[] = [];
+  const cache = createObjectUrlCache({
+    create: () => `blob:v/${next++}`,
+    revoke: (url: string) => revoked.push(url),
+    max: 12,
+  });
+  expect(MAX_OBJECT_VIDEOS).toBe(2);
+  const video = { size: 16 * 1024 * 1024, type: "video/webm" };
+  cache.acquire("v1", video);
+  cache.acquire("i1", { size: 1000, type: "image/png" });
+  cache.acquire("v2", video);
+  cache.acquire("v3", video);
+  // The oldest video went, an image stayed.
+  expect(cache.keys().sort()).toEqual(["i1", "v2", "v3"]);
+  expect(revoked).toEqual(["blob:v/0"]);
+  // Twelve videos' worth of bytes can never be held: the budget evicts first.
+  const images = createObjectUrlCache({
+    create: () => `blob:b/${next++}`,
+    revoke: () => {},
+    max: 36,
+  });
+  for (let i = 0; i < 12; i++)
+    images.acquire(`k${i}`, { size: 16 * 1024 * 1024, type: "image/png" });
+  expect(images.bytes).toBeLessThanOrEqual(MAX_OBJECT_BYTES);
+  expect(images.size).toBe(MAX_OBJECT_BYTES / (16 * 1024 * 1024));
+  images.clear();
+  expect(images.bytes).toBe(0);
+});
+
+it("evicts what is off screen before what is on screen, within a cap that follows the screen", () => {
+  let next = 0;
+  const visible = new Set(["a", "b"]);
+  const evicted: string[] = [];
+  const cache = createObjectUrlCache({
+    create: () => `blob:s/${next++}`,
+    revoke: () => {},
+    max: 3,
+    isVisible: (key: string) => visible.has(key),
+    onEvict: (key: string) => evicted.push(key),
+  });
+  for (const key of ["a", "b", "c"]) cache.acquire(key, {});
+  cache.acquire("d", {});
+  // "a" is the least recently used but on screen; "c" is not.
+  expect(evicted).toEqual(["c"]);
+  expect(urlCapFor(0)).toBe(12);
+  expect(urlCapFor(20)).toBe(22);
+  expect(urlCapFor(500)).toBe(HARD_MAX_OBJECT_URLS);
+  let cap = 2;
+  const grow = createObjectUrlCache({
+    create: () => `blob:g/${next++}`,
+    revoke: () => {},
+    max: () => cap,
+  });
+  grow.acquire("x", {});
+  grow.acquire("y", {});
+  cap = 4;
+  grow.acquire("z", {});
+  expect(grow.size).toBe(3);
+});
+
+it("compares declared and read lengths with the recorded size before a blob is made", () => {
+  expect(
+    lengthProblem({ declared: "1000", size: 1000, read: 1000 }),
+  ).toBeNull();
+  // Not declared is not zero: only the bytes read count.
+  expect(lengthProblem({ declared: null, size: 1000, read: 1000 })).toBeNull();
+  expect(lengthProblem({ declared: null, size: 1000, read: 999 })).toMatch(
+    /does not match/,
+  );
+  expect(lengthProblem({ declared: "0", size: 1000 })).toMatch(
+    /does not match/,
+  );
+  expect(lengthProblem({ declared: "abc", size: 1000 })).toMatch(
+    /does not match/,
+  );
+  expect(lengthProblem({ declared: "999", size: 1000 })).toMatch(
+    /does not match/,
+  );
+  expect(lengthProblem({ declared: "1000", size: 1000, read: 1001 })).toMatch(
+    /does not match/,
+  );
+  expect(lengthProblem({ declared: "99999999999", size: 1000 })).toMatch(
+    /larger/,
+  );
+  expect(lengthProblem({ declared: null, size: 17 * 1024 * 1024 })).toMatch(
+    /larger/,
+  );
+  expect(lengthProblem({ declared: null, size: Number.NaN })).toMatch(/larger/);
+});
+
+it("never runs more jobs than its limit, even when aborted jobs finish after a reset", async () => {
+  const queue = createFetchQueue(2);
+  const finish = new Map<string, () => void>();
+  let active = 0;
+  let peak = 0;
+  const job = (name: string) => () =>
+    new Promise<void>((done) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      finish.set(name, () => {
+        active -= 1;
+        done();
+      });
+    });
+  const settled: string[] = [];
+  const run = (name: string) =>
+    queue.schedule(job(name)).then(() => settled.push(name));
+  const old = ["old1", "old2", "old3", "old4"].map(run);
+  expect(queue.running).toBe(2);
+  expect(queue.queued).toBe(2);
+  // Leaving the view: queued jobs settle without running; running ones are aborted.
+  queue.reset();
+  await Promise.all(old.slice(2));
+  expect(settled).toEqual(["old3", "old4"]);
+  expect(queue.running).toBe(0);
+  // A new view schedules while the aborted jobs are still winding down.
+  const fresh = ["new1", "new2", "new3"].map(run);
+  expect(queue.running).toBe(2);
+  finish.get("old1")?.();
+  finish.get("old2")?.();
+  await Promise.all(old.slice(0, 2));
+  // The old ones did not free slots they no longer held.
+  expect(queue.running).toBe(2);
+  expect(queue.queued).toBe(1);
+  expect(finish.has("new3")).toBe(false);
+  finish.get("new1")?.();
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(finish.has("new3")).toBe(true);
+  expect(queue.running).toBe(2);
+  finish.get("new2")?.();
+  finish.get("new3")?.();
+  await Promise.all(fresh);
+  expect(queue.running).toBe(0);
+  expect(queue.queued).toBe(0);
+  // At most the limit were ever live among jobs of one view: old and new
+  // overlapped only while the old ones were already aborted.
+  expect(peak).toBeLessThanOrEqual(4);
 });

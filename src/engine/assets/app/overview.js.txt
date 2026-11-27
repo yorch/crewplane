@@ -159,7 +159,7 @@ function attentionItems() {
       3,
       "warning",
       "Control log",
-      `Refused or out-of-date commands (${recent.length})`,
+      `Commands that were not applied (${recent.length})`,
       `Latest: ${recent[0].action ?? "command"} · ${recent[0].reason ?? recent[0].outcome} in the last 24 hours`,
       hrefFor("audit"),
     );

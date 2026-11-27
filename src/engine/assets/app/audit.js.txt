@@ -34,7 +34,19 @@ import { timeEl } from "./time.js";
 import { errorPanel, loadingNote, staleNote } from "./view-parts.js";
 
 const retry = () => logResource.load({ force: true });
-const view = { follow: true, frozenAt: null, shown: PAGE, filterKey: "" };
+const view = {
+  follow: true,
+  frozenAt: null,
+  shown: PAGE,
+  filterKey: "",
+  listKey: null,
+  detailKey: null,
+};
+// Text is written only when it changed: re-setting identical text replaces the
+// node, which a live region announces again on every poll.
+const setText = (node, text) => {
+  if (node.textContent !== text) node.textContent = text;
+};
 
 export const isFollowing = () => view.follow;
 export function setFollow(on) {
@@ -127,6 +139,17 @@ function detailPane(model) {
   const seq = store.route.params.seq;
   split.classList.toggle("has-detail", Boolean(seq));
   pane.hidden = !seq;
+  const shown = seq
+    ? model?.entries.find((candidate) => String(candidate.seq) === seq)
+    : null;
+  const key = JSON.stringify([
+    seq,
+    Boolean(model),
+    shown ?? null,
+    store.route.params,
+  ]);
+  if (key === view.detailKey) return;
+  view.detailKey = key;
   if (!seq) {
     pane.replaceChildren();
     return;
@@ -212,13 +235,17 @@ export function renderAudit() {
   syncClear("audit");
   $("audit-follow").checked = view.follow;
   if (!model) {
-    $("audit-count").textContent = "";
-    $("audit-note").textContent = "";
-    host.replaceChildren(
-      status === "error"
-        ? errorPanel("the control log", error, retry)
-        : loadingNote("Reading the control log…"),
-    );
+    setText($("audit-count"), "");
+    setText($("audit-note"), "");
+    const waitingKey = JSON.stringify(["none", status, error?.message ?? null]);
+    if (waitingKey !== view.listKey) {
+      view.listKey = waitingKey;
+      host.replaceChildren(
+        status === "error"
+          ? errorPanel("the control log", error, retry)
+          : loadingNote("Reading the control log…"),
+      );
+    }
     detailPane(null);
     return;
   }
@@ -246,10 +273,26 @@ export function renderAudit() {
   const newer = model.entries.length - visibleEntries.length;
   const filtered = filterEntries(visibleEntries, params);
   const page = filtered.slice(0, view.shown);
-  $("audit-count").textContent =
-    `${filtered.length} of ${visibleEntries.length} retained commands`;
-  const note = retentionNote(model);
-  $("audit-note").textContent = note ?? "";
+  setText(
+    $("audit-count"),
+    `${filtered.length} of ${visibleEntries.length} retained commands`,
+  );
+  setText($("audit-note"), retentionNote(model) ?? "");
+  // The table is rebuilt only when something it shows changed: a poll that
+  // brought nothing new must not detach the row under the pointer or focus.
+  const listKey = JSON.stringify([
+    visibleEntries.map((entry) => [entry.seq, entry.id, entry.outcome]),
+    newer,
+    view.shown,
+    params,
+    model.available,
+    status === "error" ? [error?.message, loadedAt] : null,
+  ]);
+  if (listKey === view.listKey && host.firstElementChild) {
+    detailPane(model);
+    return;
+  }
+  view.listKey = listKey;
   const nodes = [];
   if (status === "error") nodes.push(staleNote(error, loadedAt, retry));
   if (newer > 0) {
@@ -329,5 +372,5 @@ export function renderAudit() {
 }
 
 export function openAudit() {
-  logResource.load();
+  logResource.load({ force: true });
 }

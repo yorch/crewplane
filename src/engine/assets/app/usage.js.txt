@@ -494,5 +494,5 @@ export function renderUsage() {
 }
 
 export function openUsage() {
-  usageResource.load();
+  usageResource.load({ force: true });
 }

@@ -115,6 +115,66 @@ const snapshotBody = async () =>
     })
   ).text();
 
+it("ignores a pushed snapshot older than the one already shown", async () => {
+  // A poll answered before the stream's first event; the stream then carries
+  // an earlier read of the board. "Checked" must not go back in time.
+  const real = JSON.parse(await snapshotBody()) as Record<string, unknown>;
+  const old = new Date(Date.parse(String(real.updatedAt)) - 3600_000);
+  const stale = JSON.stringify({ ...real, updatedAt: old.toISOString() });
+  const page = await browser.newPage({
+    viewport: { width: 1200, height: 900 },
+  });
+  let served = 0;
+  await page.route("**/api/events", async (route) => {
+    served += 1;
+    if (served > 1) return route.abort();
+    await new Promise((done) => setTimeout(done, 1500));
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: `retry: 60000\n\nid: aaaaaaaa-1\nevent: snapshot\ndata: ${stale}\n\n`,
+    });
+  });
+  // Every text "Checked" ever shows is recorded.
+  await page.addInitScript(() => {
+    const seen: string[] = [];
+    (window as unknown as { __seen: string[] }).__seen = seen;
+    addEventListener("DOMContentLoaded", () => {
+      const node = document.getElementById("connection-time");
+      if (node)
+        new MutationObserver(() => seen.push(node.textContent ?? "")).observe(
+          node,
+          { childList: true, characterData: true, subtree: true },
+        );
+    });
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${base}#token=${token}`);
+  await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  // The stream has delivered its snapshot once the page asks again.
+  await until(
+    async () => served >= 2,
+    "the stream to be delivered and reopened",
+  );
+  const oldTime = await page.evaluate(
+    (iso) =>
+      (
+        window as unknown as {
+          crewplane: { formatTime: (value: string) => string };
+        }
+      ).crewplane.formatTime(iso),
+    old.toISOString(),
+  );
+  const seen = await page.evaluate(
+    () => (window as unknown as { __seen: string[] }).__seen,
+  );
+  expect(seen.length).toBeGreaterThan(0);
+  for (const text of seen) expect(text).not.toContain(oldTime);
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
 /**
  * The compiled executable serving a project, as `crewplane dashboard` does.
  * (Reading tens of thousands of files at once exhausts descriptors under

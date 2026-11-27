@@ -194,6 +194,96 @@ it("builds the follow path and detects a reset log", () => {
   expect(logWasReset(model, {})).toBe(false);
 });
 
+const uid = (n: number, epoch = "a") =>
+  `${epoch.repeat(8)}-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
+const held = (seqs: number[], epoch = "a") =>
+  mergeLog(
+    emptyLog(),
+    {
+      available: true,
+      entries: seqs.map((n) => entry(n, { id: uid(n, epoch) })),
+      latestSeq: seqs.at(-1),
+      retainedFrom: seqs[0],
+    },
+    { replace: true },
+  );
+
+it("keeps exactly what the supervisor still retains, so counts and details agree", () => {
+  expect(KEEP).toBe(200);
+  const first = held(Array.from({ length: 200 }, (_, i) => i + 1));
+  expect(first.entries).toHaveLength(200);
+  // Ten newer commands arrive; the supervisor now retains 11..210.
+  const next = mergeLog(
+    first,
+    {
+      available: true,
+      entries: Array.from({ length: 10 }, (_, i) => entry(201 + i)),
+      latestSeq: 210,
+      retainedFrom: 11,
+      nextAfter: 210,
+    },
+    { replace: false },
+  );
+  expect(next.entries).toHaveLength(200);
+  expect(next.entries[0]?.seq).toBe(11);
+  expect(next.retainedFrom).toBe(11);
+  // Entries the server dropped for another reason than the cap go too.
+  const pruned = mergeLog(
+    first,
+    { available: true, entries: [], latestSeq: 200, retainedFrom: 150 },
+    { replace: false },
+  );
+  expect(pruned.entries[0]?.seq).toBe(150);
+});
+
+it("reads again from the start when the log is no longer the one that was read", () => {
+  const model = held([1, 2, 3, 4, 5]);
+  // Behaving log: newer entries, same ids at the cursor and at the oldest.
+  expect(
+    logWasReset(model, {
+      latestSeq: 6,
+      retainedFrom: 1,
+      retainedFromId: uid(1),
+      afterId: uid(5),
+    }),
+  ).toBe(false);
+  // Pruned from the front within reach of the cursor is not a reset.
+  expect(
+    logWasReset(held([3, 4, 5]), {
+      latestSeq: 6,
+      retainedFrom: 4,
+      retainedFromId: uid(4),
+      afterId: uid(5),
+    }),
+  ).toBe(false);
+  // A gap: what lay between the cursor and the oldest retained was lost unseen.
+  expect(logWasReset(model, { latestSeq: 30, retainedFrom: 20 })).toBe(true);
+  // Older entries than anything held means another log.
+  expect(
+    logWasReset(held([10, 11, 12]), { latestSeq: 12, retainedFrom: 3 }),
+  ).toBe(true);
+  // Reset and grown past the cursor: sequences look plausible, ids do not.
+  expect(
+    logWasReset(model, {
+      latestSeq: 8,
+      retainedFrom: 1,
+      retainedFromId: uid(1, "b"),
+      afterId: uid(5, "b"),
+    }),
+  ).toBe(true);
+  expect(
+    logWasReset(model, { latestSeq: 8, retainedFrom: 1, afterId: uid(5, "b") }),
+  ).toBe(true);
+  // Entries without ids cannot disagree.
+  expect(
+    logWasReset(model, {
+      latestSeq: 6,
+      retainedFrom: 1,
+      afterId: null,
+    }),
+  ).toBe(false);
+});
+
 it("filters by outcome, issuer and lane, newest first", () => {
   const all = [
     entry(1),

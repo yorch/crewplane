@@ -135,10 +135,35 @@ async function open(
   return { page, errors, context };
 }
 const close = (opened: Opened) => opened.context.close();
-const go = (page: Page, hash: string) =>
-  page.evaluate((value) => {
+const KNOWN_VIEWS = [
+  "overview",
+  "tasks",
+  "agents",
+  "messages",
+  "runs",
+  "system",
+  "setup",
+  "usage",
+  "evidence",
+  "audit",
+];
+/**
+ * Writes the hash and waits until the app has applied that route. A write that
+ * returns before the route was applied lets the next write collapse into it
+ * (two quick hash changes only ever show the last one), so the second view
+ * would never open.
+ */
+const go = async (page: Page, hash: string) => {
+  const name = /^#\/([a-z]+)/.exec(hash)?.[1] ?? "";
+  const view = KNOWN_VIEWS.includes(name) ? name : "overview";
+  await page.evaluate((value) => {
     window.location.hash = value;
   }, hash);
+  await page.waitForFunction(
+    (expected) => window.crewplane.route.view === expected,
+    view,
+  );
+};
 const noOverflow = (page: Page) =>
   page.evaluate(
     () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -180,13 +205,17 @@ async function stubJson(
       });
       return;
     }
-    const response = await route.fetch();
-    const real = (await response.json()) as Record<string, unknown>;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(make(real)),
-    });
+    try {
+      const response = await route.fetch();
+      const real = (await response.json()) as Record<string, unknown>;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(make(real)),
+      });
+    } catch {
+      // The page was closed while this read was in flight.
+    }
   });
 }
 const waitText = (page: Page, selector: string, text: string | RegExp) =>
@@ -195,6 +224,18 @@ const waitText = (page: Page, selector: string, text: string | RegExp) =>
     .filter({ hasText: text })
     .first()
     .waitFor({ timeout: 15000 });
+async function until(
+  check: () => boolean | Promise<boolean>,
+  label: string,
+  limit = 15000,
+) {
+  const deadline = Date.now() + limit;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
 const names = (page: Page, selector: string) =>
   page
     .locator(selector)
@@ -495,6 +536,30 @@ it("keeps the last answer and says so when a later read fails", async () => {
   expect(await page.locator("#setup-body .lanes-table").count()).toBe(1);
   await close(opened);
 });
+
+it("starts a fresh read every time a view opens, even while an earlier read is still in flight", async () => {
+  const opened = await open("#/overview");
+  const { page } = opened;
+  await page.waitForFunction(() => document.querySelector("#attention"));
+  // Let the background read that follows the first snapshot finish.
+  await page.waitForTimeout(500);
+  let reads = 0;
+  await page.route("**/api/config", async (route) => {
+    reads += 1;
+    await new Promise((done) => setTimeout(done, 700));
+    await route.continue();
+  });
+  await go(page, "#/setup");
+  await until(() => reads === 1, "the first read starts when Setup opens");
+  // Leave and reopen while that read is still in flight: it started before
+  // the second opening, so the reopening needs a read of its own.
+  await go(page, "#/tasks");
+  await go(page, "#/setup");
+  await until(() => reads === 2, "a second read after the reopening");
+  await waitText(page, "#setup-body h2", "Installed configuration");
+  expect(reads).toBe(2);
+  await close(opened);
+}, 30000);
 
 it("reads /api/config when the view opens and when the snapshot changes, not on every poll", async () => {
   const opened = await open("#/setup");
@@ -1040,12 +1105,14 @@ function galleryStub(
     });
   };
 }
+/** The bytes the stubbed gallery serves; recorded sizes must equal their length. */
+const STUB_PNG = makePng(40, 25, [20, 120, 220]);
 const fakeId = (n: number) => `ev_${n.toString(16).padStart(32, "0")}`;
 const fakeArtifact = (n: number, extra: Record<string, unknown> = {}) => ({
   id: fakeId(n),
   kind: "image",
   mime: "image/png",
-  size: 4000,
+  size: STUB_PNG.length,
   createdAt: "2026-11-01T10:00:00.000Z",
   task: "CP-101",
   run: `qa_${"b".repeat(32)}`,
@@ -1067,14 +1134,17 @@ const fakeArtifact = (n: number, extra: Record<string, unknown> = {}) => ({
 it("never holds more than 12 object URLs: later previews release earlier ones to a Load button", async () => {
   const items = Array.from({ length: 20 }, (_, i) => fakeArtifact(i + 1));
   const png = makePng(40, 25, [20, 120, 220]);
+  // A phone-sized screen shows a couple of cards, so the cap stays at 12.
   const opened = await open("#/evidence", {
+    width: 390,
+    height: 844,
     prepare: galleryStub(items, () => ({ body: png, type: "image/png" })),
   });
   const { page } = opened;
   await page.locator(".evidence-card").first().waitFor();
   // Scroll the whole gallery so every card becomes visible once.
-  for (let y = 0; y < 6000; y += 300) {
-    await page.mouse.wheel(0, 300);
+  for (let y = 0; y < 20000; y += 400) {
+    await page.mouse.wheel(0, 400);
     await page.waitForTimeout(40);
   }
   await page.waitForTimeout(800);
@@ -1099,6 +1169,227 @@ it("never holds more than 12 object URLs: later previews release earlier ones to
   await close(opened);
 }, 60000);
 
+it("keeps every preview a large screen shows instead of evicting what is on screen", async () => {
+  const items = Array.from({ length: 20 }, (_, i) => fakeArtifact(i + 1));
+  const opened = await open("#/evidence", {
+    width: 1600,
+    height: 6000,
+    prepare: galleryStub(items, () => ({ body: STUB_PNG, type: "image/png" })),
+  });
+  const { page } = opened;
+  await page.waitForFunction(
+    () => document.querySelectorAll(".evidence-card img").length === 20,
+  );
+  await page.waitForTimeout(500);
+  const stats = await urlStats(page);
+  expect(stats.created).toBe(20);
+  expect(stats.revoked).toBe(0);
+  expect(stats.held).toHaveLength(20);
+  expect(stats.max).toBeLessThanOrEqual(36);
+  expect(await page.getByRole("button", { name: "Load preview" }).count()).toBe(
+    0,
+  );
+  expect(opened.errors).toEqual([]);
+  await close(opened);
+}, 60000);
+
+it("does not make a blob when the length it was sent differs from the recorded size", async () => {
+  const items = [
+    fakeArtifact(1, { size: STUB_PNG.length + 10 }),
+    fakeArtifact(2),
+  ];
+  const opened = await open("#/evidence", {
+    prepare: galleryStub(items, () => ({ body: STUB_PNG, type: "image/png" })),
+  });
+  const { page } = opened;
+  const card = (n: number) =>
+    page.locator(`.evidence-card[data-artifact-id="${fakeId(n)}"]`);
+  await waitText(
+    page,
+    `.evidence-card[data-artifact-id="${fakeId(1)}"]`,
+    "does not match what was recorded",
+  );
+  await card(2).locator("img").waitFor();
+  expect(await card(1).locator("img").count()).toBe(0);
+  // Only the honest artifact made a blob.
+  expect((await urlStats(page)).created).toBe(1);
+  await close(opened);
+});
+
+it("reloads from the start, with a notice and without rebuilding the cards, when Load more names a pruned cursor", async () => {
+  const all = Array.from({ length: 6 }, (_, i) => fakeArtifact(i + 1));
+  let pruned = false;
+  let lists = 0;
+  const opened = await open("#/evidence", {
+    prepare: async (page) => {
+      await page.route("**/api/evidence/artifacts?*", async (route) => {
+        const url = new URL(route.request().url());
+        const cursor = url.searchParams.get("cursor");
+        lists += 1;
+        if (cursor && !pruned) {
+          pruned = true;
+          await route.fulfill({
+            status: 400,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "Unknown cursor." }),
+          });
+          return;
+        }
+        // After the prune the store has lost its oldest item.
+        const base = pruned ? all.slice(1) : all;
+        const items = cursor ? base.slice(3) : base.slice(0, 3);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            version: 1,
+            artifacts: items,
+            nextCursor: cursor || base.length <= 3 ? null : base[2]?.id,
+            retentionLimited: false,
+          }),
+        });
+      });
+      await page.route("**/api/evidence/artifacts/ev_*", (route) =>
+        route.fulfill({
+          status: 200,
+          headers: { "content-type": "image/png" },
+          body: STUB_PNG,
+        }),
+      );
+    },
+  });
+  const { page } = opened;
+  await page.waitForFunction(
+    () => document.querySelectorAll(".evidence-card").length === 3,
+  );
+  // Mark the second card: it must survive the recovery as the same element.
+  await page.evaluate((id) => {
+    const card = document.querySelector(`[data-artifact-id="${id}"]`);
+    (card as unknown as { __kept: boolean }).__kept = true;
+  }, fakeId(2));
+  await page.getByRole("button", { name: "Load more" }).click();
+  await waitText(
+    page,
+    "#evidence-list .banner",
+    "The list changed while you were browsing",
+  );
+  // Read again from the start (the list had 3 loaded): 5 items remain, 3 shown.
+  await page.waitForFunction(
+    () => document.querySelectorAll(".evidence-card").length === 3,
+  );
+  expect(
+    await page.evaluate(
+      (id) =>
+        (
+          document.querySelector(`[data-artifact-id="${id}"]`) as unknown as {
+            __kept?: boolean;
+          }
+        )?.__kept === true,
+      fakeId(2),
+    ),
+  ).toBe(true);
+  // Load more works again from the fresh cursor.
+  await page.getByRole("button", { name: "Load more" }).click();
+  await page.waitForFunction(
+    () => document.querySelectorAll(".evidence-card").length === 5,
+  );
+  expect(await page.locator("#evidence-list .banner").count()).toBe(0);
+  expect(lists).toBe(4);
+  expect(opened.errors).toEqual([]);
+  await close(opened);
+});
+
+it("offers only the runs of the current result in the Run filter", async () => {
+  const runA = `qa_${"a".repeat(32)}`;
+  const runB = `qa_${"b".repeat(32)}`;
+  const runC = `qa_${"c".repeat(32)}`;
+  const items = [
+    fakeArtifact(1, { task: "CP-101", run: runA }),
+    fakeArtifact(2, { task: "CP-101", run: runB }),
+    fakeArtifact(3, { task: "CP-102", run: runC }),
+  ];
+  const opened = await open("#/evidence?task=CP-101", {
+    prepare: async (page) => {
+      // Which elements an IntersectionObserver is watching right now.
+      await page.addInitScript(() => {
+        const watching = new Set<Element>();
+        (window as unknown as { __watching: Set<Element> }).__watching =
+          watching;
+        const Real = window.IntersectionObserver;
+        window.IntersectionObserver = class extends Real {
+          observe(target: Element) {
+            watching.add(target);
+            super.observe(target);
+          }
+          unobserve(target: Element) {
+            watching.delete(target);
+            super.unobserve(target);
+          }
+          disconnect() {
+            watching.clear();
+            super.disconnect();
+          }
+        };
+      });
+      await page.route("**/api/evidence/artifacts?*", async (route) => {
+        const task = new URL(route.request().url()).searchParams.get("task");
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            version: 1,
+            artifacts: items.filter((item) => !task || item.task === task),
+            nextCursor: null,
+            retentionLimited: false,
+          }),
+        });
+      });
+      await page.route("**/api/evidence/artifacts/ev_*", (route) =>
+        route.fulfill({
+          status: 200,
+          headers: { "content-type": "image/png" },
+          body: STUB_PNG,
+        }),
+      );
+    },
+  });
+  const { page } = opened;
+  const options = () =>
+    page
+      .locator("#evidence-run option")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => (node as HTMLOptionElement).value),
+      );
+  await until(
+    async () => (await options()).filter(Boolean).length === 2,
+    "the two runs of CP-101",
+  );
+  await go(page, "#/evidence?task=CP-102");
+  await until(
+    async () => (await options()).filter(Boolean).join() === runC,
+    "only the run of CP-102",
+  );
+  expect(await options()).not.toContain(runA);
+  // Cards that left the grid are no longer observed (nothing detached is held).
+  await page.waitForFunction(
+    () => document.querySelectorAll(".evidence-card").length === 1,
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        [
+          ...(window as unknown as { __watching: Set<Element> }).__watching,
+        ].filter((node) => !node.isConnected).length,
+    ),
+  ).toBe(0);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __watching: Set<Element> }).__watching.size,
+    ),
+  ).toBe(1);
+  await close(opened);
+}, 30000);
+
 it("does not fetch large images, videos or unsupported types until asked, and treats unsupported types as download-only", async () => {
   const fetched: string[] = [];
   const png = makePng(40, 25, [20, 120, 220]);
@@ -1114,9 +1405,8 @@ it("does not fetch large images, videos or unsupported types until asked, and tr
     fakeArtifact(4, {
       kind: null,
       mime: "application/octet-stream",
-      size: 100,
     }),
-    fakeArtifact(5, { mime: "image/svg+xml", size: 100 }),
+    fakeArtifact(5, { mime: "image/svg+xml" }),
     fakeArtifact(6, { size: 20 * 1024 * 1024 }),
   ];
   const opened = await open("#/evidence", {
@@ -1124,7 +1414,14 @@ it("does not fetch large images, videos or unsupported types until asked, and tr
       items,
       (id) =>
         id === fakeId(2)
-          ? { body: png, type: "image/png" }
+          ? {
+              // A large image is as long as its record says.
+              body: Buffer.concat([
+                png,
+                Buffer.alloc(5 * 1024 * 1024 - png.length),
+              ]),
+              type: "image/png",
+            }
           : { body: png, type: "text/html" },
       fetched,
     ),
@@ -1312,6 +1609,37 @@ it("handles an empty store, a failing list and paging with Load more", async () 
   await close(opened);
 });
 
+it("asks again for an Evidence (N) count only after a cooldown when the endpoint fails", async () => {
+  let counts = 0;
+  const opened = await open("#/tasks?task=CP-101", {
+    prepare: (page) =>
+      page.route("**/api/evidence/artifacts?*", async (route) => {
+        counts += 1;
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"error":"Down."}',
+        });
+      }),
+  });
+  const { page } = opened;
+  await page.locator("#task-detail a.evidence-link").waitFor();
+  // Open, close and reopen the same pane many times: every render builds the link again.
+  for (let round = 0; round < 6; round++) {
+    await go(page, "#/tasks?task=CP-102");
+    await page.locator("#task-detail a.evidence-link").waitFor();
+    await go(page, "#/tasks?task=CP-101");
+    await page.locator("#task-detail a.evidence-link").waitFor();
+  }
+  await page.waitForTimeout(500);
+  // One failed read per task, not one per render.
+  expect(counts).toBeLessThanOrEqual(2);
+  expect(await page.locator("#task-detail a.evidence-link").textContent()).toBe(
+    "Evidence",
+  );
+  await close(opened);
+}, 30000);
+
 it("adds a compact Evidence (N) link to task and run details", async () => {
   const opened = await open("#/tasks?task=CP-101");
   const { page } = opened;
@@ -1344,7 +1672,7 @@ it("adds a compact Evidence (N) link to task and run details", async () => {
   await page.waitForFunction(
     () =>
       document.querySelector("#run-summary a.evidence-link")?.textContent ===
-      "Evidence (3)",
+      "Task evidence (3)",
   );
   expect(await runLink.getAttribute("href")).toBe("#/evidence?task=CP-101");
   await close(opened);
@@ -1419,6 +1747,52 @@ it("lists commands newest first with outcome badges, plain-language reasons and 
   );
   expect(opened.errors).toEqual([]);
   await shot(page, "audit-desktop");
+  await close(opened);
+});
+
+it("does not rebuild the table or re-announce the count when a read brings nothing new", async () => {
+  const opened = await open("#/audit");
+  const { page } = opened;
+  await page.locator(".audit-table tbody tr").first().waitFor();
+  await waitText(page, "#audit-count", "retained commands");
+  await page.evaluate(() => {
+    const row = document.querySelector(".audit-table tbody tr");
+    (row as unknown as { __same: boolean }).__same = true;
+    const seen: string[] = [];
+    (window as unknown as { __mutations: string[] }).__mutations = seen;
+    for (const id of ["audit-count", "audit-note", "audit-list"])
+      new MutationObserver((records) => {
+        for (const record of records) seen.push(`${id}:${record.type}`);
+      }).observe(document.getElementById(id) as Node, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+  });
+  let reads = 0;
+  page.on("request", (request) => {
+    if (request.url().includes("/api/control-log")) reads += 1;
+  });
+  // Following off and on again reads the log again; nothing in it changed.
+  await page.getByLabel("Follow newer commands").uncheck();
+  await page.getByLabel("Follow newer commands").check();
+  await until(() => reads >= 1, "a read of the log");
+  await page.waitForTimeout(600);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          document.querySelector(".audit-table tbody tr") as unknown as {
+            __same?: boolean;
+          }
+        )?.__same === true,
+    ),
+  ).toBe(true);
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { __mutations: string[] }).__mutations,
+    ),
+  ).toEqual([]);
   await close(opened);
 });
 
@@ -1620,6 +1994,87 @@ it("pages older commands locally, says the log is capped, and reads an empty or 
   await close(failing);
 }, 60000);
 
+it("reads a reset log again from the start even when it has grown past the cursor, and never holds more than the supervisor retains", async () => {
+  const idOf = (epoch: string, n: number) =>
+    `${epoch.repeat(8)}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  // A scripted /api/control-log: `current` is what the supervisor retains.
+  const current = { epoch: "a", from: 1, to: 5 };
+  const requests: string[] = [];
+  const opened = await open("#/audit", {
+    prepare: (page) =>
+      page.route("**/api/control-log*", async (route) => {
+        const url = new URL(route.request().url());
+        requests.push(url.search);
+        const after = url.searchParams.get("after");
+        const all = Array.from(
+          { length: current.to - current.from + 1 },
+          (_, i) => current.from + i,
+        ).map((seq) => ({
+          id: idOf(current.epoch, seq),
+          seq,
+          at: new Date().toISOString(),
+          issuer: "cli",
+          action: "pause",
+          scope: "lane",
+          target: "builder",
+          lane: "builder",
+          task: null,
+          run: null,
+          outcome: "applied",
+          reason: "HELD",
+        }));
+        const newer =
+          after === null ? all : all.filter((e) => e.seq > Number(after));
+        const entries = newer.slice(-200);
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            version: 1,
+            available: true,
+            entries,
+            latestSeq: current.to,
+            retainedFrom: current.from,
+            retainedFromId: idOf(current.epoch, current.from),
+            afterId:
+              after === null
+                ? null
+                : (all.find((e) => e.seq === Number(after))?.id ?? null),
+            retained: all.length,
+            hasMore: false,
+            nextAfter:
+              entries.at(-1)?.seq ?? (after === null ? null : Number(after)),
+          }),
+        });
+      }),
+  });
+  const { page } = opened;
+  await waitText(page, "#audit-count", "5 of 5 retained commands");
+  // Reset and grow past the cursor: sequence numbers alone look like progress.
+  current.epoch = "b";
+  current.from = 1;
+  current.to = 8;
+  await go(page, "#/tasks");
+  await go(page, "#/audit?seq=3");
+  await waitText(page, "#audit-count", "8 of 8 retained commands");
+  await waitText(page, "#audit-detail", idOf("b", 3));
+  expect(await page.locator("#audit-detail").innerText()).not.toContain(
+    idOf("a", 3),
+  );
+  // The supervisor keeps 200: 250 recorded means 51..250 are retained, and
+  // the page claims no more than that, whatever it held before.
+  current.epoch = "b";
+  current.from = 51;
+  current.to = 250;
+  await go(page, "#/tasks");
+  await go(page, "#/audit?seq=40");
+  await waitText(page, "#audit-count", "200 of 200 retained commands");
+  await waitText(page, "#audit-detail", "This command is no longer retained.");
+  expect(requests.some((query) => !query.includes("after="))).toBe(true);
+  expect(opened.errors).toEqual([]);
+  await close(opened);
+}, 60000);
+
 // ---------------------------------------------------------------------------
 // Overview integration
 // ---------------------------------------------------------------------------
@@ -1646,9 +2101,9 @@ it("adds configuration problems, refused commands and the new views to the overv
   expect(await setup.getAttribute("href")).toBe("#/setup");
   expect(await setup.innerText()).toContain("BINARY_UNSAFE on builder");
   // Fixture refusals are hours old at most, so they count as recent.
-  await waitText(page, "#attention", /Refused or out-of-date commands \(\d\)/);
+  await waitText(page, "#attention", /Commands that were not applied \(\d\)/);
   const audit = page.locator("#attention a", {
-    hasText: "Refused or out-of-date commands",
+    hasText: "Commands that were not applied",
   });
   expect(await audit.getAttribute("href")).toBe("#/audit");
   const shortcuts = await names(page, "#shortcuts a");
@@ -1775,37 +2230,71 @@ it("meets touch target sizes and keeps selected state visible in forced colors",
     touch: true,
   });
   const { page } = opened;
-  for (const hash of ["#/setup", "#/usage", "#/evidence", "#/audit"]) {
+  // Every interactive element on screen, not a hand-picked list: links,
+  // summaries, buttons, selects and inputs (a checkbox counts through its
+  // label, the thing a finger actually hits). One evaluate queries and
+  // measures, so a re-render cannot detach a node between the two steps.
+  const smallTargets = () =>
+    page.evaluate(() => {
+      const roots = [
+        document.querySelector(".view:not([hidden])"),
+        document.querySelector("dialog[open]"),
+        document.querySelector("#primary-nav"),
+      ].filter(Boolean) as HTMLElement[];
+      const found: string[] = [];
+      for (const root of roots)
+        for (const node of root.querySelectorAll(
+          "a[href], summary, input, button, select, textarea",
+        )) {
+          const style = getComputedStyle(node);
+          if (style.visibility === "hidden" || style.display === "none")
+            continue;
+          if (
+            node.closest("[hidden]") ||
+            (node as HTMLInputElement).type === "hidden"
+          )
+            continue;
+          const target =
+            node instanceof HTMLInputElement &&
+            ["checkbox", "radio"].includes(node.type)
+              ? (node.closest("label") ?? node)
+              : node;
+          const rect = target.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          if (rect.height < 43.5)
+            found.push(
+              `${node.tagName.toLowerCase()}.${(node as HTMLElement).className}[${(node.textContent ?? "").trim().slice(0, 24)}]:${Math.round(rect.height)}`,
+            );
+        }
+      return found;
+    });
+  for (const hash of [
+    "#/setup",
+    "#/usage",
+    "#/evidence",
+    `#/evidence?artifact=${fixture.artifacts[0]}`,
+    "#/audit",
+    "#/audit?seq=4",
+    "#/tasks?task=CP-101",
+  ]) {
     await go(page, hash);
     await page.waitForFunction((h) => window.location.hash === h, hash);
     await page.waitForTimeout(900);
-    const small = await page.evaluate(() => {
-      const view = document.querySelector(".view:not([hidden])") as HTMLElement;
-      return [
-        ...view.querySelectorAll(
-          "button, select, input:not([type=checkbox]), a.control-button, a.cross-link, a.evidence-open, a.evidence-link, .data-table a.agent-name",
-        ),
-      ]
-        .filter((node) => {
-          const rect = node.getBoundingClientRect();
-          return rect.width > 0 && rect.height > 0 && rect.height < 43.5;
-        })
-        .map(
-          (node) =>
-            `${node.tagName}.${(node as HTMLElement).className}:${Math.round(node.getBoundingClientRect().height)}`,
-        );
-    });
-    expect(small, hash).toEqual([]);
+    await expect.poll(smallTargets, { message: hash }).toEqual([]);
   }
   await close(opened);
   const forced = await open("#/audit?seq=4", {
     prepare: (page) => page.emulateMedia({ forcedColors: "active" }),
   });
   await forced.page.locator("#audit-detail").waitFor({ state: "visible" });
-  const outline = await forced.page
-    .locator("tr.is-selected")
-    .evaluate((node) => getComputedStyle(node).outlineStyle);
-  expect(outline).toBe("solid");
+  await expect
+    .poll(() =>
+      forced.page.evaluate(() => {
+        const row = document.querySelector("tr.is-selected");
+        return row ? getComputedStyle(row).outlineStyle : null;
+      }),
+    )
+    .toBe("solid");
   await shot(forced.page, "audit-forced-colors");
   await close(forced);
 });

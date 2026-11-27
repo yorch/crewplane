@@ -741,7 +741,15 @@ it("reports an unknown run id and describes broadcast filtering without renaming
 }, 30000);
 
 it("resets the older-messages limit when message filters change", async () => {
-  const { page, errors } = await open("#/messages?filter=all");
+  // Polling only: the live stream would later deliver the real board over the
+  // stubbed snapshot below.
+  const { page, errors } = await open(
+    "#/messages?filter=all",
+    1440,
+    async (page) => {
+      await page.route("**/api/events", (route) => route.abort());
+    },
+  );
   await page.route("**/api/snapshot", async (route) => {
     const response = await route.fetch();
     const body = await response.json();

@@ -1373,6 +1373,10 @@ details.info p {
     color: var(--muted);
     font-size: 12px;
   }
+  /* A badge is as wide as its text, not as its grid cell. */
+  .agents-table td > .badge {
+    justify-self: start;
+  }
   .is-list .card {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1968,12 +1972,17 @@ body:has(.lightbox[open]) {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* A link styled like the buttons beside it (Close, Download file). */
 a.control-button {
   display: inline-flex;
   align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
   color: var(--text);
 }
 a.control-button:hover {
+  background: var(--accent-weak);
   text-decoration: none;
 }
 .digest-full {
@@ -2123,11 +2132,20 @@ a.control-button:hover {
   a.control-button {
     min-height: 44px;
   }
-  .data-table a.agent-name,
-  .data-table a.mono {
+  a.agent-name,
+  a.mono,
+  .detail-actions a,
+  .link-list a,
+  .fields a {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
+  }
+  details.disclosure > summary,
+  details.info > summary {
+    box-sizing: border-box;
+    min-height: 44px;
+    padding-block: 13px;
   }
 }
 

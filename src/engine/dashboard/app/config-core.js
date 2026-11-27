@@ -3,7 +3,7 @@
 // tables. No DOM. The suggested commands are fixed text the operator runs in a
 // terminal; nothing in the page ever executes them, and none is built from
 // data the server returned.
-import { formatCount, shortHash } from "./format.js";
+import { formatCount, formatUsd, shortHash } from "./format.js";
 
 /** Commands the page may suggest. Static strings only. */
 export const COMMANDS = {
@@ -230,7 +230,7 @@ export function laneRows(config) {
               budgets.maxCostUsdPerRun === null ||
               budgets.maxCostUsdPerRun === undefined
                 ? "No cap"
-                : `$${budgets.maxCostUsdPerRun}`,
+                : (formatUsd(budgets.maxCostUsdPerRun) ?? "Not recorded"),
             ],
           ]
         : [],
@@ -290,7 +290,9 @@ export function digestFacts(config) {
         : config?.digestsMatch === false
           ? "Differs from what the running supervisor loaded."
           : digest === null
-            ? "No digest: the configuration cannot be fingerprinted."
+            ? config?.state === "not-configured"
+              ? "No configuration is installed, so there is no digest to compare."
+              : "No digest: the configuration cannot be fingerprinted."
             : "Unknown: the supervisor has not recorded a loaded digest.",
   };
 }
