@@ -113,7 +113,7 @@ A full page reload (or history traversal back to the page) restores, once, after
 
 The Runs view (`run-viewer.js`, served as `/runs.js`) and the relationship diagram (`graph-viewer.js`, `graph-renderer.js`) are separate scripts that talk to the shell through `window.crewplane`, `window.crewplaneFetch` and the `crewplane-route` and `crewplane-graphs` events. `tests/docs.test.ts` fails if a module under `src/engine/dashboard` is missing from this table or the table names a module that does not exist.
 
-**First load.** `index.html` carries a generated block of `<link rel="modulepreload">` entries for the whole module graph, written by `scripts/embed.ts` from the imports of the page's module scripts; the CI "assets up to date" step covers `index.html` too. The links are same-origin `src` URLs, so the policy is unchanged. Measured with a throttled profile (see STATUS.md), they cut the import chain from four levels to one, but the first render did not improve: the server speaks HTTP/1.1, so the browser's six connections per host, not the dependency depth, set the load time. They are kept for HTTP/2 front ends and slower first round trips; bundling would be the real fix and is outside this design (no build step).
+**First load.** `<link rel="modulepreload">` for the whole module graph was tried (Chromium throttled to 10 Mbps and 150 ms, median of five): it cut the import chain from four levels to one but gave no first-render gain over the HTTP/1.1 server (about 2.13 s before, 2.30 s after) because the six connections per host dominate, so it was removed; bundling would be the lever and is outside this design (no build step).
 
 ## Embedding
 

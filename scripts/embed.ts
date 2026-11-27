@@ -1,26 +1,13 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  renderAssetsModule,
-  scanDashboardAssets,
-  withModulePreload,
-} from "./dashboard-assets.ts";
+import { renderAssetsModule, scanDashboardAssets } from "./dashboard-assets.ts";
 
 // Every runtime file under src/engine/dashboard is embedded; adding a module
 // needs no list edit. The generated directory is rebuilt from scratch so a
 // removed or renamed source cannot leave a stale copy behind.
 const source = new URL("../src/engine/dashboard/", import.meta.url);
 const target = new URL("../src/engine/assets/", import.meta.url);
-// The page lists every module it loads as modulepreload links, so the browser
-// fetches the whole graph at once instead of one import level at a time. The
-// block inside index.html is generated here and checked by CI along with the
-// embedded copies.
-const sourceDirectory = fileURLToPath(source);
-const indexFile = new URL("index.html", source);
-const index = await readFile(indexFile, "utf8");
-const updated = withModulePreload(sourceDirectory, index);
-if (updated !== index) await writeFile(indexFile, updated);
 const names = scanDashboardAssets(fileURLToPath(source));
 await rm(target, { recursive: true, force: true });
 for (const name of names) {
