@@ -9,8 +9,14 @@ import {
   ensureControlDirectory,
 } from "../control.ts";
 import { sha256Hex } from "../hash.ts";
-import { publishJson } from "../io.ts";
-import { isLive, supervisorLiveness } from "../migrate.ts";
+import {
+  type ControlTarget,
+  isLive,
+  legacyRefusal,
+  readBoundedJson,
+  resolveControlTarget,
+  supervisorLiveness,
+} from "../migrate.ts";
 import {
   discoverProject,
   projectPolicy,
@@ -20,6 +26,7 @@ import {
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
 import { type Control, control } from "./control-policy.ts";
+import { queueControl } from "./control-queue.ts";
 import { configView } from "./dashboard/config-view.ts";
 import {
   controlLogView,
@@ -28,8 +35,12 @@ import {
 import {
   controlsView,
   createControlGuard,
+  dashboardVerbs,
   fingerprint,
+  isHalting,
   parseControlRequest,
+  pendingDuplicate,
+  sameRecordedSubject,
   wideningVerbs,
 } from "./dashboard/controls.ts";
 import {
@@ -145,10 +156,18 @@ export function createDashboard(
     }
     if (request.method === "POST" && request.url === "/api/control") {
       const controls = options.controls;
+      // Authority: the controls token, the exact Origin, JSON, and (when read
+      // access is gated, as it always is for a launched dashboard) the
+      // per-launch read session, exactly as the page sends all of them.
       if (
         !controls ||
         request.headers.origin !== `http://${expectedHost}` ||
         !tokenMatches(request.headers["x-crewplane-token"], controls.token) ||
+        (options.session &&
+          !tokenMatches(
+            request.headers["x-crewplane-session"],
+            options.session.token,
+          )) ||
         request.headers["content-type"] !== "application/json"
       ) {
         response.writeHead(403).end("Forbidden");
@@ -178,40 +197,91 @@ export function createDashboard(
         } catch {
           return reply(400, { error: "Invalid JSON", code: "INVALID_JSON" });
         }
-        // The same read model the CLI consults: the supervisor generation the
-        // operator is bound to and the configured agents.
+        // The CLI's fail-closed layout gate: while an older in-store
+        // supervisor layout exists, widening verbs are refused and narrowing
+        // verbs go where the CLI would queue them (legacy and/or control).
+        const identity = discoverProject(root);
+        const controlDir = controlDirectory(identity.primary);
+        const requested =
+          body && typeof body === "object" && !Array.isArray(body)
+            ? (body as { action?: unknown }).action
+            : undefined;
+        let target: ControlTarget = { directory: controlDir };
+        if (
+          typeof requested === "string" &&
+          (dashboardVerbs as readonly string[]).includes(requested)
+        )
+          try {
+            target = resolveControlTarget(
+              identity.store,
+              controlDir,
+              requested,
+            );
+          } catch (error) {
+            if ((error as Error).message !== legacyRefusal) throw error;
+            return reply(409, { error: legacyRefusal, code: "LEGACY_LAYOUT" });
+          }
+        const viaControl = target.directory === controlDir;
+        // The same read model the CLI consults for the directory it uses: the
+        // supervisor generation the operator is bound to and the configured
+        // agents. A legacy directory's own files are unverified and read
+        // bounded; its configuration never refuses a halt.
         const runtime = await readRuntime(root);
+        const generation = viaControl
+          ? runtime.state?.generation
+          : ((
+              readBoundedJson(join(target.directory, "state.json")) as {
+                generation?: unknown;
+              } | null
+            )?.generation as string | undefined);
         const parsed = parseControlRequest(body, {
-          generation: runtime.state?.generation,
-          lanes: runtime.config ? Object.keys(runtime.config.lanes) : null,
+          generation: typeof generation === "string" ? generation : undefined,
+          lanes:
+            viaControl && runtime.config
+              ? Object.keys(runtime.config.lanes)
+              : null,
           at: new Date().toISOString(),
         });
         if (!parsed.ok)
           return reply(400, { error: parsed.message, code: parsed.code });
         const value = parsed.value;
+        const halting = isHalting(value.action);
         const id = parsed.requestId ?? randomUUID();
         const print = fingerprint(value);
+        const notes = (running: boolean) =>
+          [
+            running
+              ? ""
+              : value.action === "pause"
+                ? "No supervisor is running; the pause applies when a supervisor starts."
+                : `No supervisor is running; this ${value.action} is bound to the current generation and will be refused as stale by the next start.`,
+            target.warning ?? "",
+          ]
+            .filter(Boolean)
+            .join(" ");
         const answer = (
           replay: boolean,
           afterSeq: number,
           running: boolean,
+          queuedId = id,
         ) => ({
           queued: value.action,
-          id,
+          id: queuedId,
           status: "queued",
           outcome: null,
           afterSeq,
           supervisor: running ? "running" : "not-running",
-          ...(running
-            ? {}
-            : {
-                warning:
-                  value.action === "pause"
-                    ? "No supervisor is running; the pause applies when a supervisor starts."
-                    : `No supervisor is running; this ${value.action} is bound to the current generation and will be refused as stale by the next start.`,
-              }),
+          ...(notes(running) ? { warning: notes(running) } : {}),
+          ...(target.also?.length || !viaControl ? { legacy: true } : {}),
           ...(replay ? { replay: true } : {}),
         });
+        const liveness = () => {
+          try {
+            return isLive(supervisorLiveness(target.directory));
+          } catch {
+            return false;
+          }
+        };
         const cached = guard.recall(id);
         if (cached) {
           if (cached.fingerprint !== print)
@@ -223,61 +293,86 @@ export function createDashboard(
         }
         const afterSeq = runtime.state?.controlSeq ?? 0;
         // The supervisor remembers consumed command ids: a replay of one is
-        // answered from the log, never queued again.
-        if (runtime.state?.commands.includes(`${id}.json`))
-          return reply(200, {
-            queued: value.action,
-            id,
-            status: "queued",
-            outcome: null,
-            afterSeq: 0,
-            supervisor: "unknown",
-            replay: true,
-          });
-        // Commands are authority: they go to the private control directory.
-        const identity = discoverProject(root);
-        const controlDir = controlDirectory(identity.primary);
+        // answered without queuing again. Its control-log entry keeps the
+        // verb and target (not the payload), so a different verb or target
+        // under the same id is a conflict; a differing note or pin is not
+        // knowable and replays by id.
+        if (runtime.state?.commands.includes(`${id}.json`)) {
+          const entry = (runtime.state.controlLog ?? []).find(
+            (e) => e.id === id,
+          );
+          if (entry && !sameRecordedSubject(entry, value))
+            return reply(409, {
+              error: "This requestId was already used for a different command.",
+              code: "REQUEST_ID_REUSED",
+            });
+          return reply(200, answer(true, 0, liveness()));
+        }
+        // Commands are authority: they go to the private control directory
+        // (and, for halting verbs, the legacy one the CLI would also use).
         await ensureControlDirectory(controlDir);
-        await bindControl(
-          identity.store,
-          controlDir,
-          {
-            primaryRoot: identity.primary,
-            gitCommon: identity.common,
-          },
-          { narrowing: !wideningVerbs.has(value.action) },
-        );
+        if (viaControl)
+          await bindControl(
+            identity.store,
+            controlDir,
+            {
+              primaryRoot: identity.primary,
+              gitCommon: identity.common,
+            },
+            { narrowing: !wideningVerbs.has(value.action) },
+          );
         const directory = join(controlDir, "commands");
         await mkdir(directory, { recursive: true, mode: 0o700 });
-        const pending = (await readdir(directory)).filter((name) =>
-          name.endsWith(".json"),
-        ).length;
-        if (pending >= guard.maxPending)
-          return reply(
-            429,
-            {
-              error:
-                "Too many commands are waiting for the supervisor. Wait for them to be recorded.",
-              code: "QUEUE_FULL",
-            },
-            { "Retry-After": "10" },
-          );
-        const slot = guard.reserve();
-        if (!slot.ok)
-          return reply(
-            429,
-            {
-              error: "Too many controls in the last minute. Retry shortly.",
-              code: "RATE_LIMITED",
-            },
-            { "Retry-After": String(slot.retryAfter) },
-          );
+        let reserved = false;
+        if (halting) {
+          // Halting is never refused: no rate limit, no queue cap. It is
+          // idempotent, so a repeat of a still-pending halt adds no file.
+          const duplicate = await pendingDuplicate(directory, value);
+          if (duplicate) {
+            const result = answer(true, afterSeq, liveness(), duplicate);
+            guard.remember(id, print, result);
+            return reply(200, result);
+          }
+        } else {
+          const pending = (await readdir(directory)).filter((name) =>
+            name.endsWith(".json"),
+          ).length;
+          if (pending >= guard.maxPending)
+            return reply(
+              429,
+              {
+                error:
+                  "Too many commands are waiting for the supervisor. Wait for them to be recorded.",
+                code: "QUEUE_FULL",
+              },
+              { "Retry-After": "10" },
+            );
+          const slot = guard.reserve();
+          if (!slot.ok)
+            return reply(
+              429,
+              {
+                error: "Too many controls in the last minute. Retry shortly.",
+                code: "RATE_LIMITED",
+              },
+              { "Retry-After": String(slot.retryAfter) },
+            );
+          reserved = true;
+        }
+        let running = false;
         try {
-          await publishJson(join(directory, `${id}.json`), value, {
-            exclusive: true,
-          });
+          running = (
+            await queueControl({
+              id,
+              value,
+              controlDir,
+              target,
+              exclusive: true,
+              warn: () => {},
+            })
+          ).running;
         } catch (error) {
-          guard.release();
+          if (reserved) guard.release();
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           // Another request (or process) already queued this id: same
           // command, same answer; a different command under it is a conflict.
@@ -289,18 +384,13 @@ export function createDashboard(
           } catch {
             existing = null;
           }
+          // The control copy carries the control directory's own generation.
           if (!existing || fingerprint(existing) !== print)
             return reply(409, {
               error: "This requestId was already used for a different command.",
               code: "REQUEST_ID_REUSED",
             });
-          return reply(200, answer(true, afterSeq, true));
-        }
-        let running = false;
-        try {
-          running = isLive(supervisorLiveness(controlDir));
-        } catch {
-          running = false;
+          return reply(200, answer(true, afterSeq, liveness()));
         }
         const result = answer(false, afterSeq, running);
         guard.remember(id, print, result);

@@ -19,10 +19,14 @@ import { main as coordination } from "../src/engine/agents.mjs";
 import { createDashboard, newSessionToken } from "../src/engine/dashboard.ts";
 import { createTraceStore } from "../src/engine/operational-traces.ts";
 
-// Operator controls in a real browser against the real HTTP server. A fake
-// supervisor stands in for the process that consumes commands: it records the
-// outcome the test chooses in state.controlLog, exactly where the real one does
-// (the real supervisor is covered by dashboard-controls-verbs.test.ts).
+// UI tests only: operator controls in a real browser against the real HTTP
+// server. A fake supervisor stands in for the process that consumes commands
+// and records the outcome the test chooses in state.controlLog, exactly where
+// the real one does. These tests prove what the page renders, sends and
+// reconciles; they say nothing about what a supervisor applies. The real
+// supervisor is exercised by src/engine/dashboard-controls-verbs.test.ts and
+// src/engine/supervisor-revision.test.ts, and the real CLI by
+// tests/dashboard-controls-cli-parity.test.ts.
 const previousState = process.env.CREWPLANE_STATE_DIR;
 const stateBase = mkdtempSync(join(tmpdir(), "crewplane-controls-ui-state-"));
 process.env.CREWPLANE_STATE_DIR = stateBase;
@@ -503,4 +507,92 @@ it("renders hostile persisted text as text", async () => {
   ).toBeUndefined();
   expect(errors).toEqual([]);
   await page.close();
+});
+
+it("reuses one request id after a network failure, so a resubmit queues once", async () => {
+  const { page } = await open(
+    on,
+    `token=${session}&controls=${controls.token}`,
+    agentHash("builder"),
+  );
+  // Hold the supervisor back so the first command stays pending.
+  clearInterval(ticker);
+  ticker = undefined;
+  const commands = join(dir, "commands");
+  const pending = () =>
+    readdirSync(commands).filter((n) => n.endsWith(".json"));
+  for (const name of pending()) unlinkSync(join(commands, name));
+  const sentIds: string[] = [];
+  let failures = 1;
+  await page.route("**/api/control", async (route) => {
+    const body = JSON.parse(route.request().postData() ?? "{}");
+    sentIds.push(body.requestId);
+    if (failures-- > 0) {
+      // The server gets it; the answer never reaches the page.
+      await route.fetch();
+      await route.abort("connectionreset");
+    } else await route.continue();
+  });
+  try {
+    await button(page, "Nudge").click();
+    await page.locator("#control-note").fill("look again");
+    const dialog = page.locator("dialog");
+    await dialog.getByRole("button", { name: "Nudge", exact: true }).click();
+    await page
+      .locator("#control-error")
+      .getByText(/The request may not have been queued/)
+      .waitFor();
+    // The dialog stays open and nothing was recorded, so a retry is offered.
+    expect(await dialog.isVisible()).toBe(true);
+    expect(pending()).toHaveLength(1);
+    const answer = page.waitForResponse(
+      (r) => r.url().endsWith("/api/control") && r.status() === 200,
+    );
+    await dialog.getByRole("button", { name: "Nudge", exact: true }).click();
+    expect(((await (await answer).json()) as { replay?: boolean }).replay).toBe(
+      true,
+    );
+    expect(sentIds).toHaveLength(2);
+    expect(sentIds[0]).toBe(sentIds[1]);
+    expect(sentIds[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(pending()).toHaveLength(1);
+  } finally {
+    await page.unroute("**/api/control");
+    ticker = setInterval(fakeSupervisor, 80);
+    await page.close();
+  }
+});
+
+it("checks the control log after a network failure and does not offer a second attempt when it was recorded", async () => {
+  nextOutcome = { outcome: "applied", code: "NOTICE_QUEUED" };
+  const { page } = await open(
+    on,
+    `token=${session}&controls=${controls.token}`,
+    agentHash("builder"),
+  );
+  let posts = 0;
+  await page.route("**/api/control", async (route) => {
+    posts += 1;
+    // Queued, and the supervisor records it, but the answer is lost.
+    await route.fetch();
+    await page.waitForTimeout(500);
+    await route.abort("connectionreset");
+  });
+  try {
+    await button(page, "Nudge").click();
+    await page.locator("#control-note").fill("recorded anyway");
+    await page
+      .locator("dialog")
+      .getByRole("button", { name: "Nudge", exact: true })
+      .click();
+    await page
+      .locator("#control-feedback")
+      .getByText(/Applied: The note was queued/)
+      .waitFor({ timeout: 15000 });
+    expect(await page.locator("dialog").isVisible()).toBe(false);
+    expect(posts).toBe(1);
+  } finally {
+    await page.unroute("**/api/control");
+    await page.close();
+  }
 });

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -9,18 +9,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { join, resolve } from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { controlDirectory, ensureControlDirectory } from "../control.ts";
-import { type Control, control } from "./control-policy.ts";
+import type { Control } from "./control-policy.ts";
 import { parseControlRequest } from "./dashboard/controls.ts";
 import { createDashboard, newSessionToken } from "./dashboard.ts";
 import { serve } from "./supervisor.ts";
 
 /**
- * Operator verbs over `POST /api/control`. The CLI's own input shape (see the
- * control block in src/cli.ts) is the independent expectation: both sides must
- * end in the same `control()` value.
+ * Operator verbs over `POST /api/control`. The real CLI, spawned for the same
+ * intent, is the independent expectation: both sides must queue the same
+ * command (ignoring id, timestamp and issuer).
  */
 const previousState = process.env.CREWPLANE_STATE_DIR;
 const stateBase = mkdtempSync(join(tmpdir(), "crewplane-verbs-state-"));
@@ -82,6 +82,7 @@ const writeRuntime = (state: object | null) => {
       intervalSeconds: 10,
       maxRunMinutes: 10,
       maxRunsPerHour: 10,
+      confirmedStoppedAt: new Date().toISOString(),
       lanes: { builder: lane(), reviewer: lane(), idle: lane() },
     }),
   );
@@ -145,24 +146,22 @@ afterAll(async () => {
   else process.env.CREWPLANE_STATE_DIR = previousState;
 });
 
-// [name, dashboard request, the control() input the CLI builds for the same intent]
-const accepted: Array<
-  [string, Record<string, unknown>, Record<string, unknown>]
-> = [
+// [name, dashboard request, the CLI command line for the same intent]
+const accepted: Array<[string, Record<string, unknown>, string[]]> = [
   [
     "pause lane",
     { action: "pause", lane: "builder" },
-    { action: "pause", lane: "builder" },
+    ["pause", "--lane", "builder"],
   ],
   [
     "resume lane",
     { action: "resume", lane: "builder", expectRev: 4, requestId: uuid() },
-    { action: "resume", lane: "builder", expectRev: 4 },
+    ["resume", "--lane", "builder", "--expect-rev", "4"],
   ],
   [
     "retry lane",
     { action: "retry", lane: "builder", expectRev: 4, requestId: uuid() },
-    { action: "retry", lane: "builder", expectRev: 4 },
+    ["retry", "--lane", "builder", "--expect-rev", "4"],
   ],
   [
     "retry lane with note",
@@ -173,12 +172,15 @@ const accepted: Array<
       text: "fixed the fixture",
       requestId: uuid(),
     },
-    {
-      action: "retry",
-      lane: "builder",
-      expectRev: 4,
-      text: "fixed the fixture",
-    },
+    [
+      "retry",
+      "--lane",
+      "builder",
+      "--expect-rev",
+      "4",
+      "--text",
+      "fixed the fixture",
+    ],
   ],
   [
     "retry confirm cleanup",
@@ -192,15 +194,21 @@ const accepted: Array<
       expectRun: run,
       requestId: uuid(),
     },
-    {
-      action: "retry",
-      lane: "builder",
-      task: "CP-101",
-      confirmCleanup: true,
-      text: "worktree inspected",
-      expectRev: 4,
-      expectRun: run,
-    },
+    [
+      "retry",
+      "--lane",
+      "builder",
+      "--task",
+      "CP-101",
+      "--confirm-cleanup",
+      "true",
+      "--text",
+      "worktree inspected",
+      "--expect-rev",
+      "4",
+      "--expect-run",
+      run,
+    ],
   ],
   [
     "retry new session",
@@ -214,15 +222,21 @@ const accepted: Array<
       expectSession: sessionId,
       requestId: uuid(),
     },
-    {
-      action: "retry",
-      lane: "builder",
-      task: "CP-101",
-      newSession: true,
-      text: "stuck in a loop",
-      expectRev: 4,
-      expectSession: sessionId,
-    },
+    [
+      "retry",
+      "--lane",
+      "builder",
+      "--task",
+      "CP-101",
+      "--new-session",
+      "true",
+      "--text",
+      "stuck in a loop",
+      "--expect-rev",
+      "4",
+      "--expect-session",
+      sessionId,
+    ],
   ],
   [
     "resolve approve",
@@ -236,15 +250,21 @@ const accepted: Array<
       expectRev: 4,
       requestId: uuid(),
     },
-    {
-      action: "resolve",
-      lane: "builder",
-      task: "CP-101",
+    [
+      "resolve",
+      "--lane",
+      "builder",
+      "--task",
+      "CP-101",
+      "--pause",
       pauseId,
-      resolution: "approve",
-      text: "go ahead",
-      expectRev: 4,
-    },
+      "--approve",
+      "true",
+      "--text",
+      "go ahead",
+      "--expect-rev",
+      "4",
+    ],
   ],
   [
     "resolve deny without task",
@@ -257,14 +277,19 @@ const accepted: Array<
       expectRev: 4,
       requestId: uuid(),
     },
-    {
-      action: "resolve",
-      lane: "builder",
+    [
+      "resolve",
+      "--lane",
+      "builder",
+      "--pause",
       pauseId,
-      resolution: "deny",
-      text: "not now",
-      expectRev: 4,
-    },
+      "--deny",
+      "true",
+      "--text",
+      "not now",
+      "--expect-rev",
+      "4",
+    ],
   ],
   [
     "nudge",
@@ -274,7 +299,7 @@ const accepted: Array<
       text: "look at CP-102",
       requestId: uuid(),
     },
-    { action: "nudge", lane: "builder", text: "look at CP-102" },
+    ["nudge", "--lane", "builder", "--text", "look at CP-102"],
   ],
   [
     "nudge task",
@@ -285,20 +310,51 @@ const accepted: Array<
       text: "look",
       requestId: uuid(),
     },
-    { action: "nudge", lane: "builder", task: "CP-101", text: "look" },
+    ["nudge", "--lane", "builder", "--task", "CP-101", "--text", "look"],
   ],
   [
     "cancel run",
     { action: "cancel", lane: "builder", run },
-    { action: "cancel", lane: "builder", run },
+    ["cancel", "--lane", "builder", "--run", run],
   ],
-  ["stop", { action: "stop" }, { action: "stop" }],
+  ["stop", { action: "stop" }, ["stop"]],
 ];
+
+/** What a queued command means: everything but its id, clock and issuer. */
+const meaning = (value: object) => {
+  const {
+    at: _at,
+    v: _v,
+    issuer: _issuer,
+    ...rest
+  } = value as Record<string, unknown>;
+  return JSON.stringify(
+    Object.entries(rest).sort(([a, b]) => String(a).localeCompare(String(b))),
+  );
+};
+const queuedMeanings = () => queued().map((q) => meaning(q.value));
+const runCli = (...args: string[]) =>
+  spawnSync("bun", [resolve("src/cli.ts"), "--project", root, ...args], {
+    env: {
+      ...process.env,
+      CREWPLANE_COORD_DIR: "",
+      CREWPLANE_NO_AUTO_UPDATE: "1",
+      CREWPLANE_RELEASES_DIR: join(stateBase, "releases-absent"),
+    },
+    encoding: "utf8",
+    timeout: 20000,
+  });
 
 describe("verb parity with the CLI path", () => {
   it.each(accepted)(
-    "%s queues exactly what control() accepts",
-    async (_n, body, cli) => {
+    "%s queues exactly what the real CLI queues for the same intent",
+    async (_n, body, cliArgs) => {
+      // The independent expectation: the CLI process itself.
+      clear();
+      const result = runCli(...cliArgs);
+      expect(result.status, result.stderr).toBe(0);
+      const fromCli = queuedMeanings();
+      expect(fromCli).toHaveLength(1);
       clear();
       const response = await post(body);
       expect(response.status).toBe(200);
@@ -309,15 +365,7 @@ describe("verb parity with the CLI path", () => {
       expect(answer.queued).toBe(body.action);
       const [file] = queued();
       expect(file?.id).toBe(answer.id);
-      const expected = control({
-        ...cli,
-        v: 2,
-        generation: "gen-current",
-        issuer: "dashboard",
-        at: file?.value.at,
-      });
-      expect(expected.action).not.toBe("invalid");
-      expect(file?.value).toEqual(expected);
+      expect(queuedMeanings()).toEqual(fromCli);
     },
   );
   it("is the same validator the CLI uses: every dashboard-valid request is control()-valid", () => {
@@ -680,7 +728,7 @@ describe("replay and rate limit", () => {
       writeRuntime(state());
     }
   });
-  it("limits queued commands per minute and caps the pending queue", async () => {
+  it("limits queued widening and nudge commands per minute and caps the pending queue", async () => {
     clear();
     let now = 1_000_000;
     const limited = createDashboard(root, {
@@ -698,7 +746,12 @@ describe("replay and rate limit", () => {
       fetch(`${base}/api/control`, {
         method: "POST",
         headers: { ...headers(), origin: base },
-        body: JSON.stringify({ action: "pause", lane: "builder" }),
+        body: JSON.stringify({
+          action: "nudge",
+          lane: "builder",
+          text: "n",
+          requestId: uuid(),
+        }),
       });
     try {
       expect((await send()).status).toBe(200);
@@ -960,6 +1013,479 @@ describe("through a real supervisor", () => {
       );
       expect(againEntry.outcome).toBe("stale");
       expect((await log()).filter((e) => e.id === goodId)).toHaveLength(1);
+    } finally {
+      controller.abort();
+      await supervisor.catch(() => {});
+    }
+  }, 30000);
+});
+
+// ---- Phase 3 security review ------------------------------------------------
+const another = async (options: Parameters<typeof createDashboard>[1]) => {
+  const extra = createDashboard(root, options);
+  await new Promise<void>((resolve) => extra.listen(0, "127.0.0.1", resolve));
+  const address = extra.address();
+  if (!address || typeof address === "string") throw new Error("No port");
+  const base = `http://127.0.0.1:${address.port}`;
+  return {
+    base,
+    close: () => new Promise<void>((resolve) => extra.close(() => resolve())),
+    post: (body: unknown, extra: Record<string, string> = {}) =>
+      fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { ...headers(), origin: base, ...extra },
+        body: JSON.stringify(body),
+      }),
+  };
+};
+
+describe("halting is never refused", () => {
+  // An earlier real-supervisor test replaces the runtime configuration.
+  beforeEach(() => writeRuntime(state()));
+  it("ignores the rate limit and the queue cap for pause, stop and cancel, and adds no file for a repeat", async () => {
+    clear();
+    const limited = await another({
+      controls,
+      session,
+      controlGuard: { perMinute: 1, maxPending: 2 },
+    });
+    try {
+      // Exhaust both the minute budget and the pending cap with a widening verb.
+      expect(
+        (
+          await limited.post({
+            action: "nudge",
+            lane: "builder",
+            text: "n",
+            requestId: uuid(),
+          })
+        ).status,
+      ).toBe(200);
+      for (let i = 0; i < 3; i++)
+        writeFileSync(join(dir, "commands", `${uuid()}.json`), "{}");
+      const refused = await limited.post({
+        action: "nudge",
+        lane: "builder",
+        text: "n",
+        requestId: uuid(),
+      });
+      expect(refused.status).toBe(429);
+      const before = queued().filter((q) => q.value.action).length;
+      const halts: Array<Record<string, unknown>> = [
+        { action: "pause", lane: "builder" },
+        { action: "pause", lane: "reviewer" },
+        { action: "pause", all: true },
+        { action: "stop" },
+        { action: "cancel", lane: "builder", run },
+      ];
+      const ids = new Map<string, string>();
+      for (const halt of halts)
+        for (let repeat = 0; repeat < 4; repeat++) {
+          const response = await limited.post(halt);
+          expect(
+            response.status,
+            `${JSON.stringify(halt)} ${await response.clone().text()}`,
+          ).toBe(200);
+          const answer = (await response.json()) as {
+            id: string;
+            replay?: boolean;
+          };
+          const key = JSON.stringify(halt);
+          if (repeat === 0) {
+            ids.set(key, answer.id);
+          } else {
+            // The repeat of a pending halt is answered with the pending command.
+            expect(answer.id).toBe(ids.get(key));
+            expect(answer.replay).toBe(true);
+          }
+        }
+      // One file per distinct halt, however often it was repeated.
+      expect(queued().filter((q) => q.value.action).length - before).toBe(
+        halts.length,
+      );
+      // A different run is a different halt.
+      const other = await limited.post({
+        action: "cancel",
+        lane: "builder",
+        run: "1794100000002-00000000-0000-4000-8000-000000000009",
+      });
+      expect(other.status).toBe(200);
+      expect(queued().filter((q) => q.value.action).length - before).toBe(
+        halts.length + 1,
+      );
+    } finally {
+      await limited.close();
+      clear();
+    }
+  });
+  it("does not treat a halt queued for an earlier supervisor generation as the pending one", async () => {
+    clear();
+    writeRuntime(state({ generation: "gen-one" }));
+    try {
+      const first = (await (await post({ action: "stop" })).json()) as {
+        id: string;
+      };
+      writeRuntime(state({ generation: "gen-two" }));
+      const second = (await (await post({ action: "stop" })).json()) as {
+        id: string;
+      };
+      expect(second.id).not.toBe(first.id);
+      expect(queued().map((q) => q.value.generation)).toEqual(
+        expect.arrayContaining(["gen-one", "gen-two"]),
+      );
+    } finally {
+      writeRuntime(state());
+      clear();
+    }
+  });
+});
+
+describe("cancel all and pause all", () => {
+  it("keeps cancel --all CLI-only, like stop --cancel-active, and queues nothing", async () => {
+    clear();
+    const response = await post({ action: "cancel", all: true });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { code: string }).code).toBe("CLI_ONLY");
+    expect(queued()).toEqual([]);
+  });
+  it("accepts pause --all: it only narrows, and halting is never refused", async () => {
+    clear();
+    expect((await post({ action: "pause", all: true })).status).toBe(200);
+    expect(queued().map((q) => q.value)).toMatchObject([
+      { action: "pause", all: true },
+    ]);
+  });
+});
+
+describe("replay edge cases", () => {
+  it("refuses a consumed id reused for a different verb or target, and replays the same one", async () => {
+    clear();
+    const id = uuid();
+    writeRuntime(
+      state({
+        commands: [`${id}.json`],
+        controlSeq: 1,
+        controlLog: [
+          {
+            id,
+            seq: 1,
+            action: "nudge",
+            scope: "lane",
+            target: "builder",
+            outcome: "applied",
+            code: "NOTICE_QUEUED",
+            at: new Date().toISOString(),
+            issuer: "dashboard",
+          },
+        ],
+      }),
+    );
+    try {
+      const different = await post({
+        action: "nudge",
+        lane: "reviewer",
+        text: "other target",
+        requestId: id,
+      });
+      expect(different.status).toBe(409);
+      expect(((await different.json()) as { code: string }).code).toBe(
+        "REQUEST_ID_REUSED",
+      );
+      const verb = await post({
+        action: "retry",
+        lane: "builder",
+        expectRev: 4,
+        requestId: id,
+      });
+      expect(verb.status).toBe(409);
+      const same = await post({
+        action: "nudge",
+        lane: "builder",
+        text: "same verb and target",
+        requestId: id,
+      });
+      expect(same.status).toBe(200);
+      expect(((await same.json()) as { replay: boolean }).replay).toBe(true);
+      expect(queued()).toEqual([]);
+    } finally {
+      writeRuntime(state());
+    }
+  });
+  it("reports real supervisor liveness when an id was already queued", async () => {
+    clear();
+    writeRuntime(
+      state({
+        running: false,
+        checkedAt: "2000-01-01T00:00:00.000Z",
+        pid: 2 ** 22 + 99,
+      }),
+    );
+    const body = {
+      action: "nudge",
+      lane: "builder",
+      text: "shared",
+      requestId: uuid(),
+    };
+    expect((await post(body)).status).toBe(200);
+    const other = await another({ controls, session });
+    try {
+      const again = (await (await other.post(body)).json()) as {
+        replay: boolean;
+        supervisor: string;
+        warning?: string;
+      };
+      expect(again.replay).toBe(true);
+      expect(again.supervisor).toBe("not-running");
+      expect(again.warning).toContain("No supervisor is running");
+    } finally {
+      await other.close();
+      writeRuntime(state());
+    }
+  });
+  it("reports real supervisor liveness for a consumed id too", async () => {
+    clear();
+    const id = uuid();
+    writeRuntime(
+      state({
+        running: false,
+        checkedAt: "2000-01-01T00:00:00.000Z",
+        pid: 2 ** 22 + 99,
+        commands: [`${id}.json`],
+      }),
+    );
+    try {
+      const again = (await (
+        await post({
+          action: "nudge",
+          lane: "builder",
+          text: "late",
+          requestId: id,
+        })
+      ).json()) as { replay: boolean; supervisor: string };
+      expect(again).toMatchObject({ replay: true, supervisor: "not-running" });
+    } finally {
+      writeRuntime(state());
+    }
+  });
+});
+
+describe("hostile or damaged state files", () => {
+  it("still queues a pause when state.json has no commands array or damaged arrays", async () => {
+    for (const damaged of [
+      { commands: undefined },
+      { commands: "nope" },
+      { commands: { length: 1 } },
+      { held: "builder", notices: [], controlLog: "x" },
+      { records: { "builder:CP-1": { lane: "builder", runs: "x" } } },
+    ]) {
+      clear();
+      writeRuntime(state(damaged));
+      try {
+        const response = await post({ action: "pause", lane: "builder" });
+        expect(response.status, JSON.stringify(damaged)).toBe(200);
+        expect(queued()).toHaveLength(1);
+        // Reads stay up as well.
+        expect((await read("/api/controls")).status).toBe(200);
+      } finally {
+        writeRuntime(state());
+      }
+    }
+  });
+});
+
+describe("authority: session and request id shape", () => {
+  it("requires the read session whenever read access is gated", async () => {
+    clear();
+    expect(
+      (
+        await post(
+          { action: "pause", lane: "builder" },
+          { "x-crewplane-session": "" },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await post(
+          { action: "pause", lane: "builder" },
+          { "x-crewplane-session": "wrong" },
+        )
+      ).status,
+    ).toBe(403);
+    expect(queued()).toEqual([]);
+    // Without a configured session (in-process use) there is nothing to match.
+    const open = await another({ controls });
+    try {
+      const response = await open.post(
+        { action: "pause", lane: "builder" },
+        { "x-crewplane-session": "" },
+      );
+      expect(response.status).toBe(200);
+    } finally {
+      await open.close();
+      clear();
+    }
+  });
+  it("accepts only a real lowercase UUID as requestId", async () => {
+    clear();
+    for (const bad of [
+      "-".repeat(36),
+      "a".repeat(36),
+      "00000000-0000-0000-0000-00000000000g",
+      uuid().toUpperCase(),
+      `${uuid()}0`,
+    ]) {
+      const response = await post({
+        action: "nudge",
+        lane: "builder",
+        text: "x",
+        requestId: bad,
+      });
+      expect(response.status, bad).toBe(400);
+      expect(((await response.json()) as { error: string }).error).toContain(
+        "UUID",
+      );
+    }
+    expect(queued()).toEqual([]);
+  });
+});
+
+describe("through a real supervisor, after the fact", () => {
+  const configFor = () => ({
+    version: 1 as const,
+    root,
+    binary: process.execPath,
+    allowedTasks: [],
+    maxParallel: 2,
+    intervalSeconds: 1,
+    maxRunMinutes: 1,
+    maxRunsPerHour: 20,
+    confirmedStoppedAt: new Date().toISOString(),
+    lanes: { coordinator: { enabled: false }, builder: lane() },
+  });
+  const until = async <T>(
+    check: () => T | undefined | Promise<T | undefined>,
+  ) => {
+    const deadline = Date.now() + 9000;
+    for (;;) {
+      const value = await check();
+      if (value !== undefined) return value;
+      if (Date.now() > deadline) throw new Error("supervisor did not answer");
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+  };
+  const persisted = () =>
+    JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as {
+      generation?: string;
+      running?: boolean;
+      held: string[];
+      commands: string[];
+      records: Record<string, { status: string; pauseKind?: string }>;
+      controlLog?: Array<{ id: string; outcome: string; code: string }>;
+    };
+  const start = (controller: AbortController) => {
+    const config = configFor();
+    writeFileSync(join(dir, "config.json"), JSON.stringify(config));
+    return serve(
+      config as unknown as Parameters<typeof serve>[0],
+      dir,
+      controller.signal,
+    );
+  };
+  it("records a widening command queued while stopped as stale and never lifts the hold", async () => {
+    clear();
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify(
+        state({
+          running: false,
+          generation: "gen-before-restart",
+          held: ["builder"],
+          records: {
+            "builder:CP-101": record({
+              status: "paused",
+              pauseKind: "failure",
+            }),
+          },
+        }),
+      ),
+    );
+    writeFileSync(join(dir, "config.json"), JSON.stringify(configFor()));
+    const ids: string[] = [];
+    for (const body of [
+      { action: "resume", lane: "builder", expectRev: 4 },
+      { action: "retry", lane: "builder", expectRev: 4 },
+      {
+        action: "nudge",
+        lane: "builder",
+        text: "queued while stopped",
+      },
+    ]) {
+      const response = await post({ ...body, requestId: uuid() });
+      expect(response.status).toBe(200);
+      const answer = (await response.json()) as {
+        id: string;
+        supervisor: string;
+      };
+      expect(answer.supervisor).toBe("not-running");
+      ids.push(answer.id);
+    }
+    expect(queued().map((q) => q.value.generation)).toEqual([
+      "gen-before-restart",
+      "gen-before-restart",
+      "gen-before-restart",
+    ]);
+    const controller = new AbortController();
+    const supervisor = start(controller);
+    try {
+      await until(() => {
+        const current = persisted();
+        return ids.every((id) => current.controlLog?.some((e) => e.id === id))
+          ? current
+          : undefined;
+      });
+      const final = persisted();
+      for (const id of ids)
+        expect(final.controlLog?.find((e) => e.id === id)).toMatchObject({
+          outcome: "stale",
+          code: "STALE_GENERATION",
+        });
+      // Nothing was lifted: the hold and the failure pause are intact.
+      expect(final.held).toContain("builder");
+      expect(final.records["builder:CP-101"]).toMatchObject({
+        status: "paused",
+        pauseKind: "failure",
+      });
+    } finally {
+      controller.abort();
+      await supervisor.catch(() => {});
+    }
+  }, 30000);
+  it("removes a command file whose id was already consumed instead of leaving it behind", async () => {
+    clear();
+    const id = uuid();
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify(state({ running: false, commands: [`${id}.json`] })),
+    );
+    // The file a racing writer re-created after the supervisor consumed it.
+    writeFileSync(
+      join(dir, "commands", `${id}.json`),
+      JSON.stringify({
+        v: 2,
+        action: "resume",
+        lane: "builder",
+        expectRev: 4,
+        at: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    );
+    const controller = new AbortController();
+    const supervisor = start(controller);
+    try {
+      await until(() => (queued().some((q) => q.id === id) ? undefined : true));
+      const final = persisted();
+      expect(final.controlLog?.some((e) => e.id === id) ?? false).toBe(false);
+      expect(final.commands).toContain(`${id}.json`);
     } finally {
       controller.abort();
       await supervisor.catch(() => {});

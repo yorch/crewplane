@@ -4,9 +4,9 @@
 // remain the authority; everything here is advisory wording and request shape.
 
 export const NOTE_MAX = 2000;
-const UUID = /^[a-f0-9-]{36}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A request id the server uses for replay protection. */
+/** A request id the server uses for replay protection; one per dialog open. */
 export function newRequestId(random = globalThis.crypto) {
   return random.randomUUID();
 }
@@ -122,7 +122,7 @@ export function requestBody(p, form, requestId) {
   const withNote = note ? { text: note } : {};
   switch (p.kind) {
     case "pause":
-      return { action: "pause", lane: c.lane };
+      return { action: "pause", lane: c.lane, requestId };
     case "resume":
       return { action: "resume", lane: c.lane, expectRev: c.rev, requestId };
     case "retry":
@@ -176,9 +176,9 @@ export function requestBody(p, form, requestId) {
         requestId,
       };
     case "cancel":
-      return { action: "cancel", lane: c.lane, run: c.runId };
+      return { action: "cancel", lane: c.lane, run: c.runId, requestId };
     case "stop":
-      return { action: "stop" };
+      return { action: "stop", requestId };
     default:
       throw new Error(`Unknown control ${p.kind}`);
   }

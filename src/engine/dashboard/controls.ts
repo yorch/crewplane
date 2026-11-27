@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Config, Lane, State } from "../../contracts.ts";
 import { validId, validTaskId } from "../../project.ts";
-import { type Control, control } from "../control-policy.ts";
+import { type Control, control, controlSubject } from "../control-policy.ts";
+import { isNarrowingAction } from "../control-queue.ts";
 import { clean } from "./sanitize.ts";
 
 /**
@@ -35,6 +38,11 @@ export const cliOnly = [
       "It terminates running agent processes while stopping; use cancel on one run, or the CLI.",
   },
   {
+    verb: "cancel --all",
+    reason:
+      "It terminates every running agent process at once, like stop --cancel-active; cancel one run, or use the CLI.",
+  },
+  {
     verb: "resume --all",
     reason:
       "It lifts the instance hold for every agent and cannot be pinned to one revision.",
@@ -42,11 +50,17 @@ export const cliOnly = [
 ] as const;
 /** Lifting a hold, pause or failure; these must be pinned like the CLI pins them. */
 export const wideningVerbs = new Set<string>(["retry", "resolve", "resume"]);
-/** Narrowing verbs are always safe to apply late and may be queued without config. */
-const narrowing = new Set<string>(["pause", "stop", "cancel"]);
+/**
+ * Narrowing verbs are always safe to apply late and may be queued without
+ * config. They are never refused by the rate limit or the queue cap: halting
+ * must never be refused.
+ */
+export const isHalting = isNarrowingAction;
 
 export const maxNoteChars = 2000;
-const requestIdPattern = /^[a-f0-9-]{36}$/;
+/** A lowercase UUID, 8-4-4-4-12 hex, exactly what `crypto.randomUUID()` yields. */
+const requestIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const runPattern = /^\d{13}-[a-f0-9-]{36}$/;
 const sessionPattern = /^[A-Za-z0-9_-]{1,80}$/;
 const allowedKeys = new Set([
@@ -151,7 +165,10 @@ export function parseControlRequest(
       typeof raw.requestId !== "string" ||
       !requestIdPattern.test(raw.requestId)
     )
-      return fail("INVALID_CONTROL", "requestId must be a UUID.");
+      return fail(
+        "INVALID_CONTROL",
+        "requestId must be a lowercase UUID (8-4-4-4-12 hex digits).",
+      );
     requestId = raw.requestId;
   }
   if (typeof input.text === "string" && input.text.length > maxNoteChars)
@@ -165,6 +182,15 @@ export function parseControlRequest(
     return fail(
       "CLI_ONLY",
       "resume --all is CLI-only: it cannot be pinned to a revision.",
+    );
+  // Terminating every run at once is the same hazard as stop --cancel-active,
+  // which is CLI-only; the dashboard cancels one named run. (pause --all only
+  // narrows and halting is never refused, so it is accepted; lifting it again
+  // is `crewplane resume --all`, CLI-only.)
+  if (action === "cancel" && input.all === true)
+    return fail(
+      "CLI_ONLY",
+      "cancel --all is CLI-only: cancel a single run, or use the CLI.",
     );
   if (wideningVerbs.has(action) && input.expectRev === undefined)
     return fail(
@@ -207,7 +233,7 @@ export function parseControlRequest(
     // Mirrors the CLI: narrowing verbs only check lanes against a readable
     // configuration; every other verb needs the lane to be configured.
     const known = context.lanes?.includes(lane) ?? false;
-    if (context.lanes ? !known : !narrowing.has(action))
+    if (context.lanes ? !known : !isHalting(action))
       return fail("UNKNOWN_AGENT", "Unknown configured agent.");
   }
   const value = control({
@@ -438,4 +464,67 @@ export function controlsView(
     limits: { maxNoteChars },
     lanes,
   };
+}
+
+/** Pending duplicates are looked for among at most this many queue files. */
+const dedupeScanLimit = 1000;
+/**
+ * The id of a still-pending halting command that already says the same thing,
+ * so a repeated pause, stop or cancel adds no file: halting is idempotent, and
+ * this bounds the disk a flood of halting requests can use without ever
+ * refusing one. A pause matches by target; stop and cancel only count while
+ * bound to the same supervisor generation (a restart makes the older one stale).
+ */
+export async function pendingDuplicate(
+  commandsDir: string,
+  value: Control,
+): Promise<string | null> {
+  if (!isHalting(value.action)) return null;
+  const key = (c: Control) =>
+    JSON.stringify([
+      c.action,
+      c.lane ?? null,
+      c.run ?? null,
+      c.all === true,
+      c.action === "pause" ? null : (c.generation ?? null),
+    ]);
+  const wanted = key(value);
+  let names: string[];
+  try {
+    names = (await readdir(commandsDir))
+      .filter((n) => /^[0-9a-f]{8}-[0-9a-f-]{27}\.json$/.test(n))
+      .slice(0, dedupeScanLimit);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    try {
+      const text = await readFile(join(commandsDir, name), "utf8");
+      if (text.length > 8192) continue;
+      const existing = control(JSON.parse(text));
+      if (existing.action !== "invalid" && key(existing) === wanted)
+        return name.replace(/\.json$/, "");
+    } catch {
+      // Consumed or unreadable meanwhile; not a duplicate.
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether a recorded control-log entry for a consumed request id says the same
+ * thing as a new request (same verb and target). The log keeps no payload, so
+ * a differing note or pin cannot be told apart: consumed-id replay is by id,
+ * verb and target only.
+ */
+export function sameRecordedSubject(
+  entry: { action: string; scope: string; target: string | null },
+  value: Control,
+) {
+  const subject = controlSubject(value);
+  return (
+    entry.action === value.action &&
+    entry.scope === subject.scope &&
+    entry.target === subject.target
+  );
 }

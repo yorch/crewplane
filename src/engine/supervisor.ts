@@ -30,7 +30,7 @@ import {
 } from "../project.ts";
 import { registerSupervisor } from "../update.ts";
 import { evaluateSchedulingReload } from "./config-reload.ts";
-import { control, validState } from "./control-policy.ts";
+import { control, controlSubject, validState } from "./control-policy.ts";
 import {
   assertSwitch,
   type HarnessStream,
@@ -563,6 +563,24 @@ export async function serve(
     state.laneRev ??= {};
     state.laneRev[name as Lane] = (state.laneRev[name as Lane] ?? 0) + 1;
   };
+  /**
+   * The only place a record's status or pause kind changes. The lane revision
+   * is the pin every widening control carries (`expectRev`), so each
+   * transition moves it unless the caller bumps it itself after a batch
+   * (`bump: false`, used by the control handlers). `pauseKind` `undefined`
+   * keeps the current kind, `null` clears it.
+   */
+  const transition = (
+    record: RecordState,
+    status: RecordState["status"],
+    pauseKind?: RecordState["pauseKind"] | null,
+    bump = true,
+  ) => {
+    record.status = status;
+    if (pauseKind === null) delete record.pauseKind;
+    else if (pauseKind !== undefined) record.pauseKind = pauseKind;
+    if (bump) bumpLane(record.lane);
+  };
   const save = () => {
     state.checkedAt = new Date().toISOString();
     const copy = structuredClone(state);
@@ -586,8 +604,7 @@ export async function serve(
       if (record.status !== "running" && !record.pid && !record.processGroupId)
         continue;
       if (!record.pid) {
-        record.status = "paused";
-        record.pauseKind = "failure";
+        transition(record, "paused", "failure");
         record.reason =
           "Prior run has no child identity; inspect and retry explicitly";
         continue;
@@ -604,8 +621,7 @@ export async function serve(
         );
       delete record.pid;
       delete record.processGroupId;
-      record.status = "paused";
-      record.pauseKind = "failure";
+      transition(record, "paused", "failure");
       record.reason =
         "Prior run interrupted; inspect worktree and retry explicitly";
     }
@@ -675,12 +691,19 @@ export async function serve(
           delete record.processGroupId;
         }
       }
+      const queuedFiles = (await readdir(commandsDir)).filter((f) =>
+        /^[a-f0-9-]{36}\.json$/.test(f),
+      );
+      // A command file whose id is already recorded was consumed: a writer
+      // that raced the unlink (an exclusive create after consumption) must
+      // not leave a file that is never read again. Also covers a crash
+      // between recording the id and removing the file.
+      const consumed = new Set(state.commands);
+      for (const f of queuedFiles)
+        if (consumed.has(f)) await unlink(join(commandsDir, f)).catch(() => {});
       const pendingCommands = await Promise.all(
-        (await readdir(commandsDir))
-          .filter(
-            (f) =>
-              /^[a-f0-9-]{36}\.json$/.test(f) && !state.commands.includes(f),
-          )
+        queuedFiles
+          .filter((f) => !consumed.has(f))
           .map(async (file) => ({
             file,
             value: await read<unknown>(join(commandsDir, file), null)
@@ -722,14 +745,7 @@ export async function serve(
             (task ? `[task:${task}] ${text}` : text).slice(0, 32768),
           ].slice(-100);
         };
-        const scope: ControlLogEntry["scope"] = c.all
-          ? "instance"
-          : c.run
-            ? "run"
-            : c.task
-              ? "task"
-              : "lane";
-        const target = c.all ? "all" : (c.run ?? c.task ?? lane ?? null);
+        const { scope, target } = controlSubject(c);
         let outcome: ControlLogEntry["outcome"] = "invalid";
         let code = "INVALID";
         const currentGeneration = c.generation
@@ -781,9 +797,8 @@ export async function serve(
                 record.pauseKind === "operator" ||
                 record.reason === "Operator hold"
               ) {
-                record.status = "idle";
+                transition(record, "idle", null, false);
                 record.noProgress = 0;
-                delete record.pauseKind;
                 bump(record.lane);
               }
             outcome = "applied";
@@ -796,9 +811,8 @@ export async function serve(
                 record.pauseKind === "operator" ||
                 record.reason === "Operator hold"
               ) {
-                record.status = "idle";
+                transition(record, "idle", null, false);
                 record.noProgress = 0;
-                delete record.pauseKind;
               }
             bump(lane);
             outcome = wasHeld || laneRecords.length ? "applied" : "noop";
@@ -942,9 +956,8 @@ export async function serve(
                 note: (c.text ?? "").slice(0, 32768),
               };
               delete targetRecord.sessionId;
-              targetRecord.status = "idle";
+              transition(targetRecord, "idle", null, false);
               targetRecord.noProgress = 0;
-              delete targetRecord.pauseKind;
               delete targetRecord.pauseId;
               targetRecord.reason = "Operator requested a fresh native session";
               bump(lane);
@@ -983,9 +996,8 @@ export async function serve(
                   record.status === "paused" &&
                   ["failure", "no-progress"].includes(record.pauseKind ?? "")
                 ) {
-                  record.status = "idle";
+                  transition(record, "idle", null, false);
                   record.noProgress = 0;
-                  delete record.pauseKind;
                   delete record.pauseId;
                 }
               }
@@ -1017,9 +1029,8 @@ export async function serve(
               code = "NOTHING_TO_RECOVER";
             } else {
               for (const record of recoverable) {
-                record.status = "idle";
+                transition(record, "idle", null, false);
                 record.noProgress = 0;
-                delete record.pauseKind;
                 delete record.pauseId;
               }
               bump(lane);
@@ -1046,9 +1057,8 @@ export async function serve(
           else if (c.expectRev !== undefined && c.expectRev !== revision(lane))
             code = "STALE_REVISION";
           else {
-            targetRecord.status = "idle";
+            transition(targetRecord, "idle", null, false);
             targetRecord.noProgress = 0;
-            delete targetRecord.pauseKind;
             delete targetRecord.pauseId;
             bump(lane);
             queueNote(
@@ -1238,8 +1248,7 @@ export async function serve(
                   occupiedTaskScope(board, r.task, work.task))),
           );
           if (prior?.pid || prior?.processGroupId || prior?.cleanupUnverified) {
-            prior.status = "paused";
-            prior.pauseKind = "failure";
+            transition(prior, "paused", "failure");
             prior.reason =
               "Prior process ownership unverified; inspect before retry";
             continue;
@@ -1248,14 +1257,13 @@ export async function serve(
           try {
             cwd = await workdir(work, board, config);
           } catch {
-            state.records[work.key] = {
+            const failed: RecordState = {
               ...state.records[work.key],
               key: work.key,
               lane: work.lane,
               task: work.task,
               cwd: state.records[work.key]?.cwd ?? "",
-              status: "paused",
-              pauseKind: "failure",
+              status: "idle",
               reason:
                 "Task checkout/setup validation failed; inspect ownership before retry",
               seen: state.records[work.key]?.seen ?? [],
@@ -1265,6 +1273,8 @@ export async function serve(
               outputTokens: state.records[work.key]?.outputTokens ?? 0,
               finishedAt: new Date().toISOString(),
             };
+            transition(failed, "paused", "failure");
+            state.records[work.key] = failed;
             await save();
             continue;
           }
@@ -1297,8 +1307,7 @@ export async function serve(
             outputTokensKnown: false,
           };
           if (old?.cwd && old.cwd !== cwd) {
-            record.status = "paused";
-            record.pauseKind = "failure";
+            transition(record, "paused", "failure");
             record.reason =
               "Native session checkout changed; inspect before retry";
             await save();
@@ -1311,8 +1320,7 @@ export async function serve(
             ((old.harness ?? "codex") !== laneHarness ||
               old.sessionEpoch !== sessionEpoch)
           ) {
-            record.status = "paused";
-            record.pauseKind = "failure";
+            transition(record, "paused", "failure");
             record.reason =
               "Native session harness/epoch changed; inspect before retry";
             await save();
@@ -1347,8 +1355,7 @@ export async function serve(
             );
             promptText = await prompt(work, config, notes, adapter, board);
           } catch (error) {
-            record.status = "paused";
-            record.pauseKind = "failure";
+            transition(record, "paused", "failure");
             record.reason =
               `Native prompt preparation failed: ${error instanceof Error ? error.message : "inspect configuration"}`.slice(
                 0,
@@ -1361,8 +1368,7 @@ export async function serve(
             continue;
           }
           record.cwd = cwd;
-          record.status = "running";
-          bumpLane(work.lane);
+          transition(record, "running");
           delete record.cancelRequested;
           delete record.pauseId;
           record.reason = work.reason;
@@ -1390,8 +1396,7 @@ export async function serve(
               harness: record.harness ?? "codex",
             });
           } catch {
-            record.status = "paused";
-            record.pauseKind = "failure";
+            transition(record, "paused", "failure");
             delete record.runId;
             record.reason =
               "Operational trace storage unavailable; inspect private disk";
@@ -1439,8 +1444,7 @@ export async function serve(
               process.umask(previousMask);
             }
           } catch (error) {
-            record.status = "paused";
-            record.pauseKind = "failure";
+            transition(record, "paused", "failure");
             record.reason =
               "Native launch preparation failed; inspect storage and retry";
             record.finishedAt = new Date().toISOString();
@@ -1700,9 +1704,8 @@ export async function serve(
               record.noProgress = 0;
               record.waitingForEvent = false;
               record.progress = after;
-              record.pauseKind = "decision";
               record.pauseId ??= randomUUID();
-              record.status = "paused";
+              transition(record, "paused", "decision");
               record.reason = `Advisory output recorded; operator review required: ${final.summary.slice(0, 500)}`;
               await trace.finish("finished", final.state);
               console.log(
@@ -1753,23 +1756,23 @@ export async function serve(
               record.finalState = final.state;
               markSeen(record, work, board);
             }
-            if (deniedReady || budgetPause) record.pauseKind = "failure";
-            else if (pause)
-              record.pauseKind =
-                wait.reason === "operator"
-                  ? final && valid && final.state === "needs_operator"
-                    ? "decision"
-                    : "operator"
-                  : wait.reason === "no-progress"
-                    ? "no-progress"
-                    : "failure";
-            else delete record.pauseKind;
-            if (record.pauseKind === "decision" && !record.pauseId)
+            const kind: RecordState["pauseKind"] | null =
+              deniedReady || budgetPause
+                ? "failure"
+                : pause
+                  ? wait.reason === "operator"
+                    ? final && valid && final.state === "needs_operator"
+                      ? "decision"
+                      : "operator"
+                    : wait.reason === "no-progress"
+                      ? "no-progress"
+                      : "failure"
+                  : null;
+            if (kind === "decision" && !record.pauseId)
               record.pauseId = randomUUID();
             record.summary = valid ? final.summary : "";
-            record.status = pause ? "paused" : "idle";
+            transition(record, pause ? "paused" : "idle", kind);
             delete record.cancelRequested;
-            bumpLane(work.lane);
             record.reason =
               pause ?? (valid ? final.summary.slice(0, 500) : "Turn complete");
             await trace.finish(
@@ -1801,8 +1804,7 @@ export async function serve(
             finished = true;
             const completion = finish(code)
               .catch(async () => {
-                record.status = "paused";
-                record.pauseKind = "failure";
+                transition(record, "paused", "failure");
                 record.reason =
                   "Result handling failed; inspect controlled result and storage before retry";
                 record.finishedAt = new Date().toISOString();

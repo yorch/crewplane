@@ -6,13 +6,38 @@ import { probeProcess } from "../../liveness.ts";
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === "object" && !Array.isArray(v);
-// Persisted files are untrusted shapes: normalize the fields the projection indexes.
+// Persisted files are untrusted shapes: normalize every field the projection
+// and the controls read, so one missing or mistyped array can never take the
+// dashboard (or its controls, a halt included) down.
+const strings = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+const numbers = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((x): x is number => Number.isFinite(x)) : [];
 export function normalizeState(v: unknown): State | null {
   if (!isObject(v)) return null;
+  const records: Record<string, unknown> = {};
+  if (isObject(v.records))
+    for (const [key, record] of Object.entries(v.records))
+      if (isObject(record))
+        records[key] = {
+          ...record,
+          runs: numbers(record.runs),
+          seen: strings(record.seen),
+        };
+  const retired: Record<string, number[]> = {};
+  if (isObject(v.retiredRuns))
+    for (const [lane, runs] of Object.entries(v.retiredRuns))
+      retired[lane] = numbers(runs);
   return {
     ...v,
-    held: Array.isArray(v.held) ? v.held : [],
-    records: isObject(v.records) ? v.records : {},
+    held: strings(v.held),
+    commands: strings(v.commands),
+    controlLog: Array.isArray(v.controlLog)
+      ? v.controlLog.filter(isObject)
+      : undefined,
+    notices: isObject(v.notices) ? v.notices : {},
+    records,
+    ...(isObject(v.retiredRuns) ? { retiredRuns: retired } : {}),
   } as unknown as State;
 }
 export function normalizeConfig(v: unknown): Config | null {

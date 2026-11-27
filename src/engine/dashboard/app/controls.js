@@ -336,6 +336,9 @@ function openDialog(p, key) {
   if (d.open) return;
   returnKey = key;
   returnTo = document.activeElement;
+  // One id per dialog open: every submit from this dialog, including a retry
+  // after a network failure, carries it, so the server queues it at most once.
+  const requestId = newRequestId();
   const title = el("h2", p.title);
   title.id = "control-title";
   const effect = el("p", p.effect);
@@ -434,7 +437,7 @@ function openDialog(p, key) {
     confirm.disabled = true;
     confirm.setAttribute("aria-busy", "true");
     try {
-      const body = requestBody(p, form, newRequestId());
+      const body = requestBody(p, form, requestId);
       const response = await controlFetch(body);
       let answer = null;
       try {
@@ -446,8 +449,19 @@ function openDialog(p, key) {
       d.close();
       track(p, answer);
     } catch {
+      // The request may have reached the server before the connection failed.
+      // Look for the id in the control log before allowing another attempt.
+      error.textContent =
+        "The request may not have been queued. Checking the control log…";
+      error.hidden = false;
+      const entry = await recordedEntry(requestId);
+      if (entry) {
+        d.close();
+        track(p, { id: requestId, afterSeq: 0 });
+        return;
+      }
       fail(
-        "The dashboard could not be reached. Nothing was queued; try again.",
+        "The request may not have been queued: the dashboard did not answer, and the supervisor has not recorded it. Try again; the retry reuses this request's id, so it cannot be queued twice.",
         null,
       );
     } finally {
@@ -457,6 +471,21 @@ function openDialog(p, key) {
   });
   d.showModal();
   (note ?? ack ?? typed ?? cancel).focus();
+}
+
+/** The control-log entry for a request id, or null when none is recorded (or unreadable). */
+async function recordedEntry(id) {
+  try {
+    const response = await window.crewplaneFetch("/api/control-log?limit=200", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) return null;
+    const log = await response.json();
+    return log.entries.find((e) => e.id === id) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ---- Queued -> recorded outcome ----------------------------------------------

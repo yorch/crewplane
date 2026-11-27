@@ -56,7 +56,18 @@ it("pins what the operator saw and never sends the pins of other kinds", () => {
     action: "cancel",
     lane: "builder",
     run,
+    requestId: rid,
   });
+});
+
+it("carries the dialog's request id on every kind, halting ones included", () => {
+  for (const kind of kinds) {
+    const p = plan(kind, ctx);
+    expect(
+      requestBody(p, { ...filled, typed: p.confirmWord ?? "" }, rid),
+      kind,
+    ).toHaveProperty("requestId", rid);
+  }
 });
 
 it("requires the note, the acknowledgement and the typed word where the action does", () => {
