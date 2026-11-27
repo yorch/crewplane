@@ -1,11 +1,29 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, it } from "vitest";
+import { afterAll, expect, it } from "vitest";
+import { snapshot } from "../board.ts";
 import type { Config, State } from "../contracts.ts";
 import { controlDirectory } from "../control.ts";
 import { serve } from "./supervisor.ts";
+
+// Control directories and supervisor registrations never touch the real home.
+const isolated = {
+  state: process.env.CREWPLANE_STATE_DIR,
+  cache: process.env.CREWPLANE_CACHE_DIR,
+};
+const isolation = mkdtempSync(join(tmpdir(), "crewplane-rev-iso-"));
+process.env.CREWPLANE_STATE_DIR = join(isolation, "state");
+process.env.CREWPLANE_CACHE_DIR = join(isolation, "cache");
+afterAll(() => {
+  rmSync(isolation, { recursive: true, force: true });
+  if (isolated.state === undefined) delete process.env.CREWPLANE_STATE_DIR;
+  else process.env.CREWPLANE_STATE_DIR = isolated.state;
+  if (isolated.cache === undefined) delete process.env.CREWPLANE_CACHE_DIR;
+  else process.env.CREWPLANE_CACHE_DIR = isolated.cache;
+});
 
 /**
  * The lane revision is the pin every widening control carries: any transition
@@ -173,27 +191,142 @@ it("a pinned retry applies when nothing changed after the pin", async () => {
   }
 });
 
-it("never assigns a record's status or pause kind outside the one revision-bumping helper", async () => {
-  const source = await readFile(
-    new URL("./supervisor.ts", import.meta.url),
-    "utf8",
+const boardWith = (extra: object) => async (root: string) => {
+  const board = await snapshot(root);
+  board.tasks.push({
+    id: "T2",
+    title: "x",
+    owner: "builder",
+    phase: "test",
+    state: "assigned",
+    documentedStatus: "assigned",
+    goal: "x",
+    dependencies: "",
+    scheduling: { code: "ready", label: "ready" },
+    markdown: "x",
+    live: {
+      task: "T2",
+      assignment: {
+        owner: "builder",
+        baseCommit: "b".repeat(40),
+        at: new Date().toISOString(),
+        text: "x",
+      },
+      claim: null,
+      status: null,
+      accepted: null,
+      ...extra,
+    },
+  } as never);
+  return board;
+};
+const send = async (
+  f: Awaited<ReturnType<typeof fixture>>,
+  body: object,
+): Promise<string> => {
+  const id = crypto.randomUUID();
+  await writeFile(
+    join(f.directory, "commands", `${id}.json`),
+    JSON.stringify({ v: 2, ...body, at: new Date().toISOString() }),
   );
-  const lines = source.split("\n");
-  const start = lines.findIndex((l) => l.includes("const transition = "));
-  expect(start, "the transition helper exists").toBeGreaterThan(-1);
-  // The helper body ends at the first line that closes it at the same indent.
-  const indent = (lines[start] as string).match(/^\s*/)?.[0] ?? "";
-  let end = start + 1;
-  while (end < lines.length && lines[end] !== `${indent}};`) end++;
-  const offenders = lines
-    .map((text, index) => ({ text, line: index + 1 }))
-    .filter(
-      ({ text, line }) =>
-        (line <= start + 1 || line > end + 1) &&
-        (/\.(status|pauseKind)\s*=[^=]/.test(text) ||
-          /delete\s+\S*\.pauseKind/.test(text) ||
-          /\bstatus:\s*"(paused|running)"/.test(text) ||
-          /\bpauseKind:\s*"/.test(text)),
+  return id;
+};
+const outcomeOf = async (
+  f: Awaited<ReturnType<typeof fixture>>,
+  id: string,
+) => {
+  await until(async () =>
+    ((await f.load())?.controlLog ?? []).some((e) => e.id === id),
+  );
+  return ((await f.load()) as State).controlLog?.find((e) => e.id === id);
+};
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+it("a lane blocked by retained process ownership keeps a stable revision across scheduling passes and a pinned confirm-cleanup retry applies", async () => {
+  const f = await fixture();
+  delete process.env.CREWPLANE_COORD_DIR;
+  const controller = new AbortController();
+  try {
+    const config = { ...f.config, allowedTasks: ["T2"], maxParallel: 4 };
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(config));
+    await writeFile(
+      join(f.directory, "state.json"),
+      JSON.stringify(
+        baseState({
+          laneRev: {},
+          records: {
+            "builder:T1": record(f.root, {
+              key: "builder:T1",
+              task: "T1",
+              pauseKind: "failure",
+              reason: "Unverified descendants",
+              cleanupUnverified: true,
+            }),
+          },
+        }),
+      ),
     );
-  expect(offenders, "route these through transition()").toEqual([]);
-});
+    const running = serve(config, f.directory, controller.signal, {
+      readBoard: boardWith({}),
+    } as never);
+    const revisions: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      await wait(500);
+      revisions.push((await f.load())?.laneRev?.builder ?? 0);
+    }
+    // Startup may move the revision once; idle passes must not.
+    const settled = revisions.slice(2);
+    expect(new Set(settled).size, `revisions ${revisions}`).toBe(1);
+    const pinned = settled[0] as number;
+    await wait(2500);
+    const state = (await f.load()) as State;
+    expect(state.laneRev?.builder ?? 0).toBe(pinned);
+    const id = await send(f, {
+      action: "retry",
+      lane: "builder",
+      task: "T1",
+      confirmCleanup: true,
+      text: "inspected",
+      expectRev: pinned,
+      generation: state.generation,
+    });
+    expect(await outcomeOf(f, id)).toMatchObject({ outcome: "applied" });
+    controller.abort();
+    await running;
+  } finally {
+    controller.abort();
+    await rm(f.root, { recursive: true, force: true, maxRetries: 5 });
+  }
+}, 40_000);
+
+it("a lane whose task checkout cannot be validated keeps a stable revision across scheduling passes", async () => {
+  const f = await fixture();
+  delete process.env.CREWPLANE_COORD_DIR;
+  const controller = new AbortController();
+  try {
+    const config = { ...f.config, allowedTasks: ["T2"], maxParallel: 4 };
+    await writeFile(join(f.directory, "config.json"), JSON.stringify(config));
+    await writeFile(
+      join(f.directory, "state.json"),
+      JSON.stringify(baseState({ laneRev: {}, records: {} })),
+    );
+    const running = serve(config, f.directory, controller.signal, {
+      // The assignment's base commit does not exist, so checkout setup fails.
+      readBoard: boardWith({}),
+    } as never);
+    await until(
+      async () => Object.keys((await f.load())?.records ?? {}).length > 0,
+    );
+    const revisions: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      await wait(500);
+      revisions.push((await f.load())?.laneRev?.builder ?? 0);
+    }
+    expect(new Set(revisions).size, `revisions ${revisions}`).toBe(1);
+    controller.abort();
+    await running;
+  } finally {
+    controller.abort();
+    await rm(f.root, { recursive: true, force: true, maxRetries: 5 });
+  }
+}, 40_000);

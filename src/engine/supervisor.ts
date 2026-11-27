@@ -565,10 +565,13 @@ export async function serve(
   };
   /**
    * The only place a record's status or pause kind changes. The lane revision
-   * is the pin every widening control carries (`expectRev`), so each
-   * transition moves it unless the caller bumps it itself after a batch
-   * (`bump: false`, used by the control handlers). `pauseKind` `undefined`
-   * keeps the current kind, `null` clears it.
+   * is the pin every widening control carries (`expectRev`): it moves exactly
+   * when a record's status or pause kind actually changes, so re-asserting the
+   * state a record already has (a scheduling pass that re-pauses a lane still
+   * blocked by retained ownership) never invalidates an operator's pin. The
+   * control handlers pass `bump: false` and bump once per batch themselves.
+   * `pauseKind` `undefined` keeps the current kind, `null` clears it; an absent
+   * kind and a cleared kind are the same state.
    */
   const transition = (
     record: RecordState,
@@ -576,10 +579,15 @@ export async function serve(
     pauseKind?: RecordState["pauseKind"] | null,
     bump = true,
   ) => {
+    const before = { status: record.status, pauseKind: record.pauseKind };
     record.status = status;
     if (pauseKind === null) delete record.pauseKind;
     else if (pauseKind !== undefined) record.pauseKind = pauseKind;
-    if (bump) bumpLane(record.lane);
+    const changed =
+      before.status !== record.status ||
+      (before.pauseKind ?? null) !== (record.pauseKind ?? null);
+    if (bump && changed) bumpLane(record.lane);
+    return changed;
   };
   const save = () => {
     state.checkedAt = new Date().toISOString();
@@ -797,24 +805,25 @@ export async function serve(
                 record.pauseKind === "operator" ||
                 record.reason === "Operator hold"
               ) {
-                transition(record, "idle", null, false);
+                const changed = transition(record, "idle", null, false);
                 record.noProgress = 0;
-                bump(record.lane);
+                if (changed) bump(record.lane);
               }
             outcome = "applied";
             code = "RELEASED";
           } else if (lane && laneKnown) {
             const wasHeld = state.held.includes(lane);
             state.held = state.held.filter((l) => l !== lane);
+            let moved = wasHeld;
             for (const record of laneRecords)
               if (
                 record.pauseKind === "operator" ||
                 record.reason === "Operator hold"
               ) {
-                transition(record, "idle", null, false);
+                if (transition(record, "idle", null, false)) moved = true;
                 record.noProgress = 0;
               }
-            bump(lane);
+            if (moved) bump(lane);
             outcome = wasHeld || laneRecords.length ? "applied" : "noop";
             code = "RELEASED";
           } else code = "UNKNOWN_TARGET";
@@ -834,8 +843,10 @@ export async function serve(
                 !children.has(record.key)
               )
                 continue;
-              record.cancelRequested = true;
-              bump(record.lane);
+              if (!record.cancelRequested) {
+                record.cancelRequested = true;
+                bump(record.lane);
+              }
               const pid = record.processGroupId ?? record.pid;
               if (pid)
                 try {
@@ -882,8 +893,10 @@ export async function serve(
             code = "RUN_NOT_ACTIVE";
           } else {
             for (const record of matches) {
-              record.cancelRequested = true;
-              bump(record.lane);
+              if (!record.cancelRequested) {
+                record.cancelRequested = true;
+                bump(record.lane);
+              }
               const pid = record.processGroupId ?? record.pid;
               if (pid)
                 try {
@@ -1263,7 +1276,8 @@ export async function serve(
               lane: work.lane,
               task: work.task,
               cwd: state.records[work.key]?.cwd ?? "",
-              status: "idle",
+              // Keeps the stored status so re-failing is not a change.
+              status: state.records[work.key]?.status ?? "idle",
               reason:
                 "Task checkout/setup validation failed; inspect ownership before retry",
               seen: state.records[work.key]?.seen ?? [],

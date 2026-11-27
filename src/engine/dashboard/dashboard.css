@@ -1562,6 +1562,29 @@ details.info p {
   background: #a1281d;
   color: #ffffff;
 }
+.instance-hold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.instance-hold-text {
+  flex: 1 1 100%;
+  margin: 0;
+}
+.instance-hold-command {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
 .control-actions {
   display: flex;
   flex-wrap: wrap;

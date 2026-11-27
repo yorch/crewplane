@@ -25,6 +25,9 @@ import { serve } from "./supervisor.ts";
 const previousState = process.env.CREWPLANE_STATE_DIR;
 const stateBase = mkdtempSync(join(tmpdir(), "crewplane-verbs-state-"));
 process.env.CREWPLANE_STATE_DIR = stateBase;
+// Updater caches and supervisor registrations stay out of the real home too.
+const previousCache = process.env.CREWPLANE_CACHE_DIR;
+process.env.CREWPLANE_CACHE_DIR = join(stateBase, "cache");
 const root = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-verbs-")));
 const controls = { token: "22222222-2222-4222-8222-222222222222" };
 const session = { token: newSessionToken() };
@@ -144,6 +147,8 @@ afterAll(async () => {
   rmSync(stateBase, { recursive: true, force: true });
   if (previousState === undefined) delete process.env.CREWPLANE_STATE_DIR;
   else process.env.CREWPLANE_STATE_DIR = previousState;
+  if (previousCache === undefined) delete process.env.CREWPLANE_CACHE_DIR;
+  else process.env.CREWPLANE_CACHE_DIR = previousCache;
 });
 
 // [name, dashboard request, the CLI command line for the same intent]
@@ -771,6 +776,60 @@ describe("replay and rate limit", () => {
         writeFileSync(join(dir, "commands", `${uuid()}.json`), "{}");
       now += 61_000;
       const full = await send();
+      expect(full.status).toBe(429);
+      expect(((await full.json()) as { code: string }).code).toBe("QUEUE_FULL");
+    } finally {
+      await new Promise<void>((resolve) => limited.close(() => resolve()));
+    }
+  });
+  it("a flood of pending halts never makes a widening verb QUEUE_FULL, while widening files still do", async () => {
+    clear();
+    const limited = createDashboard(root, {
+      controls,
+      session,
+      controlGuard: { perMinute: 1000, maxPending: 3 },
+    });
+    await new Promise<void>((resolve) =>
+      limited.listen(0, "127.0.0.1", resolve),
+    );
+    const address = limited.address();
+    if (!address || typeof address === "string") throw new Error("No port");
+    const base = `http://127.0.0.1:${address.port}`;
+    const nudge = () =>
+      fetch(`${base}/api/control`, {
+        method: "POST",
+        headers: { ...headers(), origin: base },
+        body: JSON.stringify({
+          action: "nudge",
+          lane: "builder",
+          text: "n",
+          requestId: uuid(),
+        }),
+      });
+    try {
+      for (let i = 0; i < 6; i++)
+        writeFileSync(
+          join(dir, "commands", `${uuid()}.json`),
+          JSON.stringify({
+            v: 2,
+            action: "pause",
+            lane: `halt${i}`,
+            at: new Date().toISOString(),
+          }),
+        );
+      expect((await nudge()).status).toBe(200);
+      for (let i = 0; i < 2; i++)
+        writeFileSync(
+          join(dir, "commands", `${uuid()}.json`),
+          JSON.stringify({
+            v: 2,
+            action: "nudge",
+            lane: "builder",
+            text: "n",
+            at: new Date().toISOString(),
+          }),
+        );
+      const full = await nudge();
       expect(full.status).toBe(429);
       expect(((await full.json()) as { code: string }).code).toBe("QUEUE_FULL");
     } finally {

@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { plannedTasks, snapshot } from "../board.ts";
@@ -40,6 +40,7 @@ import {
   isHalting,
   parseControlRequest,
   pendingDuplicate,
+  pendingWidening,
   sameRecordedSubject,
   wideningVerbs,
 } from "./dashboard/controls.ts";
@@ -327,16 +328,23 @@ export function createDashboard(
         if (halting) {
           // Halting is never refused: no rate limit, no queue cap. It is
           // idempotent, so a repeat of a still-pending halt adds no file.
-          const duplicate = await pendingDuplicate(directory, value);
+          const duplicate = await pendingDuplicate(
+            directory,
+            value,
+            runtime.state?.commands ?? [],
+          );
           if (duplicate) {
             const result = answer(true, afterSeq, liveness(), duplicate);
             guard.remember(id, print, result);
             return reply(200, result);
           }
         } else {
-          const pending = (await readdir(directory)).filter((name) =>
-            name.endsWith(".json"),
-          ).length;
+          // Halting files do not count: they are never refused, so they must
+          // not be able to fill the cap and block recovery.
+          const pending = await pendingWidening(
+            directory,
+            runtime.state?.commands ?? [],
+          );
           if (pending >= guard.maxPending)
             return reply(
               429,

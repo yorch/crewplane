@@ -1155,7 +1155,7 @@ async function main() {
     output(
       `Crewplane dashboard: http://127.0.0.1:${port}/#token=${session.token}${
         controls
-          ? `\nControls enabled: send x-crewplane-token: ${controls.token} from an exact Origin\nControls URL (operator access; treat like a password): http://127.0.0.1:${port}/#token=${session.token}&controls=${controls.token}`
+          ? `\nControls enabled: POST /api/control from an exact Origin with both headers (both are required):\n  x-crewplane-token: ${controls.token}\n  x-crewplane-session: ${session.token}\nControls URL (operator access; treat like a password): http://127.0.0.1:${port}/#token=${session.token}&controls=${controls.token}`
           : ""
       }`,
     );

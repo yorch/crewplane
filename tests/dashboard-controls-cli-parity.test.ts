@@ -1,4 +1,9 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+  type ChildProcess,
+  execFileSync,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -27,8 +32,13 @@ import { cacheDirectory } from "../src/update.ts";
 const base = realpathSync(mkdtempSync(join(tmpdir(), "crewplane-parity-")));
 const previous = {
   state: process.env.CREWPLANE_STATE_DIR,
+  cache: process.env.CREWPLANE_CACHE_DIR,
 };
 process.env.CREWPLANE_STATE_DIR = join(base, "state");
+// Supervisor registrations (the fake supervisor below writes one) and every
+// updater cache file land here, never in the real home directory. The CLI
+// children inherit it through `env`.
+process.env.CREWPLANE_CACHE_DIR = join(base, "cache");
 const root = join(base, "project");
 const store = join(root, ".crewplane-state");
 const legacy = join(store, "supervisor");
@@ -42,6 +52,13 @@ const env = {
   CREWPLANE_NO_AUTO_UPDATE: "1",
   CREWPLANE_RELEASES_DIR: join(base, "releases-absent"),
 };
+/** Every fake supervisor started, so a timed-out scenario cannot leak one. */
+const children = new Set<ChildProcess>();
+const killChildren = () => {
+  for (const child of children) child.kill("SIGKILL");
+  children.clear();
+};
+process.once("exit", killChildren);
 let control = "";
 let server: ReturnType<typeof createDashboard>;
 let url = "";
@@ -80,6 +97,7 @@ async function fakeSupervisor() {
   mkdirSync(join(script, ".."), { recursive: true });
   writeFileSync(script, "setInterval(() => {}, 1e9);\n");
   const child = spawn("bun", [script, "start"], { stdio: "ignore" });
+  children.add(child);
   await new Promise((r) => setTimeout(r, 400));
   const pid = child.pid as number;
   const file = join(cacheDirectory(), "supervisors", `${pid}.json`);
@@ -92,7 +110,8 @@ async function fakeSupervisor() {
     pid,
     stop: () => {
       rmSync(file, { force: true });
-      child.kill();
+      child.kill("SIGKILL");
+      children.delete(child);
     },
   };
 }
@@ -135,10 +154,13 @@ beforeAll(async () => {
   url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 afterAll(async () => {
+  killChildren();
   await new Promise<void>((r) => server.close(() => r()));
   rmSync(base, { recursive: true, force: true });
   if (previous.state === undefined) delete process.env.CREWPLANE_STATE_DIR;
   else process.env.CREWPLANE_STATE_DIR = previous.state;
+  if (previous.cache === undefined) delete process.env.CREWPLANE_CACHE_DIR;
+  else process.env.CREWPLANE_CACHE_DIR = previous.cache;
 });
 
 const post = async (body: unknown) => {
@@ -257,7 +279,9 @@ const verbs: Array<[string, string[], Record<string, unknown>, boolean]> = [
   ],
 ];
 
-const scenarios: Array<[string, boolean, () => Promise<() => void>]> = [
+const scenarios: Array<
+  [string, boolean, () => Promise<() => void>, string[]?]
+> = [
   ["no legacy layout", true, async () => () => {}],
   [
     "legacy layout, live private supervisor",
@@ -276,6 +300,33 @@ const scenarios: Array<[string, boolean, () => Promise<() => void>]> = [
       writeFileSync(join(legacy, "state.json"), JSON.stringify(validState()));
       return () => rmSync(legacy, { recursive: true, force: true });
     },
+  ],
+  [
+    // The legacy state claims a fresh heartbeat but its pid is no registered
+    // supervisor: the CLI cannot tell a live older release from a stale file,
+    // so halting verbs go to the control directory and also to the legacy one.
+    "legacy layout, ambiguous (fresh heartbeat, unregistered pid)",
+    false,
+    async () => {
+      mkdirSync(join(legacy, "commands"), { recursive: true, mode: 0o700 });
+      writeFileSync(
+        join(legacy, "state.json"),
+        JSON.stringify(
+          validState({
+            running: true,
+            checkedAt: new Date().toISOString(),
+            pid: 2 ** 22 + 12345,
+          }),
+        ),
+      );
+      return () => rmSync(legacy, { recursive: true, force: true });
+    },
+    [
+      "pause lane: 1c/1l",
+      "pause all: 1c/1l",
+      "stop: 1c/1l",
+      "cancel run: 1c/1l",
+    ],
   ],
   [
     "legacy layout with a live older-release supervisor",
@@ -297,7 +348,7 @@ const scenarios: Array<[string, boolean, () => Promise<() => void>]> = [
 
 describe.each(scenarios)(
   "CLI and dashboard agree: %s",
-  (_name, alive, setup) => {
+  (_name, alive, setup, mirrored) => {
     it("accepts, refuses and queues identically for every verb", async () => {
       const teardown = await setup();
       const seen: string[] = [];
@@ -351,6 +402,9 @@ describe.each(scenarios)(
       }
       // The scenario must actually exercise what it claims to.
       expect(seen.length).toBeGreaterThan(0);
+      // The ambiguous branch queues every halting verb in both directories
+      // and refuses every widening one; pin it so it cannot silently change.
+      if (mirrored) expect(seen).toEqual(mirrored);
     }, 120000);
   },
 );

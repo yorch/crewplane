@@ -22,6 +22,8 @@ export default defineConfig({
     },
   ],
   test: {
+    // Fails the run if it changed the real state or cache directories.
+    globalSetup: ["tests/support/home-guard.ts"],
     include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
     // Keep updater caches and supervisor registrations out of $HOME.
     env: {

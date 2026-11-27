@@ -2,6 +2,7 @@ import { agentRecords } from "./agents.js";
 import { badge, healthBadge, processBadge, taskBadge } from "./badges.js";
 import { decisionBlock } from "./controls.js";
 import { el, emptyState, firstLine, link } from "./dom.js";
+import { instanceHoldNotice } from "./hold-notice.js";
 import { stateLabels, stateTones } from "./labels.js";
 import { agentLink, taskLink, taskTitle } from "./links.js";
 import { hrefFor } from "./route.js";
@@ -233,6 +234,8 @@ function renderHealthSummary() {
     : (headless?.held ?? []);
   const nodes = [list];
   if (held.length) nodes.push(el("p", `Held: ${held.join(", ")}`, "note"));
+  const notice = instanceHoldNotice(headless);
+  if (notice) nodes.push(notice);
   $("health-summary").replaceChildren(...nodes);
 }
 function renderTaskSummary() {

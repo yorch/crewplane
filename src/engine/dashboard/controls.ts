@@ -466,49 +466,146 @@ export function controlsView(
   };
 }
 
-/** Pending duplicates are looked for among at most this many queue files. */
+/** Pending files are inspected for duplicates and for the cap up to this many. */
 const dedupeScanLimit = 1000;
+const queueName = /^[0-9a-f]{8}-[0-9a-f-]{27}\.json$/;
+interface PendingFile {
+  name: string;
+  value: Control;
+}
+/** Readable, valid pending commands in the order the supervisor consumes them. */
+async function readPending(
+  commandsDir: string,
+  consumed: ReadonlySet<string>,
+): Promise<{ files: PendingFile[]; unread: number }> {
+  let names: string[];
+  try {
+    names = (await readdir(commandsDir)).filter(
+      (n) => queueName.test(n) && !consumed.has(n),
+    );
+  } catch {
+    return { files: [], unread: 0 };
+  }
+  const files: PendingFile[] = [];
+  for (const name of names.slice(0, dedupeScanLimit)) {
+    try {
+      const text = await readFile(join(commandsDir, name), "utf8");
+      if (text.length > 8192) continue;
+      const value = control(JSON.parse(text));
+      if (value.action !== "invalid") files.push({ name, value });
+    } catch {
+      // Consumed or unreadable meanwhile; not a command.
+    }
+  }
+  files.sort(
+    (a, b) =>
+      (a.value.at ?? "").localeCompare(b.value.at ?? "") ||
+      a.name.localeCompare(b.name),
+  );
+  return { files, unread: Math.max(0, names.length - dedupeScanLimit) };
+}
 /**
- * The id of a still-pending halting command that already says the same thing,
- * so a repeated pause, stop or cancel adds no file: halting is idempotent, and
- * this bounds the disk a flood of halting requests can use without ever
- * refusing one. A pause matches by target; stop and cancel only count while
- * bound to the same supervisor generation (a restart makes the older one stale).
+ * Everything that makes two commands the same command. `at`, the issuer and
+ * the request id differ per request and say nothing about what is asked; a
+ * pause is not bound to a supervisor generation (a restart leaves it valid),
+ * every other command is.
+ */
+const identity = (c: Control) =>
+  JSON.stringify([
+    c.action,
+    c.lane ?? null,
+    c.task ?? null,
+    c.run ?? null,
+    c.all === true,
+    c.confirmCleanup === true,
+    c.newSession === true,
+    c.resolution ?? null,
+    c.pauseId ?? null,
+    c.cancelActive === true,
+    c.text ?? null,
+    c.expectRev ?? null,
+    c.expectRun ?? null,
+    c.expectSession ?? null,
+    c.action === "pause" ? null : (c.generation ?? null),
+  ]);
+/** Whether two commands act on a common scope (no lane means every lane). */
+const sharesScope = (a: Control, b: Control) =>
+  a.all === true || b.all === true || !a.lane || !b.lane || a.lane === b.lane;
+/**
+ * The id of a still-pending halting command that is the same command, so a
+ * repeated pause, stop or cancel adds no file: halting is idempotent, and this
+ * bounds the disk a flood of identical halting requests can use without ever
+ * refusing one. Three conditions keep it sound:
+ *
+ *  - identical means every field that matters, including the pinned revision
+ *    and run (a differently pinned command is a different command);
+ *  - a pending command of a different kind on an overlapping scope that the
+ *    supervisor would consume after the earlier file means the earlier file no
+ *    longer stands for this request (pause --all, resume --all, pause --all
+ *    must leave the second pause queued), so nothing is deduplicated onto it;
+ *  - a file whose id the supervisor already recorded as consumed is never a
+ *    candidate (it is about to be removed and would never be read again).
+ *
+ * Limits: the scan covers `dedupeScanLimit` files, and the check and the later
+ * exclusive write are not atomic, so two simultaneous identical requests can
+ * both queue (harmless: halting is idempotent).
  */
 export async function pendingDuplicate(
   commandsDir: string,
   value: Control,
+  consumed: Iterable<string> = [],
 ): Promise<string | null> {
   if (!isHalting(value.action)) return null;
-  const key = (c: Control) =>
-    JSON.stringify([
-      c.action,
-      c.lane ?? null,
-      c.run ?? null,
-      c.all === true,
-      c.action === "pause" ? null : (c.generation ?? null),
-    ]);
-  const wanted = key(value);
+  const { files } = await readPending(commandsDir, new Set(consumed));
+  const wanted = identity(value);
+  let found = -1;
+  for (let i = files.length - 1; i >= 0; i--)
+    if (identity((files[i] as PendingFile).value) === wanted) {
+      found = i;
+      break;
+    }
+  if (found < 0) return null;
+  const match = files[found] as PendingFile;
+  for (const later of files.slice(found + 1))
+    if (
+      identity(later.value) !== wanted &&
+      sharesScope(later.value, match.value)
+    )
+      return null;
+  return match.name.replace(/\.json$/, "");
+}
+
+/**
+ * How many pending files count against the cap on widening verbs. Halting
+ * commands are not counted: a flood of them (which is never refused) must not
+ * make the operator's recovery verbs fail with QUEUE_FULL. Files that cannot
+ * be read as a command, and any beyond the scan limit, count (conservative).
+ */
+export async function pendingWidening(
+  commandsDir: string,
+  consumed: Iterable<string> = [],
+): Promise<number> {
+  const set = new Set(consumed);
   let names: string[];
   try {
-    names = (await readdir(commandsDir))
-      .filter((n) => /^[0-9a-f]{8}-[0-9a-f-]{27}\.json$/.test(n))
-      .slice(0, dedupeScanLimit);
+    names = (await readdir(commandsDir)).filter(
+      (n) => n.endsWith(".json") && !set.has(n),
+    );
   } catch {
-    return null;
+    return 0;
   }
-  for (const name of names) {
+  let count = Math.max(0, names.length - dedupeScanLimit);
+  for (const name of names.slice(0, dedupeScanLimit)) {
     try {
       const text = await readFile(join(commandsDir, name), "utf8");
-      if (text.length > 8192) continue;
-      const existing = control(JSON.parse(text));
-      if (existing.action !== "invalid" && key(existing) === wanted)
-        return name.replace(/\.json$/, "");
+      const value = text.length > 8192 ? null : control(JSON.parse(text));
+      if (!value || value.action === "invalid" || !isHalting(value.action))
+        count++;
     } catch {
-      // Consumed or unreadable meanwhile; not a duplicate.
+      count++;
     }
   }
-  return null;
+  return count;
 }
 
 /**

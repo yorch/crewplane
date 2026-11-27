@@ -11,6 +11,7 @@ import {
   section,
 } from "./dom.js";
 import { clearButton, syncClear } from "./filters.js";
+import { instanceHoldNotice } from "./hold-notice.js";
 import { PROCESS_ORDER, progressLabels } from "./labels.js";
 import { taskLink } from "./links.js";
 import { hrefFor } from "./route.js";
@@ -130,6 +131,9 @@ export function renderAgents() {
   const budgets = headless?.budgets;
   $("agents-supervisor").textContent =
     `Supervisor ${headless?.state ?? "unknown"}${budgets ? ` · ${budgets.maxParallel} concurrent lanes · ${budgets.maxRunsPerHour} runs/lane/hour` : ""}`;
+  $("agents-hold").replaceChildren(
+    ...[instanceHoldNotice(headless)].filter(Boolean),
+  );
   const host = $("headless-lanes");
   if (!all.length) {
     host.replaceChildren(

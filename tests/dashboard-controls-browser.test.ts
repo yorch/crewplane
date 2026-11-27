@@ -30,6 +30,9 @@ import { createTraceStore } from "../src/engine/operational-traces.ts";
 const previousState = process.env.CREWPLANE_STATE_DIR;
 const stateBase = mkdtempSync(join(tmpdir(), "crewplane-controls-ui-state-"));
 process.env.CREWPLANE_STATE_DIR = stateBase;
+// Updater caches and supervisor registrations stay out of the real home too.
+const previousCache = process.env.CREWPLANE_CACHE_DIR;
+process.env.CREWPLANE_CACHE_DIR = join(stateBase, "cache");
 const run = "1794100000001-00000000-0000-4000-8000-000000000001";
 const decision = "00000000-0000-4000-8000-0000000000d1";
 const session = newSessionToken();
@@ -186,6 +189,8 @@ afterAll(async () => {
   rmSync(stateBase, { recursive: true, force: true });
   if (previousState === undefined) delete process.env.CREWPLANE_STATE_DIR;
   else process.env.CREWPLANE_STATE_DIR = previousState;
+  if (previousCache === undefined) delete process.env.CREWPLANE_CACHE_DIR;
+  else process.env.CREWPLANE_CACHE_DIR = previousCache;
 });
 
 async function open(base: string, fragment: string, view?: string) {
@@ -278,6 +283,50 @@ it("offers only the verbs that apply to each agent", async () => {
   await button(page, "Cancel run").waitFor();
   expect(await button(page, "Approve").count()).toBe(0);
   await page.close();
+});
+
+it("says on Overview, Agents and System that an instance hold is lifted from the CLI, with a copyable command", async () => {
+  const before = load();
+  save({ ...before, instanceHeld: true });
+  try {
+    // Read-only and controls-enabled pages both say it: lifting is CLI-only.
+    for (const [base, fragment] of [
+      [off, `token=${session}`],
+      [on, `token=${session}&controls=${controls.token}`],
+    ] as const) {
+      const { page, errors, posts } = await open(base, fragment);
+      for (const view of ["/", "/agents", "/system"]) {
+        await go(page, view);
+        const hint = page.locator(
+          `#view-${view === "/" ? "overview" : view.slice(1)} .instance-hold`,
+        );
+        await hint.waitFor({ timeout: 15000 });
+        expect(await hint.locator("code").textContent()).toBe(
+          "crewplane resume --all true",
+        );
+        expect(await hint.textContent()).toContain("cannot lift it");
+        await hint.getByRole("button", { name: "Copy command" }).click();
+        await hint
+          .locator("[role=status]")
+          .getByText(/Copied|copy it/)
+          .waitFor();
+      }
+      expect(posts).toEqual([]);
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+    // Without a hold there is no hint.
+    save({ ...before, instanceHeld: false });
+    const { page } = await open(off, `token=${session}`, "/agents");
+    await page
+      .locator("#agent-count")
+      .getByText(/agents/)
+      .waitFor();
+    expect(await page.locator(".instance-hold").count()).toBe(0);
+    await page.close();
+  } finally {
+    save(before);
+  }
 });
 
 it("shows decisions on Overview and Messages", async () => {
