@@ -31,9 +31,13 @@ import {
   evidenceTaskPattern,
 } from "./contract.ts";
 
+const rejection = "Evidence rejected";
 function fail(): never {
-  throw new Error("Evidence rejected");
+  throw new Error(rejection);
 }
+/** True for a request the store refused as invalid, as opposed to a read failure. */
+export const evidenceRejected = (error: unknown) =>
+  error instanceof Error && error.message === rejection;
 const id = (prefix: string) => `${prefix}_${randomUUID().replaceAll("-", "")}`;
 const validEvidenceId = (value: unknown, prefix: string): value is string =>
   typeof value === "string" &&

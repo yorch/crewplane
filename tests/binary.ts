@@ -588,9 +588,72 @@ try {
   const image = await dget(`/api/evidence/artifacts/${artifact.artifactId}`);
   assert.equal(image.headers.get("content-type"), "image/png");
   assert.deepEqual(Buffer.from(await image.arrayBuffer()), png);
+  assert.equal(
+    image.headers.get("content-security-policy"),
+    "default-src 'none'; sandbox",
+  );
+  assert.equal(image.headers.get("x-content-type-options"), "nosniff");
   assert.equal((await dget("/api/evidence/artifacts/not-an-id")).status, 404);
+  // Read-only phase-2 routes: session-gated, bounded and answered by the
+  // compiled executable with no access to source.
+  for (const path of [
+    "/api/config",
+    "/api/control-log",
+    "/api/usage",
+    "/api/evidence/artifacts",
+    "/api/events",
+  ])
+    assert.equal(
+      (await fetch(`http://127.0.0.1:${port}${path}`)).status,
+      401,
+      path,
+    );
+  const effective = (await (await dget("/api/config")).json()) as {
+    version: number;
+    lanes: unknown[];
+    binariesExecuted: boolean;
+  };
+  assert.equal(effective.version, 1);
+  assert(Array.isArray(effective.lanes));
+  assert.equal(effective.binariesExecuted, false);
+  const controlLog = (await (
+    await dget("/api/control-log?limit=5")
+  ).json()) as {
+    version: number;
+    entries: unknown[];
+  };
+  assert.equal(controlLog.version, 1);
+  assert(Array.isArray(controlLog.entries));
+  assert.equal((await dget("/api/control-log?limit=999")).status, 400);
+  const usage = (await (await dget("/api/usage")).json()) as {
+    window: { bucketStarts: string[] };
+    coverage: { ledger: { connected: boolean } };
+  };
+  assert.equal(usage.window.bucketStarts.length, 24);
+  assert.equal(usage.coverage.ledger.connected, false);
+  const gallery = (await (await dget("/api/evidence/artifacts")).json()) as {
+    artifacts: Array<{ id: string; sha256: string }>;
+  };
+  assert(gallery.artifacts.some((item) => item.id === artifact.artifactId));
+  const abort = new AbortController();
+  const live = await fetch(`http://127.0.0.1:${port}/api/events`, {
+    headers: { "x-crewplane-session": token },
+    signal: abort.signal,
+  });
+  assert.equal(live.status, 200);
+  assert.match(live.headers.get("content-type") ?? "", /^text\/event-stream/);
+  const reader = (live.body as ReadableStream<Uint8Array>).getReader();
+  let streamed = "";
+  while (!streamed.includes("event: snapshot\ndata: ")) {
+    const chunk = await reader.read();
+    assert(!chunk.done, "event stream ended before a snapshot");
+    streamed += new TextDecoder().decode(chunk.value);
+  }
+  assert(streamed.startsWith("retry: "));
+  // SIGTERM with the event stream still open must end the process.
   dashboard.kill("SIGTERM");
   await closed(dashboard);
+  abort.abort();
   command("watchdog", "once");
   assert.equal(JSON.parse(command("watchdog", "status")).recovery, "none");
   // Simulate a dead supervisor's persisted running-without-child state and lease.

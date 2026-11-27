@@ -8,13 +8,37 @@ import {
   controlDirectory,
   ensureControlDirectory,
 } from "../control.ts";
+import { sha256Hex } from "../hash.ts";
 import { publishJson } from "../io.ts";
-import { discoverProject, validId, validTaskId } from "../project.ts";
+import {
+  discoverProject,
+  projectPolicy,
+  validId,
+  validTaskId,
+} from "../project.ts";
 import { main as coordination } from "./agents.mjs";
 import { embeddedAssets } from "./assets.ts";
 import { control } from "./control-policy.ts";
+import { configView } from "./dashboard/config-view.ts";
+import {
+  controlLogView,
+  parseControlLogQuery,
+} from "./dashboard/control-log.ts";
+import {
+  evidenceArtifactHeaders,
+  evidenceArtifactList,
+  evidenceListDefaultLimit,
+  evidenceListMaxLimit,
+} from "./dashboard/evidence-view.ts";
+import {
+  createLiveHub,
+  type LiveTimers,
+  type SseSink,
+} from "./dashboard/live.ts";
+import { readRuntime } from "./dashboard/runtime-files.ts";
+import { type TraceCoverage, usageView } from "./dashboard/usage-view.ts";
 import { assetRoutes } from "./dashboard-assets.ts";
-import { createEvidenceStore } from "./evidence/store.ts";
+import { createEvidenceStore, evidenceRejected } from "./evidence/store.ts";
 import { validHarness } from "./harness.ts";
 import { createTraceStore, traceIdPattern } from "./operational-traces.ts";
 
@@ -53,6 +77,17 @@ export function createDashboard(
      * users.
      */
     session?: { token: string };
+    /** Live-update tuning; the defaults suit production, tests inject timers. */
+    live?: {
+      intervalMs?: number;
+      maxIntervalMs?: number;
+      heartbeatMs?: number;
+      maxClients?: number;
+      maxEventBytes?: number;
+      maxBufferedBytes?: number;
+      slowClientMs?: number;
+      timers?: LiveTimers;
+    };
   } = {},
 ) {
   const getTraces = lazyStore(async () =>
@@ -62,7 +97,24 @@ export function createDashboard(
     createEvidenceStore(join(await storeOf(root), "evidence")),
   );
   const routes = assetRoutes();
-  return createServer(async (request, response) => {
+  const unreadable =
+    "Could not read coordination data. Check task cards and local board, then retry.";
+  // One computation serves every event-stream client; it only runs while a
+  // client is connected. The hash ignores `updatedAt` so an unchanged board
+  // never produces a push.
+  const live = createLiveHub({
+    ...options.live,
+    errorMessage: unreadable,
+    compute: async () => {
+      const full = await snapshot(root);
+      const { updatedAt: _updatedAt, ...content } = full;
+      return {
+        hash: sha256Hex(JSON.stringify(content)),
+        data: JSON.stringify(full),
+      };
+    },
+  });
+  const server = createServer(async (request, response) => {
     const address = response.socket?.localPort;
     const expectedHost = `127.0.0.1:${address}`;
     response.setHeader("Cache-Control", "no-store");
@@ -185,49 +237,235 @@ export function createDashboard(
       return;
     }
     try {
+      if (request.url === "/api/events") {
+        const header = request.headers["last-event-id"];
+        if (!live.canAdd()) {
+          response
+            .writeHead(503, {
+              "Content-Type": "application/json; charset=utf-8",
+              "Retry-After": "5",
+            })
+            .end(
+              JSON.stringify({
+                error:
+                  "Too many live connections. Use /api/snapshot polling instead.",
+              }),
+            );
+          return;
+        }
+        request.socket.setTimeout(0);
+        request.socket.setNoDelay(true);
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-store, no-transform",
+          "X-Accel-Buffering": "no",
+        });
+        response.flushHeaders();
+        live.add(
+          response as unknown as SseSink,
+          typeof header === "string" ? header : undefined,
+        );
+        return;
+      }
+      if (request.url?.startsWith("/api/")) {
+        const url = new URL(request.url, `http://${expectedHost}`);
+        const json = (value: unknown, status = 200) => {
+          response.writeHead(status, {
+            "Content-Type": "application/json; charset=utf-8",
+          });
+          response.end(JSON.stringify(value));
+        };
+        if (url.pathname === "/api/config") {
+          if (url.search) return json({ error: "Invalid config request" }, 400);
+          const identity = discoverProject(root);
+          return json(
+            await configView(root, {
+              store: identity.store,
+              policy: projectPolicy(root),
+            }),
+          );
+        }
+        if (url.pathname === "/api/control-log") {
+          const query = parseControlLogQuery(url.searchParams);
+          if (!query)
+            return json({ error: "Invalid control-log request" }, 400);
+          return json(controlLogView((await readRuntime(root)).state, query));
+        }
+        if (url.pathname === "/api/usage") {
+          if (url.search) return json({ error: "Invalid usage request" }, 400);
+          const { state, config } = await readRuntime(root);
+          let traces: TraceCoverage | null = null;
+          try {
+            const store = await getTraces();
+            const runs: TraceCoverage["runs"] = [];
+            let before: string | undefined;
+            let retentionLimited = false;
+            let incomplete = false;
+            // Bounded: the trace store retains at most 40 runs, 20 per page.
+            for (let page = 0; page < 3; page++) {
+              const result = await store.list({
+                limit: 20,
+                ...(before ? { before } : {}),
+              });
+              retentionLimited ||= result.retentionLimited;
+              incomplete ||= result.incomplete;
+              runs.push(
+                ...result.runs.map((r) => ({
+                  lane: r.lane,
+                  startedAt: r.startedAt,
+                })),
+              );
+              if (!result.nextCursor) break;
+              before = result.nextCursor;
+              if (page === 2) incomplete = true;
+            }
+            traces = { runs, retentionLimited, incomplete };
+          } catch {
+            traces = null;
+          }
+          return json(usageView(state, config, traces));
+        }
+      }
       if (request.url === "/api/snapshot") {
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         response.end(JSON.stringify(await snapshot(root)));
         return;
       }
       if (request.url?.startsWith("/api/evidence")) {
-        const url = new URL(request.url, `http://${expectedHost}`);
-        const parts = url.pathname.split("/");
+        // Opening the store failing is a read failure (503), not a bad request.
         const store = await getEvidence();
-        let result: unknown;
-        if (url.pathname === "/api/evidence") {
-          const task = url.searchParams.get("task");
-          if (task && !validTaskId(task)) {
-            response.writeHead(400).end("Invalid task");
+        try {
+          const url = new URL(request.url, `http://${expectedHost}`);
+          const parts = url.pathname.split("/");
+          let result: unknown;
+          const listParams = (allowed: string[]) => {
+            for (const key of url.searchParams.keys())
+              if (!allowed.includes(key)) return false;
+            return allowed.every(
+              (key) => url.searchParams.getAll(key).length < 2,
+            );
+          };
+          const filters = () => {
+            const task = url.searchParams.get("task");
+            const run = url.searchParams.get("run");
+            const cursor = url.searchParams.get("cursor");
+            const rawLimit = url.searchParams.get("limit");
+            if (
+              (task && !validTaskId(task)) ||
+              (run !== null && !/^qa_[a-f0-9]{32}$/.test(run)) ||
+              (cursor !== null && !/^(?:qa|ev)_[a-f0-9]{32}$/.test(cursor)) ||
+              (rawLimit !== null && !/^\d{1,3}$/.test(rawLimit))
+            )
+              return null;
+            return {
+              task: task || undefined,
+              run: run ?? undefined,
+              cursor: cursor ?? undefined,
+              limit: rawLimit === null ? undefined : Number(rawLimit),
+            };
+          };
+          if (url.pathname === "/api/evidence") {
+            const f = listParams(["task", "run", "limit", "cursor"])
+              ? filters()
+              : null;
+            // Run pages are cursored by run id only.
+            if (
+              !f ||
+              (f.limit !== undefined && (f.limit < 1 || f.limit > 20)) ||
+              (f.cursor !== undefined && !f.cursor.startsWith("qa_"))
+            ) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            if (f.run) {
+              // A single run by id, in the list shape (task filter still applies).
+              const manifest = await store.manifest(f.run);
+              result = {
+                runs:
+                  manifest && (!f.task || manifest.task === f.task)
+                    ? [manifest]
+                    : [],
+                nextCursor: null,
+                retentionLimited: manifest?.truncated ?? false,
+              };
+            } else
+              result = await store.list({
+                ...(f.task ? { task: f.task } : {}),
+                ...(f.cursor ? { cursor: f.cursor } : {}),
+                ...(f.limit ? { limit: f.limit } : {}),
+              });
+          } else if (url.pathname === "/api/evidence/artifacts") {
+            const f = listParams(["task", "run", "limit", "cursor"])
+              ? filters()
+              : null;
+            if (
+              !f ||
+              (f.limit !== undefined &&
+                (f.limit < 1 || f.limit > evidenceListMaxLimit)) ||
+              (f.cursor !== undefined && !f.cursor.startsWith("ev_"))
+            ) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            // The store retains at most 20 runs, so one page covers them all.
+            const all = f.run
+              ? [await store.manifest(f.run)].filter(
+                  (m): m is NonNullable<typeof m> => m !== null,
+                )
+              : (await store.list({ ...(f.task ? { task: f.task } : {}) }))
+                  .runs;
+            const list = evidenceArtifactList(
+              all.filter((m) => !f.task || m.task === f.task),
+              {
+                limit: f.limit ?? evidenceListDefaultLimit,
+                ...(f.cursor ? { cursor: f.cursor } : {}),
+              },
+            );
+            if (!list) {
+              response.writeHead(400).end("Invalid request");
+              return;
+            }
+            result = list;
+          } else if (
+            parts.length === 5 &&
+            /^qa_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
+            parts[3] === "runs"
+          ) {
+            result = await store.manifest(parts[4] ?? "");
+          } else if (
+            parts.length === 5 &&
+            /^ev_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
+            parts[3] === "artifacts"
+          ) {
+            const artifact = await store.read(parts[4] ?? "");
+            if (!artifact) {
+              response.writeHead(404).end("Not found");
+              return;
+            }
+            response.writeHead(
+              200,
+              evidenceArtifactHeaders(
+                artifact.artifact.mime,
+                artifact.artifact.artifactId,
+                artifact.content.length,
+              ),
+            );
+            response.end(artifact.content);
             return;
-          }
-          result = await store.list(task ? { task } : {});
-        } else if (
-          parts.length === 5 &&
-          /^qa_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
-          parts[3] === "runs"
-        ) {
-          result = await store.manifest(parts[4] ?? "");
-        } else if (
-          parts.length === 5 &&
-          /^ev_[a-f0-9]{32}$/.test(parts[4] ?? "") &&
-          parts[3] === "artifacts"
-        ) {
-          const artifact = await store.read(parts[4] ?? "");
-          if (!artifact) {
+          } else {
             response.writeHead(404).end("Not found");
             return;
           }
-          response.setHeader("Content-Type", artifact.artifact.mime);
-          response.end(artifact.content);
+          response.setHeader("Content-Type", "application/json; charset=utf-8");
+          response.end(JSON.stringify(result));
           return;
-        } else {
-          response.writeHead(404).end("Not found");
+        } catch (error) {
+          // A request the store refuses (an unknown cursor, say) is the
+          // client's error everywhere; a failure to read is not.
+          if (!evidenceRejected(error)) throw error;
+          response.writeHead(400).end("Invalid request");
           return;
         }
-        response.setHeader("Content-Type", "application/json; charset=utf-8");
-        response.end(JSON.stringify(result));
-        return;
       }
       if (request.url?.startsWith("/api/runs")) {
         const url = new URL(request.url, `http://${expectedHost}`);
@@ -284,12 +522,19 @@ export function createDashboard(
       response.setHeader("Content-Type", `${route.type}; charset=utf-8`);
       response.end(embeddedAssets[route.name]);
     } catch {
-      response.writeHead(503, { "Content-Type": "application/json" }).end(
-        JSON.stringify({
-          error:
-            "Could not read coordination data. Check task cards and local board, then retry.",
-        }),
-      );
+      response
+        .writeHead(503, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ error: unreadable }));
     }
   });
+  // Event streams never end on their own: close them with the server, then
+  // let idle keep-alive connections go, so `close()` completes promptly.
+  const close = server.close.bind(server);
+  server.close = (callback) => {
+    live.close();
+    const result = close(callback);
+    server.closeIdleConnections();
+    return result;
+  };
+  return server;
 }

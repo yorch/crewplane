@@ -1,6 +1,6 @@
 # Dashboard design
 
-The dashboard is a read-only operations cockpit for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged (later hardening only adds a per-launch session header on `/api/*`; see docs/USAGE.md), and all displayed data comes from the existing `/api/snapshot` and `/api/runs` responses.
+The dashboard is a read-only operations cockpit for one Crewplane project. The redesign changes presentation, navigation and client-side state only. HTTP routes, the shared read model, polling endpoints and contracts are unchanged by the redesign itself (later hardening added a per-launch session header on `/api/*`; see docs/USAGE.md), and its views display data from `/api/snapshot` and `/api/runs`. The transport and read-only data routes added afterwards are described under Transport.
 
 ## Information architecture
 
@@ -32,8 +32,8 @@ Primary facts sit in lists and tables. Secondary metadata moves to a detail pane
 - Sidebar links remember each view's filters but not its open item, so a section link returns to the list.
 - Overview metrics and legends route to filtered views. Task, agent, thread and run links cross-navigate, and relationship selections open the matching view.
 - Open questions link to their real thread, including the original question and replies.
-- Polling re-renders only the active view and preserves filters, focus, expanded disclosures, and window and pane scroll. Static filter controls are never rebuilt while typing.
-- Connection state lives in the shell. A failed poll shows a banner that names the age of the retained snapshot, and data stays on screen.
+- Snapshot updates (live or polled) re-render only the active view and preserves filters, focus, expanded disclosures, and window and pane scroll. Static filter controls are never rebuilt while typing.
+- Connection state lives in the shell. A failed poll (or a stream error event) shows a banner that names the age of the retained snapshot, and data stays on screen.
 - Above 1100px, details sit beside the list. Below that, the detail replaces the list with a Back link. Below 860px, the sidebar becomes a top bar with a menu button. The board scrolls horizontally inside its own labelled region, and phones default to the list layout.
 - Accessibility: skip link, `aria-current`, focus moved to the view heading or detail heading on navigation, focus returned to the originating row on close, Escape closes panes and the mobile menu, visible focus, reduced-motion and forced-colors handling.
 - Plain labels. Task states read To do, Assigned, In progress, Blocked, Awaiting review and Completed ("Accepted" appears only where an acceptance record exists, such as the task detail). The status filter offers "Blocked or awaiting review" for `state=attention`; filter values and URL parameters are unchanged, so existing links keep working.
@@ -47,6 +47,17 @@ Primary facts sit in lists and tables. Secondary metadata moves to a detail pane
 - Messages: the "show older messages" limit resets whenever the search, agent or phase filter changes. The Agent filter keeps the accessible name "Agent" and its help text ("Also shows messages sent to everyone") is attached with `aria-describedby`.
 - Relationships: the live status line stays short ("12 nodes, 9 relationships"); coverage, truncation and missing-reference detail sits in a static paragraph linked from the filter input with `aria-describedby`.
 
+## Transport
+
+Snapshots reach the page by one of two transports, and the page always works with the weaker one.
+
+- **Live (preferred).** `app/live.js` reads `GET /api/events` with `fetch()` and a `ReadableStream` (`EventSource` cannot send the `x-crewplane-session` header; the token never goes in a URL). `app/live-core.js` holds the pure parts, an incremental `text/event-stream` parser and the backoff function, which are unit tested. Events: `snapshot` (the `/api/snapshot` body, sent when its content hash changes and it is at most `MAX_EVENT_BYTES`, 8 MiB), `resync` (no data: the board is too large to push, so the page stays on the stream, keeps polling and shows "polling" until a snapshot fits), `error` (the same safe message `/api/snapshot` returns with 503; the stream stays open) and `ping` (a heartbeat every 15 seconds carrying the time of the last successful read, plus the id and kind of the current event). The pure event rules live in `createLiveSession` (`app/live-core.js`, unit tested): the page is `live` only after a snapshot rendered or a ping confirms the rendered one, an event that failed to render is not remembered (reconnect without `Last-Event-ID`, banner kept, pings cannot clear it), and `lastEventId` advances only for handled events. A stream silent for 45 seconds, any non-200 or non-`text/event-stream` answer, a malformed event, a render failure or a network failure ends it.
+- **Polling (fallback).** The unchanged 5-second `/api/snapshot` poll. It runs whenever `store.mode` is not `live`, takes over within one 5-second tick when a live stream drops, and the retained-snapshot banner, "Disconnected" status and "Retrying every 5s" text are exactly as before. Reconnection to the stream uses exponential backoff from 1s capped at 60s with +-25% jitter, reset only after a snapshot was rendered or the stream stayed up 30 seconds (never by a connection or a ping), and an immediate poll after a drop happens only for such a stable stream, so a flapping connection cannot turn into a request per drop. A poll that began before a pushed snapshot was applied is discarded (sequence numbers in `store.applied`), and returning to a visible tab polls only when the page is not live. A tab hidden for 30 seconds aborts its stream (indicator `polling`) and reopens it with an immediate refresh when shown, freeing one of the 8 server slots. Tests inject short timings through `window.crewplaneLiveTuning` (clamped values for backoff, grace and stability), so no test waits for a production backoff. A refused ninth stream (`503`) simply stays on polling.
+- **Server.** One shared computation (`dashboard/live.ts`), run sequentially about every second only while a client is connected and hashed without `updatedAt`, fans out to at most 8 clients. Event ids are `<boot>-<n>`; `Last-Event-ID` avoids re-sending an unchanged snapshot after a reconnect. The next computation waits `max(1s, 5 x the last computation)` up to 30s; no cheaper change signal is used because none is sound (directory mtimes miss in-place edits). A computation that spans the last client leaving is discarded, so a late joiner is never given a pre-idle snapshot. A client that is behind gets only the latest event, so at most one event is unflushed per client; the unflushed-bytes limit (16 MiB) is checked before and after every write, and a client blocked for 10 seconds is closed. Closing the server destroys every stream and clears every timer.
+- **Indicator.** `#connection` keeps "Live" / "Disconnected"; `#connection-time` reads "Checked 10:00:01 · live updates" or "Checked 10:00:01 · polling", and `#connection-wrap` carries `data-mode="live|polling"`.
+
+The data routes `/api/config` (effective caps from one source, loaded values labelled beside them; at most 64 lanes inspected), `/api/control-log`, `/api/usage` (series buckets are `null` until a retained run predates them; the global run cap is a per-lane default) and the evidence list and artifact-metadata routes exist for later views (setup and configuration, control audit, usage, evidence gallery); this phase adds no view for them. All are authenticated `GET` projections; see docs/CONTRACTS.md. An evidence gallery has to fetch artifacts with the session header and show them from `blob:` URLs, which needs `img-src` and `media-src` to admit `blob:` in the page CSP: a deliberate, separate decision.
+
 ## Safe client state
 
 Hash values are parsed with `URLSearchParams`, restricted to a per-view allowlist, checked against enumerations where applicable, and length-limited. Unknown views fall back to Overview. Untrusted text is rendered only through `textContent`; the dashboard does not use `innerHTML`. `localStorage` holds only the board/list preference. `sessionStorage` holds, besides the per-launch session, one small reload record (see Reload persistence). Both are validated on read and optional.
@@ -59,16 +70,16 @@ A full page reload (or history traversal back to the page) restores, once, after
 
 `index.html` loads `dashboard.js` as `<script type="module">`, so the page needs no inline script and the content security policy (`script-src 'self'`) is unchanged. `dashboard.js` is only the entry: it wires the modules below and starts polling. Modules live in `app/` and import each other with relative specifiers; there are no import cycles. Lower layers reach the renderer through late-bound hooks in `store.js` (`render`, `commitSnapshot`, and `afterGraphs`, which runs after the graph event and performs the one-time reload restore) instead of importing it.
 
-| Layer         | Modules                                                                                                              |
-| ------------- | -------------------------------------------------------------------------------------------------------------------- |
-| State         | `store.js` (shared state, hooks, media queries), `config.js` (routes and allowlists), `labels.js` (labels and tones) |
-| Routing       | `route.js` (pure hash parsing, `hrefFor`, scroll keys), `router.js` (history, filter memory, nav links)              |
-| Data          | `api.js` (session token, authenticated fetch, polling, retained-snapshot banner)                                     |
-| DOM helpers   | `dom.js`, `badges.js`, `time.js` (formatter and relative times), `links.js`                                          |
-| Rendering     | `render.js` (view dispatch and nav counts), `ui-state.js` (focus, disclosure and scroll capture across polls)        |
-| Views         | `overview.js`, `tasks.js`, `agents.js`, `messages.js`, `relationships.js`, `system.js`                               |
-| Shell         | `shell.js` (view switch, mobile menu, focus and scroll placement, Escape), `filters.js` (controls and clear buttons) |
-| Reload memory | `persist.js` (pure, unit tested), `reload-state.js` (DOM glue)                                                       |
+| Layer         | Modules                                                                                                                    |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| State         | `store.js` (shared state, hooks, media queries), `config.js` (routes and allowlists), `labels.js` (labels and tones)       |
+| Routing       | `route.js` (pure hash parsing, `hrefFor`, scroll keys), `router.js` (history, filter memory, nav links)                    |
+| Data          | `api.js` (session token, authenticated fetch, polling, retained-snapshot banner), `live.js`, `live-core.js` (event stream) |
+| DOM helpers   | `dom.js`, `badges.js`, `time.js` (formatter and relative times), `links.js`                                                |
+| Rendering     | `render.js` (view dispatch and nav counts), `ui-state.js` (focus, disclosure and scroll capture across polls)              |
+| Views         | `overview.js`, `tasks.js`, `agents.js`, `messages.js`, `relationships.js`, `system.js`                                     |
+| Shell         | `shell.js` (view switch, mobile menu, focus and scroll placement, Escape), `filters.js` (controls and clear buttons)       |
+| Reload memory | `persist.js` (pure, unit tested), `reload-state.js` (DOM glue)                                                             |
 
 The Runs view (`run-viewer.js`) and the relationship diagram (`graph-viewer.js`, `graph-renderer.js`) remain separate scripts that talk to the shell through `window.crewplane`, `window.crewplaneFetch` and the `crewplane-route` and `crewplane-graphs` events, which are unchanged.
 

@@ -244,8 +244,13 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 }, 30000);
 
-async function open(hash = "", width = 1440) {
+async function open(
+  hash = "",
+  width = 1440,
+  setup?: (page: Page) => Promise<void>,
+) {
   const page = await browser.newPage({ viewport: { width, height: 900 } });
+  await setup?.(page);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
@@ -1102,3 +1107,97 @@ it("restores scroll and 'How to read' disclosures after a full reload, but not a
   expect(errors).toEqual([]);
   await page.close();
 }, 60000);
+
+it("switches to live updates, pushes board changes without polling, and shows the transport", async () => {
+  const { page, errors } = await open();
+  const wrap = page.locator("#connection-wrap");
+  await page.locator('#connection-wrap[data-mode="live"]').waitFor();
+  await page
+    .locator("#connection-time")
+    .filter({ hasText: "live updates" })
+    .waitFor();
+  expect(await page.locator("#connection").textContent()).toBe("Live");
+  // With the stream delivering, snapshot polling stops: block it entirely and
+  // a new board message must still arrive by push.
+  let snapshotRequests = 0;
+  await page.route("**/api/snapshot", (route) => {
+    snapshotRequests += 1;
+    return route.abort();
+  });
+  await page.goto(`${base}#/messages?filter=all`);
+  const text = "Pushed over the live stream";
+  agents(
+    "send",
+    "--agent",
+    "captain",
+    "--to",
+    "all",
+    "--kind",
+    "update",
+    "--text",
+    text,
+  );
+  await page.locator("#messages").filter({ hasText: text }).waitFor();
+  expect(snapshotRequests).toBe(0);
+  expect(await wrap.getAttribute("data-state")).toBe("live");
+  expect(await page.locator("#error").isVisible()).toBe(false);
+  expect(errors).toEqual([]);
+  await page.close();
+}, 45000);
+
+it("falls back to polling when the event stream is blocked, with the banner semantics unchanged", async () => {
+  const { page, errors } = await open("", 1440, async (target) => {
+    // Short reconnect delays, so the page notices the unblocked stream at once
+    // instead of after a production backoff (up to a minute).
+    await target.addInitScript(() => {
+      (
+        window as unknown as { crewplaneLiveTuning: unknown }
+      ).crewplaneLiveTuning = { backoffBaseMs: 50, backoffCapMs: 200 };
+    });
+    await target.route("**/api/events", (route) => route.abort());
+  });
+  await page.locator('#connection-wrap[data-mode="polling"]').waitFor();
+  await page
+    .locator("#connection-time")
+    .filter({ hasText: "polling" })
+    .waitFor();
+  expect(await page.locator("#connection").textContent()).toBe("Live");
+  // Polling is the old behaviour: a failed poll shows the retained-snapshot banner.
+  await page.route("**/api/snapshot", (route) => route.abort());
+  await page.locator("#refresh").click();
+  await page
+    .locator("#connection")
+    .filter({ hasText: "Disconnected" })
+    .waitFor();
+  const banner = page.locator("#error");
+  await banner.filter({ hasText: "Showing the last snapshot" }).waitFor();
+  expect(await banner.textContent()).toContain("Retrying every 5s.");
+  expect(await page.locator("#view-overview").isVisible()).toBe(true);
+  await page.unroute("**/api/snapshot");
+  await page.locator("#refresh").click();
+  await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  expect(await banner.isVisible()).toBe(false);
+  // Unblocking the stream is picked up by the reconnect loop.
+  await page.unroute("**/api/events");
+  await page.locator('#connection-wrap[data-mode="live"]').waitFor({
+    timeout: 10000,
+  });
+  expect(errors).toEqual([]);
+  await page.close();
+}, 60000);
+
+it("falls back to polling when the stream endpoint answers with something else", async () => {
+  const { page, errors } = await open("", 1440, async (target) => {
+    await target.route("**/api/events", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<html>proxy page</html>",
+      }),
+    );
+  });
+  await page.locator('#connection-wrap[data-mode="polling"]').waitFor();
+  expect(await page.locator("#connection").textContent()).toBe("Live");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 45000);
