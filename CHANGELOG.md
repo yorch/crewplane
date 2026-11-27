@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.0](https://github.com/yorch/crewplane/compare/v0.8.0...v0.9.0) (2026-11-27)
+
+
+### Features
+
+* **dashboard:** command palette, shortcuts, themes, alerts, graph scale and run tools ([#34](https://github.com/yorch/crewplane/issues/34)) ([8adaf28](https://github.com/yorch/crewplane/commit/8adaf283328e2c927c6698e51c6eaf5ff5acbdc9))
+* **dashboard:** live updates over SSE and read APIs for config, control log and usage ([#31](https://github.com/yorch/crewplane/issues/31)) ([390ddf2](https://github.com/yorch/crewplane/commit/390ddf2e1ea3e0d2f75fff9f573908674d39691f))
+* **dashboard:** operator controls for resume, retry, resolve, nudge and stop ([#32](https://github.com/yorch/crewplane/issues/32)) ([cbd2905](https://github.com/yorch/crewplane/commit/cbd2905468d16c8e0d0e20daee0861a707c0c8dd))
+* **dashboard:** setup, usage, evidence and audit views ([#33](https://github.com/yorch/crewplane/issues/33)) ([d2d82d3](https://github.com/yorch/crewplane/commit/d2d82d3c6b2d5a7c6a0274eb418bbd481d956c45))
+
 ## [0.8.0](https://github.com/yorch/crewplane/compare/v0.7.0...v0.8.0) (2026-11-26)
 
 
