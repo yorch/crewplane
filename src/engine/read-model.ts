@@ -15,7 +15,7 @@ import {
 import { main as coordination } from "./agents.mjs";
 import {
   buildGraph,
-  buildGraphModel,
+  buildGraphBundle,
   type GraphInput,
 } from "./dashboard/graph-builder.ts";
 import {
@@ -364,27 +364,15 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
   };
   // Display validation must never take down the authoritative board read.
   let graphState = "available";
-  let graphs: {
-    dependencies: ReturnType<typeof buildGraph>;
-    communication: ReturnType<typeof buildGraph>;
-  };
+  let graphs: ReturnType<typeof buildGraphBundle>["graphs"];
   // The larger model behind the 50 node display cap, for clusters, focus and
   // paging in the page. Absent when the graph is unavailable.
   let graphModels:
-    | {
-        dependencies: ReturnType<typeof buildGraphModel>;
-        communication: ReturnType<typeof buildGraphModel>;
-      }
+    | ReturnType<typeof buildGraphBundle>["graphModels"]
     | undefined;
   try {
-    graphs = {
-      dependencies: buildGraph(graphInput, "dependencies"),
-      communication: buildGraph(graphInput, "communication"),
-    };
-    graphModels = {
-      dependencies: buildGraphModel(graphInput, "dependencies"),
-      communication: buildGraphModel(graphInput, "communication"),
-    };
+    // One validation and one projection per view feed both sections.
+    ({ graphs, graphModels } = buildGraphBundle(graphInput));
   } catch {
     graphState = "unavailable";
     graphs = {

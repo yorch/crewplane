@@ -1,6 +1,7 @@
 import {
   comparable,
   compareRuns,
+  describeWindow,
   downloadName,
   eventMatches,
   firstErrorIndex,
@@ -44,6 +45,7 @@ import {
   const chips = new Map();
   let meta = null;
   let query = "";
+  const COMPARE_MAX_PAGES = 60;
   let other = null;
   let otherToken = 0;
 
@@ -306,7 +308,7 @@ import {
     text(
       get("run-compare-status"),
       choices.length
-        ? "Choose another run. Only events the page can load are compared (at most 500 per run)."
+        ? `Choose another run. The latest ${MAX_EVENTS} events of each run are compared.`
         : "No other loaded run shares this task or agent. Use Older runs to load more.",
     );
   }
@@ -316,10 +318,15 @@ import {
     get("run-compare-body").replaceChildren();
     if (!RUN_ID.test(id)) return;
     text(get("run-compare-status"), "Loading the other run…");
-    const loaded = [];
+    // Both runs are compared over their LATEST events, the window this page
+    // keeps for the selected run: page through the whole run (bounded) and
+    // keep a rolling tail, so a long run is not judged by its first 500.
+    let loaded = [];
+    let total = 0;
     let after = 0;
+    let complete = false;
     try {
-      for (let page = 0; page < MAX_EVENTS / 100; page++) {
+      for (let page = 0; page < COMPARE_MAX_PAGES; page++) {
         const response = await window.crewplaneFetch(
           `/api/runs/${encodeURIComponent(id)}?after=${after}&limit=100`,
           { cache: "no-store", signal: AbortSignal.timeout(10000) },
@@ -327,15 +334,19 @@ import {
         if (!response.ok) throw Error("The other run is not available.");
         const value = await response.json();
         if (token !== otherToken) return;
-        loaded.push(...value.events);
-        if (!value.events.length || value.nextCursor === after) break;
+        total += value.events.length;
+        loaded = loaded.concat(value.events).slice(-MAX_EVENTS);
+        if (!value.events.length || value.nextCursor === after) {
+          complete = true;
+          break;
+        }
         after = value.nextCursor;
       }
     } catch (error) {
       if (token === otherToken) text(get("run-compare-status"), error.message);
       return;
     }
-    other = { id, events: loaded.slice(-MAX_EVENTS) };
+    other = { id, events: loaded, total, complete };
     renderCompare();
   }
   const cell = (tag, value, className) => make(tag, String(value), className);
@@ -375,7 +386,11 @@ import {
   }
   function renderCompare() {
     if (!other) return;
-    const result = compareRuns(events, other.events);
+    const result = compareRuns(events, other.events, {
+      a: meta?.events,
+      b: other.total,
+      bAtLeast: !other.complete,
+    });
     const { a, b } = result.total;
     const sign = (value) => (value > 0 ? `+${value}` : String(value));
     const body = get("run-compare-body");
@@ -442,10 +457,12 @@ import {
         : `The runs first differ at position ${result.firstDifference + 1}.`,
       "note",
     );
-    body.replaceChildren(first, summary, kinds, aligned);
+    const scope = make("p", describeWindow(result.window), "note");
+    scope.id = "run-compare-window";
+    body.replaceChildren(scope, first, summary, kinds, aligned);
     text(
       get("run-compare-status"),
-      `Comparing ${thisId} with ${other.id}: ${a.events} and ${b.events} loaded events.`,
+      `Comparing ${thisId} with ${other.id}: ${a.events} and ${b.events} events compared.${other.complete ? "" : " The other run is longer than the page reads; its earliest events were not counted."}`,
     );
   }
   async function tail() {

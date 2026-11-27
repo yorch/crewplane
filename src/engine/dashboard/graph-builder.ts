@@ -282,8 +282,8 @@ function project(input: GraphInput, view: View): Projection {
   nodes.sort((a, b) => compare(a.id, b.id));
   return { nodes, edges, omitted, omittedEdges, groups };
 }
-export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
-  const { nodes, edges, omitted, omittedEdges } = project(input, view);
+function graphFrom(p: Projection, view: View): GraphSnapshot {
+  const { nodes, edges, omitted, omittedEdges } = p;
   const displayedNodes = nodes.slice(0, 50);
   const truncatedIds = new Set(nodes.slice(50).map((node) => node.id));
   // Missing references remain visible; references to intentionally clipped nodes do not.
@@ -302,9 +302,16 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
     },
   };
 }
+export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
+  return graphFrom(project(input, view), view);
+}
 
-/** Ceilings for the full model the dashboard clusters, focuses and pages. */
-export const MODEL_MAX_NODES = 1100;
+/**
+ * Ceilings for the full model the dashboard clusters, focuses and pages. A
+ * validated input holds at most 1000 tasks and 64 lanes (see validate), and a
+ * view draws one kind of node, so the model can never be larger than this.
+ */
+export const MODEL_MAX_NODES = 1000 + 64;
 export const MODEL_MAX_EDGES = 3000;
 export const EDGE_KINDS = [
   "dependency",
@@ -312,85 +319,128 @@ export const EDGE_KINDS = [
   "review-handoff",
   "message",
 ] as const;
-export type ModelNode = Partial<Omit<GraphNode, "id" | "kind" | "label">> & {
+/**
+ * Compact node: `kind` is implied by the view (tasks in dependencies, lanes
+ * in communication), `label` is left out when it equals the id and `taskId`
+ * when it equals the id; null fields are omitted.
+ */
+export type ModelNode = Partial<Omit<GraphNode, "id" | "kind">> & {
   id: string;
-  kind: GraphNode["kind"];
-  label: string;
   phase?: string;
   owner?: string;
 };
-/** from, to, EDGE_KINDS index, label, thread id, time, unanswered (0 or 1). */
+/** label, thread id, time: shared by every edge of one message or requirement. */
+export type ModelRef = [string, string | null, string | null];
+/**
+ * from, to, EDGE_KINDS index, index into `refs`, unanswered (0 or 1). An
+ * endpoint is the index of a node in `nodes`, or, for a relationship to
+ * something that is not a node (an archived task, a recipient that is not a
+ * lane), the id as a string.
+ */
 export type ModelEdge = [
-  string,
-  string,
+  number | string,
+  number | string,
   number,
-  string,
-  string | null,
-  string | null,
+  number,
   0 | 1,
 ];
 export type GraphModel = {
-  version: 1;
+  version: 2;
   view: View;
   nodes: ModelNode[];
   edges: ModelEdge[];
+  refs: ModelRef[];
   hidden: { nodes: number; edges: number };
   /** Left out of the model itself because of the ceilings above. */
   truncated: { nodes: number; edges: number };
 };
-/**
- * The same explicit relationships as buildGraph, without the 50 node and 100
- * edge display cap: up to MODEL_MAX_NODES nodes and MODEL_MAX_EDGES edges, in a
- * compact form (null fields omitted, edges as tuples). The page still draws at
- * most 50 nodes and 100 edges at a time; the model only lets it cluster, focus
- * and page through the rest. Edges to nodes the model dropped are dropped too,
- * and the counts say how much was left out.
- */
-export function buildGraphModel(input: GraphInput, view: View): GraphModel {
-  const { nodes, edges, omitted, omittedEdges, groups } = project(input, view);
+function modelFrom(p: Projection, view: View): GraphModel {
+  const { nodes, edges, omitted, omittedEdges, groups } = p;
   const kept = nodes.slice(0, MODEL_MAX_NODES);
   const dropped = new Set(nodes.slice(MODEL_MAX_NODES).map((node) => node.id));
   const eligible = edges.filter(
     (edge) => !dropped.has(edge.from) && !dropped.has(edge.to),
   );
+  const position = new Map(kept.map((node, index) => [node.id, index]));
   const modelNodes: ModelNode[] = kept.map((node) => {
-    const out: ModelNode = { id: node.id, kind: node.kind, label: node.label };
+    const out: ModelNode = { id: node.id };
+    if (node.label !== node.id) out.label = node.label;
     for (const key of [
       "role",
       "harness",
       "observedModel",
-      "taskId",
       "processStatus",
       "taskStatus",
     ] as const) {
       const value = node[key];
       if (value !== null) out[key] = value;
     }
+    if (node.taskId !== null && node.taskId !== node.id)
+      out.taskId = node.taskId;
     if (node.accepted) out.accepted = true;
     const group = groups.get(node.id);
     if (group?.phase) out.phase = group.phase;
     if (group?.owner) out.owner = group.owner;
     return out;
   });
+  const refs: ModelRef[] = [];
+  const refIndex = new Map<string, number>();
+  const ref = (edge: GraphEdge) => {
+    const key = JSON.stringify([edge.label, edge.threadId, edge.at]);
+    let index = refIndex.get(key);
+    if (index === undefined) {
+      index = refs.length;
+      refs.push([edge.label, edge.threadId, edge.at]);
+      refIndex.set(key, index);
+    }
+    return index;
+  };
+  const used = eligible.slice(0, MODEL_MAX_EDGES);
   return {
-    version: 1,
+    version: 2,
     view,
     nodes: modelNodes,
-    edges: eligible
-      .slice(0, MODEL_MAX_EDGES)
-      .map((edge) => [
-        edge.from,
-        edge.to,
-        EDGE_KINDS.indexOf(edge.kind),
-        edge.label,
-        edge.threadId,
-        edge.at,
-        edge.unanswered ? 1 : 0,
-      ]),
+    edges: used.map((edge) => [
+      position.get(edge.from) ?? edge.from,
+      position.get(edge.to) ?? edge.to,
+      EDGE_KINDS.indexOf(edge.kind),
+      ref(edge),
+      edge.unanswered ? 1 : 0,
+    ]),
+    refs,
     hidden: { nodes: omitted, edges: omittedEdges },
     truncated: {
       nodes: Math.max(0, nodes.length - MODEL_MAX_NODES),
       edges: edges.length - Math.min(MODEL_MAX_EDGES, eligible.length),
+    },
+  };
+}
+/**
+ * The same explicit relationships as buildGraph, without the 50 node and 100
+ * edge display cap: up to MODEL_MAX_NODES nodes and MODEL_MAX_EDGES edges, in
+ * a compact form (see ModelNode and ModelEdge). The page still draws at most
+ * 50 nodes and 100 edges at a time; the model only lets it cluster, focus and
+ * page through the rest. Edges to nodes the model dropped are dropped too, and
+ * the counts say how much was left out.
+ */
+export function buildGraphModel(input: GraphInput, view: View): GraphModel {
+  return modelFrom(project(input, view), view);
+}
+/**
+ * Both views, display graphs and models, from one validation and one
+ * projection per view (the snapshot needs all four).
+ */
+export function buildGraphBundle(input: GraphInput) {
+  const dependencies = project(input, "dependencies");
+  const communication = project(input, "communication");
+  return {
+    graphs: {
+      dependencies: graphFrom(dependencies, "dependencies"),
+      communication: graphFrom(communication, "communication"),
+    },
+    graphModels: {
+      dependencies: modelFrom(dependencies, "dependencies"),
+      communication: modelFrom(communication, "communication"),
     },
   };
 }

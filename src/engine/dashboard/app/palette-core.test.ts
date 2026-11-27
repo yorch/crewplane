@@ -116,11 +116,47 @@ it("indexes a large board within a budget", () => {
       replyTo: null,
     })),
   };
-  const started = performance.now();
-  const { entries } = buildIndex(entriesFromData({ data: big }));
-  const result = search(entries, "update 2999");
-  const took = performance.now() - started;
+  const run = () => {
+    const { entries } = buildIndex(entriesFromData({ data: big }));
+    return { entries, result: search(entries, "update 2999") };
+  };
+  const { entries, result } = run();
+  // Best of several runs: the first is cold (JIT) and contention only slows.
+  let took = Number.POSITIVE_INFINITY;
+  for (let attempt = 0; attempt < 7; attempt++) {
+    const started = performance.now();
+    run();
+    took = Math.min(took, performance.now() - started);
+  }
   expect(entries.length).toBeGreaterThan(6000);
   expect(result.results[0]?.id).toBe("m2999");
-  expect(took).toBeLessThan(2000);
+  // Measured warm: about 12 ms (6,000 entries); 10x for shared machines.
+  expect(took).toBeLessThan(120);
+});
+
+it("keeps the dialog commands through buildIndex so the palette can run them", () => {
+  const { entries } = buildIndex(entriesFromData({ data }));
+  const commands = entries
+    .filter((entry) => entry.kind === "action" && entry.command)
+    .map((entry) => entry.command)
+    .sort();
+  expect(commands).toEqual(["help", "preferences"]);
+  for (const entry of entries)
+    expect(Boolean(entry.href) !== Boolean(entry.command)).toBe(true);
+});
+
+it("offers only commands the page can run: every command has a handler, every other action a valid route", async () => {
+  const { readFileSync } = await import("node:fs");
+  const entry = readFileSync(
+    new URL("../dashboard.js", import.meta.url),
+    "utf8",
+  );
+  const wired = /initPalette\(\{([^}]*)\}\)/.exec(entry)?.[1] ?? "";
+  const handlers = [...wired.matchAll(/(\w+)\s*:/g)].map((m) => m[1]);
+  expect(handlers.sort()).toEqual(["help", "preferences"]);
+  for (const action of ACTIONS) {
+    if ("command" in action && action.command)
+      expect(handlers).toContain(action.command);
+    else expect(parseHash(action.href as string).valid).toBe(true);
+  }
 });

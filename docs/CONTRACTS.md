@@ -131,7 +131,14 @@ Existing routes are unchanged (the snapshot gained one additive field, `graphMod
 
 ### Snapshot `graphModels` (additive)
 
-`graphs.{dependencies,communication}` keep their shape and the 50 node and 100 edge display cap. Beside them the snapshot carries `graphModels.{dependencies,communication}`, the same explicit relationships without that cap, in a compact form for the page's clusters, focus and paging: `nodes` (up to 1,100; null fields omitted; tasks add `phase` and `owner` grouping hints), `edges` (up to 3,000 tuples `[from, to, kindIndex, label, threadId, at, unanswered]`, `kindIndex` into `dependency`, `awaiting-answer`, `review-handoff`, `message`), `hidden` and `truncated` (what the model itself left out). It is absent when the graph is unavailable. It grants no authority and the page still draws at most 50 nodes and 100 edges at a time.
+`graphs.{dependencies,communication}` keep their shape and the 50 node and 100 edge display cap. Beside them the snapshot carries `graphModels.{dependencies,communication}`, the same explicit relationships without that cap, in a compact form (`version: 2`) for the page's clusters, focus and paging. It is built from the same single validation and projection per view as `graphs` (`buildGraphBundle`). Fields:
+
+- `nodes` (at most 1,064: a valid input holds 1,000 tasks and 64 lanes, and one view draws one kind of node): `{ id, label?, role?, harness?, observedModel?, taskId?, processStatus?, taskStatus?, accepted?, phase?, owner? }`. `kind` is implied by the view (`task` in `dependencies`, `lane` in `communication`; a reader also accepts an explicit `kind`), `label` is left out when it equals `id`, `taskId` when it equals `id`, null fields are omitted, and tasks add `phase` and `owner` grouping hints.
+- `edges` (at most 3,000): `[from, to, kindIndex, refIndex, unanswered]` with `kindIndex` into `dependency`, `awaiting-answer`, `review-handoff`, `message`. An endpoint is the index of a node in `nodes`, or, for a relationship to something that is not a node (an archived or never recorded task, a recipient that is not a lane), its id as a string, exactly as `graphs` keeps such edges.
+- `refs`: `[label, threadId | null, at | null]` rows shared by every edge that carries the same label, thread and time (a message to `all` is one row for all its edges).
+- `hidden` and `truncated`: what the model itself left out. The first form (`version: 1`, edges `[from, to, kindIndex, label, threadId, at, unanswered]` by id) is still read by the page.
+
+It is absent when the graph is unavailable (the page then draws `graphs` without the cluster, focus and paging tools). It grants no authority and the page still draws at most 50 nodes and 100 edges at a time. Size on synthetic boards (JSON bytes of `graphModels`, both views): 100 tasks 45,884 before and 33,041 after; 500 tasks 394,734 before and 193,221 after; 1,000 tasks (64 lanes, 1,000 messages) 680,031 before and 281,953 after. The measured build time of all four sections dropped from about 38 ms to 22 ms (median, 1,000 tasks, 64 lanes, 1,000 messages) by sharing one projection per view.
 
 ### `GET /api/events` (server-sent events)
 

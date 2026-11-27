@@ -80,6 +80,7 @@ interface Tuning {
   backoffBaseMs?: number;
   backoffCapMs?: number;
   hiddenGraceMs?: number;
+  hiddenPollMs?: number;
   stableMs?: number;
 }
 async function open(tuning: Tuning = {}, hash = "") {
@@ -280,6 +281,9 @@ it("a board too large to push keeps one stream and bounded polling, truthfully l
       seen.add(await mode(page));
       await new Promise((done) => setTimeout(done, 250));
     }
+    // The attribute is set a moment after "Live" first shows (a busy machine
+    // can sample it before then): "not set yet" is not a claim of live updates.
+    seen.delete(null);
     expect([...seen]).toEqual(["polling"]);
     expect(counts.events).toBeLessThanOrEqual(2);
     expect(counts.snapshots).toBeLessThanOrEqual(8);
@@ -419,6 +423,132 @@ it("a tab hidden past the grace period closes its stream, polls nothing while hi
   await until(async () => log.includes("/api/events"), "stream reopened");
   expect(log).toContain("/api/snapshot"); // immediate refresh
   await modeIs(page, "live");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 60000);
+
+it("hidden tabs: alerts on keep a slow snapshot poll that stops when alerts go off; alerts off adds no requests", async () => {
+  const run = async (alerts: boolean) => {
+    const { page, errors } = await open({
+      hiddenGraceMs: 200,
+      hiddenPollMs: 300,
+    });
+    if (alerts)
+      await page.evaluate(() =>
+        window.localStorage.setItem(
+          "crewplane.alerts",
+          JSON.stringify({ badge: true }),
+        ),
+      );
+    await page.reload();
+    await modeIs(page, "live");
+    const snapshots: number[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/snapshot")
+        snapshots.push(Date.now());
+    });
+    const setHidden = (hidden: boolean) =>
+      page.evaluate((value) => {
+        Object.defineProperty(document, "hidden", {
+          configurable: true,
+          get: () => value,
+        });
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          get: () => (value ? "hidden" : "visible"),
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      }, hidden);
+    await setHidden(true);
+    await modeIs(page, "polling");
+    return { page, errors, snapshots, setHidden };
+  };
+  // Alerts off: a hidden tab asks for nothing, however long it waits.
+  const off = await run(false);
+  await new Promise((done) => setTimeout(done, 1800));
+  expect(off.snapshots).toEqual([]);
+  expect(off.errors).toEqual([]);
+  await off.page.close();
+  // Alerts on: it keeps reading, about every hiddenPollMs (+-20%).
+  const on = await run(true);
+  await until(async () => on.snapshots.length >= 3, "hidden alert polls");
+  // Switching alerts off (in the Preferences dialog) stops the poll.
+  await on.setHidden(false);
+  await on.page.locator("#prefs-open").click();
+  await on.page.getByLabel("Show a count in the tab title").uncheck();
+  await on.page.keyboard.press("Escape");
+  await on.setHidden(true);
+  await new Promise((done) => setTimeout(done, 400));
+  const before = on.snapshots.length;
+  await new Promise((done) => setTimeout(done, 1500));
+  expect(on.snapshots.length).toBe(before);
+  expect(on.errors).toEqual([]);
+  await on.page.close();
+}, 60000);
+
+it("clicking a desktop alert focuses the tab and opens the fixed view for its category", async () => {
+  const { page, errors } = await open();
+  await page.evaluate(() => {
+    window.localStorage.setItem(
+      "crewplane.alerts",
+      JSON.stringify({ desktop: true, whenVisible: true }),
+    );
+  });
+  await page.reload();
+  await modeIs(page, "live");
+  await page.evaluate(() => {
+    const made: unknown[] = [];
+    class FakeNotification {
+      static permission = "granted";
+      closed = false;
+      onclick: null | (() => void) = null;
+      constructor() {
+        made.push(this);
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+    Object.assign(window, { Notification: FakeNotification, made });
+  });
+  await coordination(
+    [
+      "send",
+      "--agent",
+      "captain",
+      "--to",
+      "all",
+      "--kind",
+      "question",
+      "--text",
+      "a synthetic question for the alert click test",
+    ],
+    root,
+  );
+  await until(
+    async () =>
+      (await page.evaluate(
+        () => (window as unknown as { made: unknown[] }).made.length,
+      )) > 0,
+    "a desktop alert",
+  );
+  await page.evaluate(() => {
+    const made = (window as unknown as { made: { onclick: () => void }[] })
+      .made;
+    made[0]?.onclick();
+  });
+  await until(
+    async () =>
+      (await page.evaluate(() => window.location.hash)) ===
+      "#/messages?filter=open",
+    "navigation to the open questions",
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { made: { closed: boolean }[] }).made[0]?.closed,
+    ),
+  ).toBe(true);
   expect(errors).toEqual([]);
   await page.close();
 }, 60000);

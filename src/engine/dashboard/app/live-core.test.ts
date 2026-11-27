@@ -3,6 +3,7 @@ import {
   backoffDelay,
   createLiveSession,
   createSseParser,
+  hiddenPollDelay,
   liveTuning,
   RenderFailure,
 } from "./live-core.js";
@@ -142,4 +143,14 @@ it("rejects malformed events and clamps injected timings", () => {
   expect(
     liveTuning({ stableMs: 1e9, backoffBaseMs: "x", hiddenGraceMs: -5 }),
   ).toMatchObject({ stableMs: 30000, backoffBaseMs: 1000, hiddenGraceMs: 0 });
+});
+
+it("spreads the hidden-tab alert poll over +-20% of a 60 second default", () => {
+  expect(liveTuning(undefined).hiddenPollMs).toBe(60000);
+  expect(liveTuning({ hiddenPollMs: 1 }).hiddenPollMs).toBe(100);
+  expect(hiddenPollDelay(60000, () => 0)).toBe(48000);
+  expect(hiddenPollDelay(60000, () => 1)).toBe(72000);
+  expect(hiddenPollDelay(60000, () => 0.5)).toBe(60000);
+  expect(hiddenPollDelay(60000, () => Number.NaN)).toBe(48000);
+  expect(hiddenPollDelay(60000, () => 9)).toBe(72000);
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   comparable,
   compareRuns,
+  describeWindow,
   downloadName,
   eventMatches,
   exportEvent,
@@ -267,5 +268,54 @@ describe("comparison", () => {
     expect(formatSpan(125000)).toBe("2 min 5 s");
     expect(formatSpan(-1500)).toBe("-1.5 s");
     expect(formatSpan(Number.NaN)).toBe("not recorded");
+  });
+});
+
+describe("comparison window", () => {
+  const make = (n: number, from = 1) =>
+    Array.from({ length: n }, (_, i) => ({
+      sequence: from + i,
+      kind: "tool",
+      tool: `e${from + i}`,
+      status: null,
+      at: null,
+      durationMs: null,
+    }));
+  it("cuts both runs to the same latest 500 and reports each side's total", () => {
+    const result = compareRuns(make(700), make(1300), { a: 700, b: 1300 });
+    expect(result.rows).toHaveLength(500);
+    expect(result.rows[0]?.a).toContain("e201");
+    expect(result.rows[0]?.b).toContain("e801");
+    expect(result.rows.at(-1)?.a).toContain("e700");
+    expect(result.rows.at(-1)?.b).toContain("e1300");
+    expect(result.window.a).toMatchObject({
+      shown: 500,
+      total: 700,
+      cut: true,
+    });
+    expect(result.window.b).toMatchObject({
+      shown: 500,
+      total: 1300,
+      cut: true,
+    });
+    const text = describeWindow(result.window);
+    expect(text).toContain("latest 500 events of each run");
+    expect(text).toContain("500 of 700");
+    expect(text).toContain("500 of 1,300");
+  });
+  it("says so when nothing was left out, and when the total is only a lower bound", () => {
+    const small = compareRuns(make(3), make(1), { a: 3, b: 1 });
+    expect(describeWindow(small.window)).toContain("all 3 events");
+    expect(describeWindow(small.window)).toContain("all 1 event.");
+    expect(small.window.a.cut).toBe(false);
+    const partial = compareRuns(make(500), make(500), {
+      a: 500,
+      b: 6000,
+      bAtLeast: true,
+    });
+    expect(describeWindow(partial.window)).toContain("500 of at least 6,000");
+    // Unknown or nonsense totals fall back to what was shown.
+    const odd = compareRuns(make(2), make(2), { a: -4, b: Number.NaN });
+    expect(odd.window.a.total).toBe(2);
   });
 });

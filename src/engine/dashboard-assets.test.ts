@@ -5,8 +5,10 @@ import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import {
+  modulePaths,
   renderAssetsModule,
   scanDashboardAssets,
+  withModulePreload,
 } from "../../scripts/dashboard-assets.ts";
 import { embeddedAssets } from "./assets.ts";
 import { createDashboard } from "./dashboard.ts";
@@ -255,4 +257,62 @@ it("only routes names that are embedded", () => {
   });
   expect([...routes.keys()].sort()).toEqual(["/", "/app/x.js"]);
   expect(routes.get("/app/x.js")?.type).toBe("text/javascript");
+});
+
+it("index.html preloads exactly the module graph, generated, ordered and up to date", () => {
+  const page = read("index.html");
+  // Up to date: regenerating changes nothing (CI also checks this file).
+  expect(withModulePreload(dashboardDir, page)).toBe(page);
+  const linked = [
+    ...page.matchAll(/<link rel="modulepreload" href="(\/[^"]+)" \/>/g),
+  ].map((match) => match[1] ?? "");
+  expect(linked.length).toBeGreaterThan(50);
+  expect(new Set(linked).size).toBe(linked.length);
+  // Independently: walk the imports with this file's own parser from the
+  // module scripts the page names, and compare as sets.
+  const entries = [
+    ...page.matchAll(/<script type="module" src="(\/[^"]+)"><\/script>/g),
+  ].map((match) => match[1] ?? "");
+  expect(entries).toEqual(["/graph-viewer.js", "/dashboard.js", "/runs.js"]);
+  const reach = new Set<string>();
+  const walk = (path: string) => {
+    if (reach.has(path)) return;
+    reach.add(path);
+    const file = path === "/runs.js" ? "run-viewer.js" : path.slice(1);
+    for (const value of specifiers(read(file)))
+      walk(`/${resolveSpecifier(file, value)}`);
+  };
+  for (const entry of entries) walk(entry);
+  expect(new Set(linked)).toEqual(reach);
+  // Every linked path is served, same origin, and listed before the scripts.
+  const routes = assetRoutes();
+  for (const path of linked) expect(routes.has(path), path).toBe(true);
+  expect(page.lastIndexOf("modulepreload")).toBeLessThan(
+    page.indexOf('<script type="module"'),
+  );
+  expect(modulePaths(dashboardDir, page)).toEqual(linked);
+  // No inline script or handler was added for it (the policy forbids them).
+  expect(page).not.toMatch(/<script(?![^>]*\bsrc=)/);
+});
+
+it("regenerates a stale or missing preload block deterministically", () => {
+  const page = read("index.html");
+  const stripped = page.replace(
+    /<!-- modulepreload:start[\s\S]*?<!-- modulepreload:end -->\n\s*/,
+    "",
+  );
+  expect(stripped).not.toContain("modulepreload");
+  const first = withModulePreload(dashboardDir, stripped);
+  expect(first).toBe(page);
+  const stale = page.replace(
+    '<link rel="modulepreload" href="/app/store.js" />',
+    '<link rel="modulepreload" href="/app/gone.js" />',
+  );
+  expect(withModulePreload(dashboardDir, stale)).toBe(page);
+  expect(() =>
+    withModulePreload(
+      dashboardDir,
+      page.replace("<!-- modulepreload:end -->", ""),
+    ),
+  ).toThrow(/unterminated/);
 });

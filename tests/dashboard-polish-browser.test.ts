@@ -24,6 +24,7 @@ async function open(
   hash = "#/overview",
   options: {
     width?: number;
+    height?: number;
     colorScheme?: "light" | "dark";
     init?: () => void;
     prepare?: (page: Page) => Promise<unknown>;
@@ -31,7 +32,7 @@ async function open(
   } = {},
 ) {
   const context = await browser.newContext({
-    viewport: { width: options.width ?? 1440, height: 900 },
+    viewport: { width: options.width ?? 1440, height: options.height ?? 900 },
     colorScheme: options.colorScheme ?? "light",
     ...(options.forcedColors ? { forcedColors: "active" as const } : {}),
     acceptDownloads: true,
@@ -677,3 +678,277 @@ it("run timeline tools: jump to the first error and inert hostile text, on a pho
   expect(errors).toEqual([]);
   await close();
 }, 45000);
+
+it("palette dialog commands: Preferences and Keyboard shortcuts open their dialogs", async () => {
+  const { page, errors, close } = await open();
+  for (const [query, dialogId] of [
+    ["preferences", "#preferences-dialog"],
+    ["keyboard shortcuts", "#shortcuts-dialog"],
+  ] as const) {
+    await page.keyboard.press("Control+k");
+    await page.locator("#palette").waitFor();
+    await page.locator("#palette-input").fill(query);
+    await page.locator("#palette-list [role=option]").first().waitFor();
+    await page.keyboard.press("Enter");
+    await page.locator("#palette").waitFor({ state: "hidden" });
+    await page.locator(dialogId).waitFor({ state: "visible" });
+    await page.keyboard.press("Escape");
+    await page.locator(dialogId).waitFor({ state: "hidden" });
+  }
+  expect(errors).toEqual([]);
+  await close();
+}, 30000);
+
+it("run compare: both runs use the latest 500 events and the page says so, with per-side totals", async () => {
+  const totals = new Map<string, number>();
+  const { page, errors, close } = await open("#/runs", {
+    prepare: async (p) => {
+      await p.route("**/api/runs/*?*", async (route) => {
+        const url = new URL(route.request().url());
+        const id = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+        if (!totals.has(id)) totals.set(id, totals.size === 0 ? 700 : 1300);
+        const total = totals.get(id) ?? 0;
+        const after = Number(url.searchParams.get("after") ?? 0);
+        const real = (await (await route.fetch()).json()) as {
+          meta: Record<string, unknown>;
+        };
+        const events = Array.from(
+          { length: Math.max(0, Math.min(100, total - after)) },
+          (_, i) => ({
+            sequence: after + i + 1,
+            at: new Date(1_700_000_000_000 + (after + i) * 1000).toISOString(),
+            kind: "tool",
+            channel: "system",
+            message: "x",
+            tool: `e${after + i + 1}`,
+            status: null,
+            inputTokens: null,
+            outputTokens: null,
+          }),
+        );
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ...real,
+            meta: { ...real.meta, events: total },
+            events,
+            nextCursor: after + events.length,
+          }),
+        });
+      });
+    },
+  });
+  await page.locator("#run-history .run-row").first().click();
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector("#run-events .timeline-row:last-child")
+        ?.textContent?.includes("e700"),
+    undefined,
+    { timeout: 30000 },
+  );
+  await page.locator("#run-compare-toggle").click();
+  await page.locator("#run-compare-select").selectOption({ index: 1 });
+  const note = page.locator("#run-compare-window");
+  await note.waitFor({ timeout: 20000 });
+  const label = (await note.textContent()) ?? "";
+  expect(label).toContain("latest 500 events of each run");
+  expect(label).toContain("This run: 500 of 700");
+  expect(label).toContain("other run: 500 of 1,300");
+  const first = page.locator("#run-compare tbody tr").filter({
+    hasText: "e201",
+  });
+  expect(await first.count()).toBeGreaterThan(0);
+  expect(await first.first().textContent()).toContain("e801");
+  expect(errors).toEqual([]);
+  await close();
+}, 60000);
+
+it("theme chosen in another tab updates the pressed state here (storage event)", async () => {
+  const { page, errors, close } = await open("#/overview");
+  const second = await page.context().newPage();
+  await second.goto(`${fixture.base}#token=${fixture.session}`);
+  await second.locator("#loading").waitFor({ state: "hidden", timeout: 15000 });
+  const pressed = (name: string) =>
+    page
+      .getByRole("button", { name, exact: true })
+      .getAttribute("aria-pressed");
+  expect(await pressed("System")).toBe("true");
+  await second.getByRole("button", { name: "Dark", exact: true }).click();
+  await page.waitForFunction(
+    () => document.documentElement.dataset.theme === "dark",
+  );
+  expect(await pressed("Dark")).toBe("true");
+  expect(await pressed("System")).toBe("false");
+  await second.getByRole("button", { name: "Light", exact: true }).click();
+  await page.waitForFunction(
+    () => document.documentElement.dataset.theme === "light",
+  );
+  expect(await pressed("Light")).toBe("true");
+  expect(await pressed("Dark")).toBe("false");
+  expect(errors).toEqual([]);
+  await close();
+}, 30000);
+
+it("print: light colours even in the dark theme, chrome hidden, tables kept", async () => {
+  const { page, errors, close } = await open("#/agents", {
+    colorScheme: "dark",
+  });
+  await page.getByRole("button", { name: "Dark", exact: true }).click();
+  const screenBg = await page.evaluate(
+    () => getComputedStyle(document.body).backgroundColor,
+  );
+  await page.emulateMedia({ media: "print" });
+  const state = await page.evaluate(() => {
+    const display = (selector: string) => {
+      const node = document.querySelector(selector);
+      return node ? getComputedStyle(node).display : "absent";
+    };
+    return {
+      bg: getComputedStyle(document.body).backgroundColor,
+      color: getComputedStyle(document.body).color,
+      sidebar: display("#sidebar"),
+      skip: display("#skip-link"),
+      toolbar: display("#view-agents .toolbar"),
+      table: display("#view-agents table"),
+      scheme: getComputedStyle(document.documentElement).colorScheme,
+    };
+  });
+  expect(screenBg).not.toBe(state.bg);
+  expect(state.bg).toBe("rgb(244, 245, 248)");
+  expect(state.scheme).toBe("light");
+  expect(state.sidebar).toBe("none");
+  expect(state.skip).toBe("none");
+  expect(state.toolbar).toBe("none");
+  expect(state.table).not.toBe("none");
+  if (shots) await page.pdf({ path: join(shots, "print-agents.pdf") });
+  expect(errors).toEqual([]);
+  await close();
+}, 30000);
+
+/** Where the diagram's nodes sit relative to its scrolling canvas. */
+const diagram = (page: Page) =>
+  page.evaluate(() => {
+    const canvas = document.querySelector(".relay-graph-canvas") as HTMLElement;
+    const svg = document.querySelector(".relay-graph-svg") as SVGElement;
+    const box = canvas.getBoundingClientRect();
+    const nodes = [...svg.querySelectorAll(".relay-node")].map((node) => {
+      const r = node.getBoundingClientRect();
+      return {
+        id: node.getAttribute("data-node-id") ?? "",
+        kind: node.getAttribute("data-node-kind") ?? "",
+        inside:
+          r.left >= box.left - 1 &&
+          r.right <= box.right + 1 &&
+          r.top >= box.top - 1 &&
+          r.bottom <= box.bottom + 1,
+      };
+    });
+    return {
+      scrollsSideways: canvas.scrollWidth > canvas.clientWidth + 1,
+      canvasWidth: canvas.clientWidth,
+      svgWidth: Number(svg.getAttribute("width")),
+      nodes,
+    };
+  });
+
+it("cluster layout: collapsed clusters wrap inside the canvas and expanded members are drawn beside their header, dark 1440 and phone", async () => {
+  const { page, errors, close } = await open(
+    "#/relationships?graph=dependencies&group=owner",
+    { colorScheme: "dark", prepare: bigGraph },
+  );
+  await page.locator("#graph-scale").waitFor();
+  const cluster = page
+    .locator(".relay-graph-nodes button[aria-expanded]")
+    .first();
+  await cluster.waitFor();
+  let state = await diagram(page);
+  expect(state.nodes.length).toBe(8);
+  expect(state.scrollsSideways).toBe(false);
+  expect(state.svgWidth).toBeLessThanOrEqual(state.canvasWidth);
+  await shot(page, "graph-cluster-collapsed-dark-1440");
+  await cluster.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() =>
+    document.querySelector(".relay-graph-nodes button[aria-expanded=true]"),
+  );
+  await page.locator(".relay-graph-canvas").scrollIntoViewIfNeeded();
+  state = await diagram(page);
+  const members = state.nodes.filter((node) => node.kind === "task");
+  expect(members.length).toBeGreaterThan(5);
+  expect(state.scrollsSideways).toBe(false);
+  // The header and its members are all visible without scrolling the canvas.
+  const header = state.nodes.find((node) => node.kind === "cluster");
+  expect(header?.inside).toBe(true);
+  expect(members.slice(0, 12).every((node) => node.inside)).toBe(true);
+  await shot(page, "graph-cluster-expanded-dark-1440");
+  expect(await noOverflow(page)).toBe(true);
+  expect(errors).toEqual([]);
+  await close();
+  // A phone: fewer columns, same rules.
+  const phone = await open("#/relationships?graph=dependencies&group=owner", {
+    width: 390,
+    colorScheme: "dark",
+    prepare: bigGraph,
+  });
+  await phone.page
+    .locator(".relay-graph-nodes button[aria-expanded]")
+    .first()
+    .waitFor();
+  const small = await diagram(phone.page);
+  expect(small.svgWidth).toBeLessThanOrEqual(small.canvasWidth + 1);
+  expect(small.scrollsSideways).toBe(false);
+  if (shots)
+    await phone.page
+      .locator(".relay-graph-canvas")
+      .screenshot({ path: join(shots, "graph-cluster-canvas-dark-390.png") });
+  expect(await noOverflow(phone.page)).toBe(true);
+  expect(phone.errors).toEqual([]);
+  await phone.close();
+}, 60000);
+
+/** Rows of the Runs history: none may be shorter than its own content or overlap the next. */
+const historyRows = (page: Page) =>
+  page.evaluate(() => {
+    const rows = [
+      ...document.querySelectorAll<HTMLElement>("#run-history .run-row"),
+    ];
+    return rows.map((row, index) => {
+      const box = row.getBoundingClientRect();
+      const meta = row.querySelector(".run-row-meta")?.getBoundingClientRect();
+      const next = rows[index + 1]?.getBoundingClientRect();
+      return {
+        height: Math.round(box.height),
+        metaInside: meta ? meta.bottom <= box.bottom + 0.5 : false,
+        clear: next ? next.top >= box.bottom - 0.5 : true,
+        contentFits: row.scrollHeight <= row.clientHeight + 1,
+      };
+    });
+  });
+for (const [name, options] of [
+  // A short window caps the history (58vh), the case that cut rows to 36px.
+  ["light 1440", { width: 1440, height: 700 }],
+  ["dark 1440", { width: 1440, height: 700, colorScheme: "dark" as const }],
+  ["light 390", { width: 390 }],
+  ["dark 390", { width: 390, colorScheme: "dark" as const }],
+  ["forced colors 1440", { width: 1440, height: 700, forcedColors: true }],
+  ["forced colors 390", { width: 390, forcedColors: true }],
+] as const)
+  it(`runs history rows fit their content and never overlap: ${name}`, async () => {
+    const { page, errors, close } = await open("#/runs", options);
+    await page.locator("#run-history .run-row").nth(2).waitFor();
+    const rows = await historyRows(page);
+    expect(rows.length).toBeGreaterThan(3);
+    for (const row of rows) {
+      expect(row.metaInside).toBe(true);
+      expect(row.clear).toBe(true);
+      expect(row.contentFits).toBe(true);
+      // Title line plus status line plus padding: well over the 36px minimum.
+      expect(row.height).toBeGreaterThanOrEqual(56);
+    }
+    await shot(page, `runs-history-${name.replace(/ /g, "-")}`);
+    expect(await noOverflow(page)).toBe(true);
+    expect(errors).toEqual([]);
+    await close();
+  }, 30000);

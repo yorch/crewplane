@@ -13,7 +13,8 @@
 export const NODE_CAP = 50;
 export const EDGE_CAP = 100;
 export const MAX_HOPS = 3;
-const MODEL_NODES = 1100;
+// 1000 tasks and 64 lanes: the most a validated input can hold (graph-builder.ts).
+const MODEL_NODES = 1064;
 const MODEL_EDGES = 3000;
 const EDGE_KINDS = [
   "dependency",
@@ -43,24 +44,37 @@ const text = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 256;
 const orNull = (value) => (text(value) ? value : null);
 
-/** Fills defaults, drops malformed rows and indexes neighbours. Bounded. */
+/**
+ * Fills defaults, drops malformed rows and indexes neighbours. Bounded.
+ * Reads the compact version 2 model (edges `[from, to, kind, ref, unanswered]`
+ * with node indexes and a `refs` table) and, for older servers, the version 1
+ * edge tuples `[from, to, kind, label, threadId, at, unanswered]` by id.
+ */
 export function expandModel(model) {
   const view =
     model?.view === "dependencies" ? "dependencies" : "communication";
+  const nodeKind = view === "dependencies" ? "task" : "lane";
   const nodes = [];
   const byId = new Map();
+  // Edge endpoints index the rows as sent, so a dropped row leaves a hole.
+  const slots = [];
   for (const raw of Array.isArray(model?.nodes)
     ? model.nodes.slice(0, MODEL_NODES)
     : []) {
-    if (!raw || !text(raw.id) || byId.has(raw.id)) continue;
+    if (!raw || !text(raw.id) || byId.has(raw.id)) {
+      slots.push(null);
+      continue;
+    }
+    const kind =
+      raw.kind === "task" || raw.kind === "lane" ? raw.kind : nodeKind;
     const node = {
       id: raw.id,
-      kind: raw.kind === "task" ? "task" : "lane",
+      kind,
       label: text(raw.label) ? raw.label : raw.id,
       role: orNull(raw.role),
       harness: orNull(raw.harness),
       observedModel: orNull(raw.observedModel),
-      taskId: orNull(raw.taskId),
+      taskId: orNull(raw.taskId) ?? (kind === "task" ? raw.id : null),
       processStatus: orNull(raw.processStatus),
       taskStatus: orNull(raw.taskStatus),
       accepted: raw.accepted === true,
@@ -69,7 +83,11 @@ export function expandModel(model) {
     };
     byId.set(node.id, node);
     nodes.push(node);
+    slots.push(node);
   }
+  const refs = Array.isArray(model?.refs) ? model.refs : [];
+  const endpoint = (value) =>
+    Number.isInteger(value) ? (slots[value]?.id ?? null) : value;
   const edges = [];
   const seen = new Map();
   const neighbours = new Map(nodes.map((node) => [node.id, new Set()]));
@@ -78,7 +96,23 @@ export function expandModel(model) {
     ? model.edges.slice(0, MODEL_EDGES)
     : []) {
     if (!Array.isArray(raw)) continue;
-    const [from, to, kindIndex, label, threadId, at, unanswered] = raw;
+    let from;
+    let to;
+    let kindIndex;
+    let label;
+    let threadId;
+    let at;
+    let unanswered;
+    if (raw.length >= 7) {
+      [from, to, kindIndex, label, threadId, at, unanswered] = raw;
+    } else {
+      [from, to, kindIndex, , unanswered] = raw;
+      const row = refs[raw[3]];
+      if (!Array.isArray(row)) continue;
+      [label, threadId, at] = row;
+      from = endpoint(from);
+      to = endpoint(to);
+    }
     if (!text(from) || !text(to)) continue;
     const kind = EDGE_KINDS[kindIndex] ?? "message";
     const base = `${kind}\u0000${from}\u0000${to}\u0000${label}\u0000${threadId ?? ""}\u0000${at ?? ""}`;
@@ -207,7 +241,9 @@ export function projectGraph(expanded, options = {}) {
     const groups = new Map();
     for (const node of pool) {
       const key = groupKey(node, mode);
-      groups.set(key, [...(groups.get(key) ?? []), node]);
+      const list = groups.get(key);
+      if (list) list.push(node);
+      else groups.set(key, [node]);
     }
     for (const [key, members] of groups) {
       if (members.length < 2) {
@@ -218,7 +254,12 @@ export function projectGraph(expanded, options = {}) {
       }
       const id = clusterId(mode, key);
       const isOpen = open.has(id);
-      const top = Math.max(...members.map((node) => rank.get(node.id) ?? 0));
+      let top = 0;
+      let nearest = Infinity;
+      for (const node of members) {
+        top = Math.max(top, rank.get(node.id) ?? 0);
+        nearest = Math.min(nearest, near(node));
+      }
       const header = {
         type: "cluster",
         id,
@@ -228,12 +269,12 @@ export function projectGraph(expanded, options = {}) {
         open: isOpen,
         // The header sorts just ahead of its own members.
         rank: top + 1,
-        near: Math.min(...members.map(near)),
+        near: nearest,
       };
       items.push(header);
       if (isOpen)
         for (const node of members) {
-          const item = plain(node);
+          const item = { ...plain(node), clusterId: id };
           items.push(item);
           itemOf.set(node.id, item);
         }
@@ -252,17 +293,29 @@ export function projectGraph(expanded, options = {}) {
   // edge touching a collapsed cluster is merged into one count.
   const merged = new Map();
   const direct = [];
+  const endpoint = (id) =>
+    itemOf.get(id) ??
+    (expanded.byId.has(id) ? undefined : { type: "missing", id });
   let internal = 0;
   let offPage = 0;
   for (const edge of expanded.edges) {
-    const from = itemOf.get(edge.from);
-    const to = itemOf.get(edge.to);
+    // A reference to something that is not a model node (an archived or
+    // never recorded task, a recipient that is not a lane) stays visible, as
+    // it does in the server's own graph: it becomes a pass-through endpoint
+    // the renderer labels as a missing reference. A node merely outside the
+    // focus neighbourhood is different: it is not drawn, so neither is its
+    // edge.
+    const from = endpoint(edge.from);
+    const to = endpoint(edge.to);
     if (!from || !to) continue;
     if (from === to && from.type === "cluster") {
       internal++;
       continue;
     }
-    if (!shownIds.has(from.id) || !shownIds.has(to.id)) {
+    if (
+      (from.type !== "missing" && !shownIds.has(from.id)) ||
+      (to.type !== "missing" && !shownIds.has(to.id))
+    ) {
       offPage++;
       continue;
     }
@@ -299,7 +352,12 @@ export function projectGraph(expanded, options = {}) {
   const edges = ordered.slice(0, EDGE_CAP);
 
   const nodes = shown.map((item) => {
-    if (item.type === "node") return item.node;
+    if (item.type === "node")
+      // A member of an expanded cluster says which, so it can be drawn
+      // beside its header.
+      return item.clusterId
+        ? { ...item.node, clusterId: item.clusterId }
+        : item.node;
     const members = item.members;
     const blocked = members.filter(troubled).length;
     const noun = members.every((node) => node.kind === "task")
@@ -386,7 +444,9 @@ export function describeScale(snapshot) {
   );
   if (scale.internalEdges)
     parts.push(
-      `${fmt(scale.internalEdges)} relationships stay inside collapsed clusters.`,
+      scale.internalEdges === 1
+        ? "1 relationship stays inside a collapsed cluster."
+        : `${fmt(scale.internalEdges)} relationships stay inside collapsed clusters.`,
     );
   if (snapshot.truncated.nodes || snapshot.truncated.edges)
     parts.push(

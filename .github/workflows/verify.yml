@@ -48,7 +48,7 @@ jobs:
         # more (deleted by the rebuild).
         run: |
           bun scripts/embed.ts
-          status="$(git status --porcelain --untracked-files=all -- src/engine/assets src/engine/assets.ts)"
+          status="$(git status --porcelain --untracked-files=all -- src/engine/assets src/engine/assets.ts src/engine/dashboard/index.html)"
           if [ -n "$status" ]; then
             echo "Generated dashboard assets are out of date; run 'bun scripts/embed.ts' and commit:" >&2
             echo "$status" >&2

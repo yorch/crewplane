@@ -202,7 +202,7 @@ export function showDisconnected(message, retry = "every 5s") {
     $("loading").textContent =
       `Waiting for the dashboard server. Retrying ${retry}.`;
 }
-export async function refresh() {
+export async function refresh({ signal } = {}) {
   if (store.busy) return;
   store.busy = true;
   $("refresh").setAttribute("aria-busy", "true");
@@ -213,12 +213,17 @@ export async function refresh() {
   try {
     const response = await window.crewplaneFetch("/api/snapshot", {
       cache: "no-store",
-      signal: AbortSignal.timeout(10000),
+      signal: signal
+        ? AbortSignal.any([AbortSignal.timeout(10000), signal])
+        : AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error(await snapshotError(response));
     next = await response.json();
   } catch (error) {
-    if (store.applied === started) showDisconnected(error.message);
+    // A read the caller itself cancelled (alerts turned off) says nothing
+    // about the connection.
+    if (!signal?.aborted && store.applied === started)
+      showDisconnected(error.message);
     return;
   } finally {
     store.busy = false;

@@ -196,3 +196,82 @@ describe("typing targets", () => {
     expect(isTypingTarget("input")).toBe(false);
   });
 });
+
+describe("non-US layouts", () => {
+  const typing = { ...open, typing: false };
+  const mod = { dialogOpen: false, typing: false, singleKeys: true };
+  it("opens the palette with the slash however the layout types it", () => {
+    // German: Shift+7. French AZERTY: Shift+colon. US: the plain key.
+    for (const extra of [
+      {},
+      { shiftKey: true },
+      { shiftKey: true, code: "Digit7" },
+      { shiftKey: true, code: "Semicolon" },
+    ])
+      expect(press(createKeymap(), "/", extra, typing)).toMatchObject({
+        action: "palette",
+      });
+    // Not while typing, and a plain "?" is still help (Shift+? on US, Shift+, on French).
+    expect(
+      press(
+        createKeymap(),
+        "/",
+        { shiftKey: true },
+        { ...typing, typing: true },
+      ),
+    ).toBeNull();
+    expect(
+      press(createKeymap(), "?", { shiftKey: true, code: "Comma" }, typing),
+    ).toMatchObject({ action: "help" });
+  });
+  it("opens the palette with Ctrl or Cmd+K on Latin layouts", () => {
+    for (const key of ["k", "K"])
+      for (const mods of [{ ctrlKey: true }, { metaKey: true }])
+        expect(press(createKeymap(), key, mods, mod)).toMatchObject({
+          action: "palette",
+        });
+    // AZERTY and QWERTZ type "k" from the same physical key as US.
+    expect(
+      press(createKeymap(), "k", { ctrlKey: true, code: "KeyK" }, mod),
+    ).toMatchObject({ action: "palette" });
+  });
+  it("uses the physical K key only when the layout types no Latin letter there", () => {
+    // Russian "л" and Greek "κ" sit on the K key.
+    for (const key of ["л", "Л", "κ", "ק"])
+      expect(
+        press(createKeymap(), key, { ctrlKey: true, code: "KeyK" }, mod),
+      ).toMatchObject({ action: "palette" });
+    // Dvorak: the K key types "t" (Ctrl+T is the browser's) and the "k" key is elsewhere.
+    expect(
+      press(createKeymap(), "t", { ctrlKey: true, code: "KeyK" }, mod),
+    ).toBeNull();
+    expect(
+      press(createKeymap(), "k", { ctrlKey: true, code: "KeyV" }, mod),
+    ).toMatchObject({ action: "palette" });
+    // Another Cyrillic key is not K.
+    expect(
+      press(createKeymap(), "в", { ctrlKey: true, code: "KeyD" }, mod),
+    ).toBeNull();
+    // Extra modifiers still disqualify it.
+    expect(
+      press(
+        createKeymap(),
+        "л",
+        { ctrlKey: true, altKey: true, code: "KeyK" },
+        mod,
+      ),
+    ).toBeNull();
+    expect(
+      press(
+        createKeymap(),
+        "л",
+        { ctrlKey: true, shiftKey: true, code: "KeyK" },
+        mod,
+      ),
+    ).toBeNull();
+  });
+  it("leaves bare Cyrillic letters and dead keys alone", () => {
+    expect(press(createKeymap(), "п", { code: "KeyG" }, typing)).toBeNull();
+    expect(press(createKeymap(), "Dead", { code: "Slash" }, typing)).toBeNull();
+  });
+});

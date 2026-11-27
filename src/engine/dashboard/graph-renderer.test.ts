@@ -375,7 +375,8 @@ test("renderer never draws more than the cap, even for a 2000 node, 5000 edge sn
     expect(result.svg).toBeLessThanOrEqual(50);
     expect(result.list).toBeLessThanOrEqual(50);
     expect(result.rows).toBeLessThanOrEqual(100);
-    expect(result.ms).toBeLessThan(5000);
+    // Measured median 31 ms in the browser; about 10x for shared machines.
+    expect(result.ms).toBeLessThan(300);
     // Clusters toggle in place and focus buttons call back.
     await page.evaluate(() => {
       document.getElementById("host")?.replaceChildren();

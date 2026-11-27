@@ -35,6 +35,15 @@ export const KIND_ORDER = [
 const KIND_RANK = new Map(KIND_ORDER.map((kind, index) => [kind, index]));
 
 const MARKS = /\p{M}+/gu;
+// Format characters (Unicode Cf): bidi controls, zero-width characters, soft
+// hyphen, the byte order mark. They are invisible or reorder what is drawn, so
+// a title could look like "reading" while its characters spell "gnidaer".
+const FORMAT = /\p{Cf}+/gu;
+// The ones that change what is DRAWN (embeddings, overrides, isolates and the
+// Arabic letter mark), plus the ones that draw nothing. The palette shows the
+// text with these removed, so what a person sees is what was searched.
+const HIDDEN_OR_REORDERING =
+  /[\u00ad\u061c\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]+/gu;
 const SPACES = /[\s\p{Cc}]+/gu;
 
 /**
@@ -46,9 +55,21 @@ export function fold(value, limit = MAX_FIELD) {
   return text
     .normalize("NFKD")
     .replace(MARKS, "")
+    .replace(FORMAT, "")
     .toLowerCase()
     .replace(SPACES, " ")
     .trim()
+    .slice(0, limit);
+}
+
+/**
+ * Text as the palette shows it: bounded, with the reordering and invisible
+ * format characters removed (joiners that shape real scripts and emoji stay).
+ */
+export function displayText(value, limit = MAX_FIELD) {
+  return String(value ?? "")
+    .slice(0, limit * 2)
+    .replace(HIDDEN_OR_REORDERING, "")
     .slice(0, limit);
 }
 
@@ -90,13 +111,14 @@ export function scoreField(term, field) {
  * that rank below the title; `href` is where activating the entry goes.
  */
 export function makeEntry(input) {
-  const title = String(input.title ?? "").slice(0, MAX_FIELD);
+  const title = displayText(input.title);
   return {
     kind: input.kind,
     id: String(input.id ?? title).slice(0, 128),
     title,
-    subtitle: String(input.subtitle ?? "").slice(0, MAX_FIELD),
+    subtitle: displayText(input.subtitle),
     href: input.href,
+    command: input.command,
     boost: input.boost ?? 0,
     foldedTitle: fold(title),
     foldedKeys: (input.keys ?? []).slice(0, 6).map((key) => fold(key)),

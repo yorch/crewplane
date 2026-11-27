@@ -6,15 +6,19 @@
 // alerts" (see requestDesktopPermission).
 import { logResource } from "./aux.js";
 import {
+  alertTarget,
   createAlertState,
   describeAlerts,
   factsFromSnapshot,
   observe,
+  SUPERVISOR_CONFIRM_MS,
   sanitizeAlertPrefs,
   shouldCount,
   shouldNotify,
+  supervisorPending,
 } from "./notify-core.js";
 import { readAlerts, writeAlerts } from "./prefs-core.js";
+import { hrefFor } from "./route.js";
 import { store } from "./store.js";
 import { setUnseen, unseenCount } from "./title.js";
 
@@ -34,6 +38,10 @@ export function alertPrefs() {
     ...prefs,
     categories: { ...prefs.categories },
   };
+}
+/** Whether any alert output (title count or desktop notification) is on. */
+export function alertsEnabled() {
+  return prefs.badge || prefs.desktop;
 }
 export function saveAlertPrefs(next) {
   prefs = sanitizeAlertPrefs(next);
@@ -75,10 +83,22 @@ function show(events) {
   if (shouldNotify(prefs, situation)) {
     try {
       // A fixed tag replaces the previous alert instead of stacking them.
-      new Notification(message.title, {
+      const notification = new Notification(message.title, {
         body: message.body,
         tag: "crewplane-alert",
       });
+      // Clicking brings this tab forward and opens the view the alert is
+      // about. The target is one of a few fixed hashes, never data.
+      const target = alertTarget(events);
+      notification.onclick = () => {
+        try {
+          window.focus();
+          notification.close();
+          window.crewplane?.navigate?.(hrefFor(target.view, target.params));
+        } catch {
+          // Focus can be refused; the alert has still been seen.
+        }
+      };
     } catch {
       // Some browsers refuse the constructor; the title count still works.
     }
@@ -96,6 +116,19 @@ export function checkAlerts() {
   );
   const events = observe(state, facts, prefs);
   if (events.length) show(events);
+  if (supervisorPending(state)) scheduleRecheck();
+}
+// A supervisor that looks down is only announced when it still does a few
+// seconds later and the control log has had time to show a stop request, so
+// look again even if nothing else changes.
+let recheck = null;
+function scheduleRecheck() {
+  if (recheck !== null) return;
+  recheck = setTimeout(async () => {
+    recheck = null;
+    await logResource.load({ force: true });
+    checkAlerts();
+  }, SUPERVISOR_CONFIRM_MS + 500);
 }
 function clearUnseen() {
   if (document.visibilityState === "visible" && document.hasFocus()) {

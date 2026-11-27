@@ -108,6 +108,18 @@ export function isTypingTarget(node) {
  *   singleKeys    single key shortcuts are enabled
  * Returns { action, preventDefault } or null.
  */
+/**
+ * Ctrl or Cmd+K by the character produced, so a Dvorak "k" (or any other
+ * layout that puts a Latin letter there) is judged by that letter. Only when
+ * the layout produces no Latin letter at all (Cyrillic, Greek, Hebrew...) does
+ * the physical key decide, since otherwise the shortcut would not exist there.
+ */
+function isK(event) {
+  const key = event.key;
+  if (typeof key !== "string") return false;
+  if (/^[A-Za-z]$/.test(key)) return key.toLowerCase() === "k";
+  return event.code === "KeyK";
+}
 export function createKeymap(options = {}) {
   const timeout = options.timeout ?? CHORD_TIMEOUT_MS;
   let pendingSince = null;
@@ -149,7 +161,7 @@ export function createKeymap(options = {}) {
       if (event.ctrlKey || event.metaKey) {
         reset();
         if (
-          key.toLowerCase() === "k" &&
+          isK(event) &&
           !event.altKey &&
           !event.shiftKey &&
           !(event.ctrlKey && event.metaKey)
@@ -187,8 +199,9 @@ export function createKeymap(options = {}) {
         pendingSince = now;
         return { action: "chord-start", preventDefault: false };
       }
-      if (key === "/" && !event.shiftKey)
-        return { action: "palette", preventDefault: true };
+      // "/" is matched by the character the layout produced, whether or not
+      // Shift was needed to type it (Shift+7 on German, Shift+: on French).
+      if (key === "/") return { action: "palette", preventDefault: true };
       if (key === "?") return { action: "help", preventDefault: true };
       return null;
     },

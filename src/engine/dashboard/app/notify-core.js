@@ -101,6 +101,20 @@ export function factsFromSnapshot(data, logEntries) {
       : null,
     supervisor:
       typeof headless?.state === "string" ? headless.state : "unknown",
+    // The newest stop command the operator got applied; null until the log
+    // has been read. It tells a requested stop from a crash.
+    stopSeq: Array.isArray(logEntries)
+      ? logEntries.reduce(
+          (top, entry) =>
+            entry?.action === "stop" &&
+            entry?.outcome === "applied" &&
+            Number.isSafeInteger(entry.seq) &&
+            entry.seq > top
+              ? entry.seq
+              : top,
+          0,
+        )
+      : null,
   };
 }
 
@@ -109,20 +123,108 @@ export function createAlertState() {
     known: Object.fromEntries(CATEGORIES.map((name) => [name, false])),
     present: Object.fromEntries(CATEGORIES.map((name) => [name, new Set()])),
     alerted: Object.fromEntries(CATEGORIES.map((name) => [name, []])),
-    supervisor: null,
+    supervisor: createSupervisorWatch(),
   };
 }
 
-const UP = new Set(["running"]);
-const DOWN = new Set(["stopped", "stale"]);
+/** A supervisor must look down this long apart in two observations to alert. */
+export const SUPERVISOR_CONFIRM_MS = 3000;
+/** After a supervisor alert, another one waits this long (a flapping process). */
+export const SUPERVISOR_COOLDOWN_MS = 10 * 60 * 1000;
+function createSupervisorWatch() {
+  return {
+    // Seen running since the last alert or clean stop: only then can it "stop
+    // unexpectedly".
+    armed: false,
+    // A stop was requested (a "draining" snapshot, or a stop command in the
+    // control log newer than the last running snapshot).
+    requested: false,
+    // The highest applied stop command seen while it was running.
+    stopBase: 0,
+    // When the current unbroken run of down snapshots began, and how many.
+    downSince: null,
+    downCount: 0,
+    lastAlert: null,
+  };
+}
+/** True while a down supervisor waits for its second, later observation. */
+export function supervisorPending(state) {
+  return state.supervisor.armed && state.supervisor.downCount === 1;
+}
+
+function observeSupervisor(state, facts, prefs, now, events) {
+  if (typeof facts.supervisor !== "string") return;
+  const watch = state.supervisor;
+  const status = facts.supervisor;
+  const stopSeq = Number.isSafeInteger(facts.stopSeq) ? facts.stopSeq : null;
+  if (status === "running") {
+    watch.armed = true;
+    watch.requested = false;
+    watch.downSince = null;
+    watch.downCount = 0;
+    if (stopSeq !== null) watch.stopBase = Math.max(watch.stopBase, stopSeq);
+    state.known.supervisor = true;
+    return;
+  }
+  // "draining" is a requested stop in progress, so it is never "unexpected".
+  if (status === "draining") {
+    watch.requested = true;
+    watch.downSince = null;
+    watch.downCount = 0;
+    state.known.supervisor = true;
+    return;
+  }
+  if (status !== "stopped" && status !== "stale") {
+    watch.downSince = null;
+    watch.downCount = 0;
+    return;
+  }
+  state.known.supervisor = true;
+  if (!watch.armed) return;
+  // A stop the operator asked for through the dashboard is in the control log.
+  // An unread log (null) proves nothing either way, so nothing is announced
+  // from "stopped" until it is read; "stale" needs no log (a stop does not
+  // leave a process looking stale).
+  if (stopSeq !== null && stopSeq > watch.stopBase) watch.requested = true;
+  if (watch.requested || (status === "stopped" && stopSeq === null)) {
+    if (watch.requested) watch.armed = false;
+    return;
+  }
+  if (watch.downCount === 0) watch.downSince = now;
+  watch.downCount++;
+  if (
+    watch.downCount < 2 ||
+    now - (watch.downSince ?? now) < SUPERVISOR_CONFIRM_MS
+  )
+    return;
+  watch.armed = false;
+  const cooled =
+    watch.lastAlert === null || now - watch.lastAlert >= SUPERVISOR_COOLDOWN_MS;
+  if (cooled && prefs.categories?.supervisor !== false) {
+    watch.lastAlert = now;
+    events.push({ category: "supervisor", id: `supervisor:${status}` });
+  }
+}
+
 /**
  * Compares `facts` with the previous observation. The first call never alerts
  * (everything on screen at load is already known). An id alerts once: while it
  * stays present, and for a bounded while after it disappears (a flapping
  * snapshot does not repeat it). Categories switched off still update the
  * memory, so turning one on later does not announce old items.
+ *
+ * The supervisor is judged differently, because "not running" is often what
+ * the operator asked for: it alerts only after being seen running, only when
+ * no stop command (control log, `facts.stopSeq`) explains it, only when it
+ * still looks down at a second observation at least SUPERVISOR_CONFIRM_MS
+ * later, and at most once per SUPERVISOR_COOLDOWN_MS.
  */
-export function observe(state, facts, prefs = DEFAULT_ALERT_PREFS) {
+export function observe(
+  state,
+  facts,
+  prefs = DEFAULT_ALERT_PREFS,
+  now = Date.now(),
+) {
   const events = [];
   for (const category of CATEGORIES.filter((name) => name !== "supervisor")) {
     // Not read yet (null): nothing is known, so the next read is the baseline.
@@ -141,22 +243,27 @@ export function observe(state, facts, prefs = DEFAULT_ALERT_PREFS) {
     state.present[category] = current;
     state.known[category] = true;
   }
-  if (typeof facts.supervisor === "string") {
-    if (
-      state.known.supervisor &&
-      UP.has(state.supervisor ?? "") &&
-      DOWN.has(facts.supervisor) &&
-      prefs.categories?.supervisor !== false
-    )
-      events.push({
-        category: "supervisor",
-        id: `supervisor:${facts.supervisor}`,
-      });
-    // "draining" is a requested stop in progress, so it is never "unexpected".
-    state.supervisor = facts.supervisor;
-    state.known.supervisor = true;
-  }
+  observeSupervisor(state, facts, prefs, now, events);
   return events;
+}
+
+/**
+ * Where clicking an alert goes: a fixed view and filter per category (the
+ * page builds the hash with hrefFor). Never derived from snapshot data.
+ */
+export const ALERT_TARGETS = {
+  questions: { view: "messages", params: { filter: "open" } },
+  blocked: { view: "tasks", params: { state: "blocked" } },
+  paused: { view: "agents", params: { status: "paused" } },
+  control: { view: "audit", params: { outcome: "refused" } },
+  supervisor: { view: "overview", params: {} },
+};
+/** The target of the first event whose category has one (fixed order). */
+export function alertTarget(events) {
+  for (const category of CATEGORIES)
+    if (events.some((event) => event.category === category))
+      return ALERT_TARGETS[category];
+  return ALERT_TARGETS.supervisor;
 }
 
 /** Counts per category, in the fixed category order. */

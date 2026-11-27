@@ -13,6 +13,12 @@ function storage() {
   }
 }
 let current = "system";
+const listeners = new Set();
+
+/** Called after the theme changes here or in another tab. */
+export function onThemeChange(listener) {
+  listeners.add(listener);
+}
 
 export function currentTheme() {
   return current;
@@ -22,6 +28,7 @@ export function applyTheme(theme) {
   if (theme === "light" || theme === "dark")
     document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
+  for (const listener of listeners) listener(theme);
 }
 export function setTheme(theme) {
   applyTheme(theme);

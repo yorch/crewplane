@@ -208,3 +208,29 @@ it("declares both colour schemes and applies the saved theme before paint", () =
   expect(theme).toContain(':root[data-theme="dark"]');
   expect(theme).toContain("@media (prefers-color-scheme: dark)");
 });
+
+it("prints light whatever the theme: a print block that mirrors the light tokens and outranks both dark blocks", () => {
+  const start = theme.indexOf("@media print");
+  expect(start).toBeGreaterThan(0);
+  const print = tokens(block(theme.slice(start), "html:root"));
+  expect([...print.entries()]).toEqual([...light.entries()]);
+  expect(block(theme.slice(start), "html:root")).toContain(
+    "color-scheme: light",
+  );
+  // Specificity: html:root:not(.x) is (0,2,1); the dark blocks are (0,2,0).
+  expect(theme.slice(start)).toContain("html:root:not(.print-never)");
+  expect(theme.indexOf("@media print")).toBeGreaterThan(
+    theme.lastIndexOf(':root[data-theme="dark"]'),
+  );
+});
+
+it("print styles hide the chrome and keep tables", () => {
+  const css = read("dashboard.css");
+  const print = css.slice(css.lastIndexOf("@media print"));
+  for (const selector of [".skip-link", ".sidebar", "dialog", ".toolbar"])
+    expect(print).toContain(selector);
+  expect(print).toMatch(/display:\s*none/);
+  expect(print).not.toContain("!important");
+  expect(print).not.toMatch(/\btable\b[^{]*\{[^}]*display:\s*none/);
+  expect(print).toContain("thead");
+});

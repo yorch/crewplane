@@ -161,11 +161,26 @@ const label = (event) =>
 /**
  * Compares two runs' loaded events: totals, counts per type and an alignment
  * by position (event 1 with event 1, and so on) that marks where the two first
- * differ in type. Both inputs are cut to the latest 500 events.
+ * differ in type. Both inputs are cut to the latest 500 events (the same
+ * window on both sides); `totals` ({ a, b }) are the events each run holds,
+ * so the result can say how much of each was left out.
  */
-export function compareRuns(a, b) {
+export function compareRuns(a, b, totals = {}) {
   const left = a.slice(-MAX_EVENTS);
   const right = b.slice(-MAX_EVENTS);
+  const side = (shown, total, atLeast = false) => {
+    const known = Number.isSafeInteger(total) && total >= shown.length;
+    return {
+      shown: shown.length,
+      total: known ? total : shown.length,
+      cut: known && total > shown.length,
+      atLeast: known && atLeast,
+    };
+  };
+  const sizes = {
+    a: side(left, totals.a),
+    b: side(right, totals.b, totals.bAtLeast === true),
+  };
   const total = {
     a: summarize(left),
     b: summarize(right),
@@ -201,7 +216,7 @@ export function compareRuns(a, b) {
       same,
     });
   }
-  return { total, byKind, rows, firstDifference };
+  return { total, byKind, rows, firstDifference, window: sizes };
 }
 
 /** "1.2 s", "340 ms", "2 min 5 s": a readable duration, or "not recorded". */
@@ -227,4 +242,14 @@ export function comparable(selected, runs) {
     )
     .sort((x, y) => (x.runId < y.runId ? 1 : -1))
     .slice(0, 40);
+}
+
+const count = (value) => value.toLocaleString("en-US");
+/** One sentence naming exactly what was compared. */
+export function describeWindow(window) {
+  const part = (label, side) =>
+    side.cut
+      ? `${label} ${count(side.shown)} of ${side.atLeast ? "at least " : ""}${count(side.total)} events (older ${count(side.total - side.shown)}${side.atLeast ? " or more" : ""} left out)`
+      : `${label} all ${count(side.total)} ${side.total === 1 ? "event" : "events"}`;
+  return `Compared: the latest ${MAX_EVENTS} events of each run. ${part("This run:", window.a)}; ${part("other run:", window.b)}.`;
 }

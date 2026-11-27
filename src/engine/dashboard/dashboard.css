@@ -1086,7 +1086,11 @@ details.info p {
   align-items: start;
 }
 .run-history {
-  display: grid;
+  /* A column, not a grid: a grid's rows shrink to the capped height and cut
+     each row to the button's minimum while its content (lane, task, status,
+     time) needs about twice that. */
+  display: flex;
+  flex-direction: column;
   gap: 4px;
   min-inline-size: 0;
   max-height: min(58vh, 560px);
@@ -1097,6 +1101,7 @@ details.info p {
 }
 .run-row {
   display: grid;
+  flex: none;
   gap: 4px;
   width: 100%;
   padding: 8px 10px;
@@ -2570,10 +2575,12 @@ body:has(.modal[open]) {
   text-transform: uppercase;
 }
 .palette-title {
+  unicode-bidi: isolate;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 .palette-sub {
+  unicode-bidi: isolate;
   grid-column: 2;
   min-width: 0;
   color: var(--muted);
@@ -2799,4 +2806,80 @@ body:has(.modal[open]) {
 .pref-group .text-button {
   justify-self: start;
   border-color: var(--border-strong);
+}
+
+/* Printing: a plain, light page of the current view. Controls, the sidebar and
+   dialogs are not content; tables, headings and text are kept and may break
+   across pages without cutting a row in half. Colours are the light tokens
+   from theme.css whatever the screen theme is. */
+@media print {
+  .skip-link,
+  .sidebar,
+  .toolbar,
+  .toolbar-actions,
+  .nav-toggle,
+  .icon-button,
+  .text-button,
+  .banner,
+  body dialog[open],
+  body .modal[open],
+  body .lightbox[open] {
+    display: none;
+  }
+  html,
+  body {
+    background: var(--bg);
+    color: var(--text);
+  }
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .app {
+    display: block;
+    min-height: 0;
+  }
+  .workspace {
+    max-width: none;
+    padding: 0;
+  }
+  main,
+  .view,
+  .panel {
+    overflow: visible;
+  }
+  .compare-scroll,
+  .table-scroll,
+  [role="region"] {
+    max-height: none;
+    overflow: visible;
+  }
+  [role="region"][tabindex] {
+    outline: none;
+  }
+  .timeline,
+  .run-events {
+    max-height: none;
+    overflow: visible;
+  }
+  table {
+    border-collapse: collapse;
+  }
+  thead {
+    display: table-header-group;
+  }
+  tr,
+  .panel,
+  .timeline-row {
+    break-inside: avoid;
+  }
+  h1,
+  h2,
+  h3 {
+    break-after: avoid;
+  }
+  a {
+    color: var(--text);
+    text-decoration: underline;
+  }
 }

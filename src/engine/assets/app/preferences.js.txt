@@ -18,7 +18,7 @@ import {
   setSingleKeys,
   singleKeysEnabled,
 } from "./shortcuts.js";
-import { currentTheme, setTheme } from "./theme.js";
+import { currentTheme, onThemeChange, setTheme } from "./theme.js";
 
 let modal = null;
 let refs = null;
@@ -225,6 +225,8 @@ export function openPreferences() {
   modal.open();
 }
 export function initPreferences() {
+  // A theme chosen in another tab must update the pressed state here too.
+  onThemeChange(syncPreferences);
   document
     .getElementById("prefs-open")
     ?.addEventListener("click", openPreferences);

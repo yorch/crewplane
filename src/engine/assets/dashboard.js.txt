@@ -17,6 +17,7 @@ import {
   fillFilterOptions,
   wireFilters,
 } from "./app/filters.js";
+import { startHiddenPoll } from "./app/hidden-poll.js";
 import { startLive } from "./app/live.js";
 import { checkAlerts, initNotify } from "./app/notify.js";
 import { initPalette } from "./app/palette.js";
@@ -121,6 +122,7 @@ showActiveView();
 announceRoute();
 refresh();
 startLive();
+startHiddenPoll();
 startControls();
 // Revisions move without the board changing; keep the pins fresh (a server
 // without controls is asked once and never again).

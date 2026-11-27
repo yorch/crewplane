@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ALERT_TARGETS,
+  alertTarget,
   CATEGORIES,
   createAlertState,
   DEFAULT_ALERT_PREFS,
@@ -8,9 +10,12 @@ import {
   MAX_ALERTED,
   MAX_FACT_IDS,
   observe,
+  SUPERVISOR_CONFIRM_MS,
+  SUPERVISOR_COOLDOWN_MS,
   sanitizeAlertPrefs,
   shouldCount,
   shouldNotify,
+  supervisorPending,
   titleWithBadge,
 } from "./notify-core.js";
 
@@ -60,18 +65,21 @@ describe("diffing snapshots", () => {
   });
   it("covers every category", () => {
     const state = createAlertState();
-    observe(state, facts(), all);
-    const events = observe(
-      state,
-      facts({
-        questions: ["q"],
-        blocked: ["T"],
-        paused: ["lane:1"],
-        control: ["7"],
-        supervisor: "stopped",
-      }),
-      all,
-    );
+    observe(state, facts({ stopSeq: 0 }), all, 0);
+    const down = facts({
+      questions: ["q"],
+      blocked: ["T"],
+      paused: ["lane:1"],
+      control: ["7"],
+      supervisor: "stopped",
+      stopSeq: 0,
+    });
+    const first = observe(state, down, all, 1000);
+    expect(first.map((e) => e.category)).not.toContain("supervisor");
+    const events = [
+      ...first,
+      ...observe(state, down, all, 1000 + SUPERVISOR_CONFIRM_MS),
+    ];
     expect(events.map((e) => e.category).sort()).toEqual(
       [...CATEGORIES].sort(),
     );
@@ -99,18 +107,12 @@ describe("diffing snapshots", () => {
       { category: "control", id: "3" },
     ]);
   });
-  it("announces the supervisor stopping only from running", () => {
-    const state = createAlertState();
-    observe(state, facts({ supervisor: "running" }), all);
-    expect(observe(state, facts({ supervisor: "draining" }), all)).toEqual([]);
-    expect(observe(state, facts({ supervisor: "stopped" }), all)).toEqual([]);
-    expect(observe(state, facts({ supervisor: "stopped" }), all)).toEqual([]);
-    observe(state, facts({ supervisor: "running" }), all);
-    expect(observe(state, facts({ supervisor: "stale" }), all)).toHaveLength(1);
-    // Starting up in a stopped state is not an event.
+  it("never announces a supervisor that was not seen running", () => {
     const cold = createAlertState();
-    observe(cold, facts({ supervisor: "stopped" }), all);
-    expect(observe(cold, facts({ supervisor: "stopped" }), all)).toEqual([]);
+    observe(cold, facts({ supervisor: "stopped", stopSeq: 0 }), all, 0);
+    expect(
+      observe(cold, facts({ supervisor: "stopped", stopSeq: 0 }), all, 10_000),
+    ).toEqual([]);
   });
   it("keeps its memory bounded", () => {
     const state = createAlertState();
@@ -260,5 +262,144 @@ describe("when to show", () => {
       [...CATEGORIES].sort(),
     );
     expect(Object.keys(clean)).not.toContain("evil");
+  });
+});
+
+describe("supervisor alerts: crash, clean stop and flapping", () => {
+  const sup = (supervisor: string, stopSeq: number | null = 0) =>
+    facts({ supervisor, stopSeq });
+  const T = SUPERVISOR_CONFIRM_MS;
+  it("a crash (stopped, no stop command) alerts once, on the second observation", () => {
+    const state = createAlertState();
+    observe(state, sup("running"), all, 0);
+    expect(observe(state, sup("stopped"), all, 1000)).toEqual([]);
+    expect(supervisorPending(state)).toBe(true);
+    // The second look too soon (the log update right behind the snapshot).
+    expect(observe(state, sup("stopped"), all, 1500)).toEqual([]);
+    expect(observe(state, sup("stopped"), all, 1000 + T)).toEqual([
+      { category: "supervisor", id: "supervisor:stopped" },
+    ]);
+    for (let i = 1; i < 5; i++)
+      expect(observe(state, sup("stopped"), all, 1000 + T + i * 5000)).toEqual(
+        [],
+      );
+  });
+  it("a clean stop with a stop command in the log never alerts", () => {
+    const state = createAlertState();
+    observe(state, sup("running", 3), all, 0);
+    // The stop command (seq 4) is in the log when the snapshot shows stopped.
+    for (const at of [1000, 6000, 12000])
+      expect(observe(state, sup("stopped", 4), all, at)).toEqual([]);
+  });
+  it("a stop command that reaches the log a moment after the snapshot still suppresses it", () => {
+    const state = createAlertState();
+    observe(state, sup("running", 3), all, 0);
+    expect(observe(state, sup("stopped", 3), all, 1000)).toEqual([]);
+    for (const at of [6000, 12000])
+      expect(observe(state, sup("stopped", 4), all, at)).toEqual([]);
+  });
+  it("a requested stop through draining never alerts", () => {
+    const state = createAlertState();
+    observe(state, sup("running"), all, 0);
+    observe(state, sup("draining"), all, 1000);
+    for (const at of [2000, 9000, 20000])
+      expect(observe(state, sup("stopped"), all, at)).toEqual([]);
+  });
+  it("a refused or older stop does not excuse a crash", () => {
+    const state = createAlertState();
+    // The log entry (seq 2) predates the running snapshot.
+    observe(state, sup("running", 2), all, 0);
+    observe(state, sup("stopped", 2), all, 1000);
+    expect(observe(state, sup("stopped", 2), all, 1000 + T)).toHaveLength(1);
+  });
+  it("does not announce a stop while the control log is unread", () => {
+    const state = createAlertState();
+    observe(state, sup("running", null), all, 0);
+    for (const at of [1000, 9000, 20000])
+      expect(observe(state, sup("stopped", null), all, at)).toEqual([]);
+  });
+  it("stale needs two observations apart and no log", () => {
+    const state = createAlertState();
+    observe(state, sup("running", null), all, 0);
+    expect(observe(state, sup("stale", null), all, 1000)).toEqual([]);
+    expect(observe(state, sup("stale", null), all, 1000 + T)).toHaveLength(1);
+  });
+  it("a flapping supervisor does not alert on every flip", () => {
+    const state = createAlertState();
+    let at = 0;
+    let alerts = 0;
+    observe(state, sup("running"), all, at);
+    // running, stale, running ... one stale observation at a time.
+    for (let i = 0; i < 20; i++) {
+      at += 5000;
+      alerts += observe(state, sup("stale"), all, at).length;
+      at += 5000;
+      alerts += observe(state, sup("running"), all, at).length;
+    }
+    expect(alerts).toBe(0);
+  });
+  it("a long flap with two stale looks each time alerts at most once per cooldown", () => {
+    const state = createAlertState();
+    let at = 0;
+    const times: number[] = [];
+    observe(state, sup("running"), all, at);
+    for (let i = 0; i < 40; i++) {
+      for (const _ of [0, 1]) {
+        at += T;
+        if (observe(state, sup("stale"), all, at).length) times.push(at);
+      }
+      at += 5000;
+      observe(state, sup("running"), all, at);
+    }
+    expect(times.length).toBeGreaterThanOrEqual(1);
+    for (let i = 1; i < times.length; i++)
+      expect((times[i] ?? 0) - (times[i - 1] ?? 0)).toBeGreaterThanOrEqual(
+        SUPERVISOR_COOLDOWN_MS,
+      );
+    // 40 flips over about 7 minutes: one alert.
+    expect(times).toHaveLength(1);
+  });
+  it("respects the category switch and stays armed state clean", () => {
+    const state = createAlertState();
+    const off = {
+      ...all,
+      categories: { ...all.categories, supervisor: false },
+    };
+    observe(state, sup("running"), off, 0);
+    observe(state, sup("stale"), off, 1000);
+    expect(observe(state, sup("stale"), off, 1000 + T)).toEqual([]);
+  });
+  it("reads the newest applied stop from the control log", () => {
+    const data = { headless: { state: "running" } };
+    const entries = [
+      { seq: 2, action: "stop", outcome: "applied" },
+      { seq: 7, action: "stop", outcome: "refused" },
+      { seq: 5, action: "pause", outcome: "applied" },
+    ];
+    expect(factsFromSnapshot(data, entries).stopSeq).toBe(2);
+    expect(factsFromSnapshot(data, []).stopSeq).toBe(0);
+    expect(factsFromSnapshot(data, undefined).stopSeq).toBeNull();
+  });
+});
+
+describe("alert click targets", () => {
+  it("are fixed, valid hashes for every category", async () => {
+    const { parseHash, hrefFor } = await import("./route.js");
+    for (const name of CATEGORIES) {
+      const target = ALERT_TARGETS[name as keyof typeof ALERT_TARGETS];
+      const parsed = parseHash(hrefFor(target.view, target.params));
+      expect(parsed.valid).toBe(true);
+      expect(parsed.view).toBe(target.view);
+      expect(parsed.params).toEqual(target.params);
+    }
+  });
+  it("picks the first category present and ignores event ids", () => {
+    expect(
+      alertTarget([
+        { category: "control", id: "#/evil" },
+        { category: "blocked", id: "x" },
+      ]),
+    ).toBe(ALERT_TARGETS.blocked);
+    expect(alertTarget([])).toBe(ALERT_TARGETS.supervisor);
   });
 });

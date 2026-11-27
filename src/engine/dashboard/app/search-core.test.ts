@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildIndex,
+  displayText,
   fold,
   INDEX_LIMITS,
   MAX_RESULTS,
@@ -114,7 +115,7 @@ describe("ranking", () => {
       "constructor",
       "(?:a+)+$",
       "\\",
-      "‮evil",
+      "\u202eevil",
       "'; DROP TABLE tasks;--",
       "🙂".repeat(100),
     ];
@@ -161,17 +162,125 @@ describe("index bounds", () => {
         keys: ["T-1", "coordinator", "builder", "question"],
         href: `#/messages?thread=m${i}`,
       });
-    const started = performance.now();
-    const index = buildIndex(raw);
-    const built = performance.now() - started;
-    const searchStart = performance.now();
-    for (const query of ["t-2999", "cafe 17", "deploy pipe", "zzzz", "q"])
-      search(index.entries, query);
-    const searched = (performance.now() - searchStart) / 5;
+    const queries = ["t-2999", "cafe 17", "deploy pipe", "zzzz", "q"];
+    // Best of several runs: the first is cold (JIT) and contention only ever
+    // slows a run, so the minimum is the stable figure.
+    let built = Number.POSITIVE_INFINITY;
+    let searched = Number.POSITIVE_INFINITY;
+    let index = buildIndex(raw);
+    for (let attempt = 0; attempt < 7; attempt++) {
+      const started = performance.now();
+      index = buildIndex(raw);
+      built = Math.min(built, performance.now() - started);
+      const searchStart = performance.now();
+      for (const query of queries) search(index.entries, query);
+      searched = Math.min(searched, (performance.now() - searchStart) / 5);
+    }
     expect(index.entries).toHaveLength(6000);
-    // Budgets are deliberately loose (shared CI machines); a regression to a
-    // quadratic or unbounded algorithm still fails by orders of magnitude.
-    expect(built).toBeLessThan(1500);
-    expect(searched).toBeLessThan(300);
+    // Measured warm: about 10 ms to build 6,000 entries and 1.8 ms per query;
+    // the budgets are about 10x that for shared CI machines. The operation
+    // count test below is the exact check; these only catch gross slowdowns.
+    expect(built).toBeLessThan(130);
+    expect(searched).toBeLessThan(20);
+  });
+});
+
+describe("format characters and spoofing", () => {
+  const entry = (title: string, extra = {}) =>
+    makeEntry({ kind: "task", id: title, title, href: "#/x", ...extra });
+  it("fold removes every Unicode format character", () => {
+    expect(
+      fold("a\u200bb\u200cc\u200dd\u2060e\ufeff\u00adf\u202eg\u2066h\u2069"),
+    ).toBe("abcdefgh");
+    // Marks and case still fold as before.
+    expect(fold("Édition")).toBe("edition");
+  });
+  it("a title with a right-to-left override matches what is displayed, not the logical order", () => {
+    // Logically "\u202egnidaer": drawn as "reading" while the override applies.
+    const spoof = entry("\u202egnidaer the plan");
+    // What the palette shows has the override removed, so it reads as stored.
+    expect(spoof.title).toBe("gnidaer the plan");
+    const { results } = search([spoof], "gnidaer");
+    expect(results).toHaveLength(1);
+    expect(results[0]?.title).toBe("gnidaer the plan");
+    // The word the override would have drawn is NOT a match.
+    expect(search([spoof], "reading").results).toHaveLength(0);
+  });
+  it("zero-width characters cannot hide or fake a match", () => {
+    const hidden = entry("pa\u200bss\u2060word reset");
+    expect(search([hidden], "password").results).toHaveLength(1);
+    expect(hidden.title).toBe("password reset");
+    expect(search([entry("password")], "pa\u200bss").results).toHaveLength(1);
+    // Subtitles and keys get the same treatment.
+    const sub = entry("t", { subtitle: "a\u202db", keys: ["k\u200bey"] });
+    expect(sub.subtitle).toBe("ab");
+    expect(search([sub], "key").results).toHaveLength(1);
+  });
+  it("keeps joiners that shape real text", () => {
+    const family = "\u{1f468}\u200d\u{1f469}";
+    expect(displayText(family)).toBe(family);
+    expect(displayText("می\u200cخواهم")).toContain("\u200c");
+  });
+});
+
+describe("work grows linearly, counted rather than timed", () => {
+  /** Reads of an entry's fields during one search, over `n` entries. */
+  const reads = (n: number, query: string) => {
+    let count = 0;
+    const entries = Array.from({ length: n }, (_, i) => {
+      const base = makeEntry({
+        kind: "task",
+        id: `T-${i}`,
+        title: `T-${i} Implement feature ${i}`,
+        keys: [`T-${i}`, "builder", "working"],
+        href: "#/x",
+      });
+      return new Proxy(base, {
+        get(target, key, receiver) {
+          count++;
+          return Reflect.get(target, key, receiver);
+        },
+      });
+    });
+    count = 0;
+    search(entries, query);
+    return count;
+  };
+  it("doubling the entries at most doubles the field reads for a search", () => {
+    for (const query of ["feature 17", "t-9", "zzzz", ""]) {
+      const small = reads(500, query);
+      const large = reads(1000, query);
+      expect(small, query).toBeGreaterThan(0);
+      // Linear is 2.0 and sorting the matches adds a little; a per-entry
+      // scan of every other entry would be 4.
+      expect(large / small, query).toBeLessThanOrEqual(2.4);
+    }
+  });
+  it("indexing counts each raw entry once", () => {
+    const touched = (n: number) => {
+      let count = 0;
+      const raw = Array.from(
+        { length: n },
+        (_, i) =>
+          new Proxy(
+            {
+              kind: "thread",
+              id: `m${i}`,
+              title: `Q ${i}`,
+              keys: [],
+              href: "#",
+            },
+            {
+              get(target, key, receiver) {
+                count++;
+                return Reflect.get(target, key, receiver);
+              },
+            },
+          ),
+      );
+      buildIndex(raw);
+      return count;
+    };
+    expect(touched(2000) / touched(1000)).toBeLessThanOrEqual(2.05);
   });
 });
