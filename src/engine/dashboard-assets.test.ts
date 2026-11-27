@@ -37,19 +37,52 @@ it("keeps the generated module and text copies in step with a fresh scan", () =>
   expect(renderAssetsModule(scanned)).toBe(renderAssetsModule(scanned));
 });
 
-const specifier = /(?:\bfrom\s*|\bimport\s*\(?\s*)["']([^"']+)["']/g;
+/** Removes block and line comments (a line comment must not follow a colon, as in a URL). */
+const stripComments = (code: string) =>
+  code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+/**
+ * Module specifiers written in a script: static `import`/`export ... from`,
+ * side-effect imports and dynamic `import(...)` with a string or template
+ * literal. A dynamic import whose argument is computed is reported as such.
+ */
+const specifiers = (source: string) => {
+  const code = stripComments(source);
+  const found: string[] = [];
+  const quoted = /["'`]((?:[^"'`\\\n]|\\.)*)["'`]/;
+  for (const match of code.matchAll(
+    /(?:\bfrom\s*|\bimport\s*)(["'])([^"'\n]+)\1/g,
+  ))
+    found.push(match[2] ?? "");
+  for (const match of code.matchAll(/\bimport\s*\(\s*([^)]*)\)/g)) {
+    const argument = (match[1] ?? "").trim();
+    const literal = quoted.exec(argument);
+    if (
+      literal &&
+      argument.length === (literal[0]?.length ?? -1) &&
+      !argument.includes("${")
+    )
+      found.push(literal[1] ?? "");
+    else found.push(`<dynamic: ${argument}>`);
+  }
+  return found;
+};
 /** Resolves a module specifier written in an embedded script to an embedded name. */
-const resolveSpecifier = (from: string, value: string) =>
-  value.startsWith("/")
+const resolveSpecifier = (from: string, value: string) => {
+  // Browsers accept only relative (./, ../) and absolute-path (/) specifiers.
+  if (!/^(?:\.\.?\/|\/)/.test(value))
+    throw new Error(
+      `${from}: "${value}" is not a browser-resolvable specifier`,
+    );
+  return value.startsWith("/")
     ? value.slice(1)
     : posix.normalize(posix.join(posix.dirname(from), value));
+};
 
 it("serves every module that any dashboard script imports", () => {
   let checked = 0;
   for (const name of scanned.filter((n) => n.endsWith(".js"))) {
-    const code = read(name).replace(/^\s*\/\/.*$/gm, "");
-    for (const match of code.matchAll(specifier)) {
-      const target = resolveSpecifier(name, match[1] ?? "");
+    for (const value of specifiers(read(name))) {
+      const target = resolveSpecifier(name, value);
       expect(
         Object.hasOwn(embeddedAssets, target),
         `${name} -> ${target}`,
@@ -58,6 +91,50 @@ it("serves every module that any dashboard script imports", () => {
     }
   }
   expect(checked).toBeGreaterThan(30);
+});
+
+it("finds every import form and ignores commented-out ones", () => {
+  const source = [
+    'import a from "./a.js";',
+    "import { b } from '../b.js';",
+    'import "/side.js";',
+    'export * from "./re.js";',
+    'const c = await import("./dyn.js");',
+    "const d = import(`./tpl.js`);",
+    `const e = import(\`./x/${"$"}{name}.js\`);`,
+    "const f = import(computed);",
+    '/* import x from "./block.js"; */',
+    '/* multi\nline import y from "./multi.js"; */',
+    '// import z from "./line.js";',
+    'const url = "https://example.test/x"; import w from "./after-url.js";',
+  ].join("\n");
+  expect(specifiers(source)).toEqual([
+    "./a.js",
+    "../b.js",
+    "/side.js",
+    "./re.js",
+    "./after-url.js",
+    "./dyn.js",
+    "./tpl.js",
+    `<dynamic: \`./x/${"$"}{name}.js\`>`,
+    "<dynamic: computed>",
+  ]);
+});
+
+it("rejects specifiers a browser cannot resolve", () => {
+  for (const bad of ["lodash", "app/store.js", "node:fs", "store.js", ""])
+    expect(() => resolveSpecifier("dashboard.js", bad), bad).toThrow(
+      /not a browser-resolvable/,
+    );
+  expect(resolveSpecifier("app/a.js", "./b.js")).toBe("app/b.js");
+  expect(resolveSpecifier("app/a.js", "../dashboard.js")).toBe("dashboard.js");
+  expect(resolveSpecifier("app/a.js", "/graph-renderer.js")).toBe(
+    "graph-renderer.js",
+  );
+  // A dynamic import with a computed argument is surfaced, never silently skipped.
+  expect(() =>
+    resolveSpecifier("a.js", specifiers("import(x)")[0] ?? ""),
+  ).toThrow();
 });
 
 it("serves every script and stylesheet the page references", () => {

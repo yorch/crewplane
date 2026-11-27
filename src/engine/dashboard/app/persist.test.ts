@@ -132,3 +132,27 @@ it("derives per-view scroll keys and parses routes with allowlists", () => {
     "#/tasks?state=blocked",
   );
 });
+
+it('treats a stored "__proto__" pane key as plain data, never as a prototype', () => {
+  // An object literal would not create this key; JSON.parse does.
+  const hostile = JSON.parse(
+    '{"v":1,"view":"tasks","panes":{"__proto__":[7,8],"ok":[1,2]}}',
+  );
+  expect(Object.hasOwn(hostile.panes, "__proto__")).toBe(true);
+  const clean = sanitizeUiState(hostile);
+  const panes = clean?.panes as Record<string, unknown>;
+  expect(Object.getPrototypeOf(panes)).toBeNull();
+  expect(Object.hasOwn(panes, "__proto__")).toBe(true);
+  expect(Object.hasOwn(panes, "ok")).toBe(true);
+  // No array behaviour leaks in through the prototype chain.
+  expect("length" in panes).toBe(false);
+  expect("map" in panes).toBe(false);
+  expect(({} as Record<string, unknown>).length).toBeUndefined();
+  expect(Object.keys(panes).sort()).toEqual(["__proto__", "ok"]);
+  // Survives a storage round trip as ordinary data.
+  const storage = memory();
+  expect(writeUiState(storage, clean)).toBe(true);
+  const back = readUiState(storage);
+  expect(Object.getPrototypeOf(back?.panes)).toBeNull();
+  expect(Object.keys(back?.panes ?? {}).sort()).toEqual(["__proto__", "ok"]);
+});

@@ -1,7 +1,7 @@
 // Dashboard entry point: a native ES module (served from 'self', so the strict
 // content security policy is unchanged). It wires the modules in ./app/ and
 // starts polling; the views live in their own modules.
-import { adoptFragmentToken, refresh } from "./app/api.js";
+import { refresh } from "./app/api.js";
 import {
   applyControls,
   fillFilterOptions,
@@ -25,7 +25,7 @@ import { $, compactLayout, hooks, stackedLayout, store } from "./app/store.js";
 import { storeLayout } from "./app/tasks.js";
 import { date } from "./app/time.js";
 
-adoptFragmentToken();
+// The fragment token is adopted when ./app/api.js loads (before this body runs).
 store.route = parseHash(window.location.hash);
 hooks.render = render;
 hooks.commitSnapshot = (firstLoad) => {
@@ -35,6 +35,10 @@ hooks.commitSnapshot = (firstLoad) => {
     showActiveView();
   }
   render();
+};
+// Runs after the crewplane-graphs event, so the graph viewer has drawn and the
+// page has its final height before the saved scroll position is applied.
+hooks.afterGraphs = (firstLoad) => {
   if (firstLoad) restoreAfterFirstRender();
 };
 

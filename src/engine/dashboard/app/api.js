@@ -89,6 +89,9 @@ export function applySnapshot(next) {
       }),
     );
     store.fingerprint = signature;
+    // The graph viewer (a separate module) draws synchronously in the event
+    // above, so anything that depends on final page height belongs here.
+    hooks.afterGraphs?.(firstLoad);
   }
   store.lastSuccess = Date.now();
   refreshRelativeTimes();
@@ -112,7 +115,7 @@ function showDisconnected(message) {
 export async function refresh() {
   if (store.busy) return;
   store.busy = true;
-  $("refresh").setAttribute("aria-store.busy", "true");
+  $("refresh").setAttribute("aria-busy", "true");
   let next;
   try {
     const response = await window.crewplaneFetch("/api/snapshot", {
@@ -126,7 +129,7 @@ export async function refresh() {
     return;
   } finally {
     store.busy = false;
-    $("refresh").removeAttribute("aria-store.busy");
+    $("refresh").removeAttribute("aria-busy");
   }
   try {
     applySnapshot(next);

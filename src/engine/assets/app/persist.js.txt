@@ -34,7 +34,9 @@ export function sanitizeUiState(raw) {
       if (match?.[1] && Object.hasOwn(ROUTE_PARAMS, match[1]) && y !== null)
         scroll[key] = y;
     }
-  const panes = {};
+  // Null prototype: a stored key such as "__proto__" is then an ordinary own
+  // property, never the prototype setter.
+  const panes = Object.create(null);
   if (isRecord(raw.panes))
     for (const [key, value] of Object.entries(raw.panes)) {
       if (Object.keys(panes).length >= MAX_PANES) break;

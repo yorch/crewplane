@@ -77,7 +77,10 @@ export function restoreAfterFirstRender() {
   // Pane offsets belong to the view they were captured in.
   if (saved.view === store.route.view)
     for (const node of document.querySelectorAll("[data-scroll-key]")) {
-      const position = saved.panes[node.dataset.scrollKey];
+      const key = node.dataset.scrollKey;
+      const position = Object.hasOwn(saved.panes, key)
+        ? saved.panes[key]
+        : undefined;
       if (position) [node.scrollLeft, node.scrollTop] = position;
     }
   const y = saved.scroll[routeScrollKey(store.route)];

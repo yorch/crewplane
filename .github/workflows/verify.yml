@@ -39,13 +39,21 @@ jobs:
       - name: install.sh keys equal release-keys.json
         run: bun scripts/sync-install-keys.ts --check
       - name: Embedded dashboard assets are up to date
-        # embed.ts regenerates the whole directory and assets.ts from a scan of
-        # src/engine/dashboard; -N makes new (untracked) copies show in the diff,
-        # and files removed from the scan show as deletions.
+        # embed.ts rebuilds src/engine/assets from scratch and rewrites assets.ts
+        # from a scan of src/engine/dashboard, then `git status --porcelain`
+        # (which lists modified, deleted and untracked paths alike) must be
+        # empty for the generated paths. That catches: a new source whose copy
+        # was never committed (untracked), a missing copy (untracked), a stale or
+        # hand-edited copy (modified), and an orphan copy with no source any
+        # more (deleted by the rebuild).
         run: |
           bun scripts/embed.ts
-          git add --intent-to-add src/engine/assets src/engine/assets.ts
-          git diff --exit-code src/engine/assets src/engine/assets.ts
+          status="$(git status --porcelain --untracked-files=all -- src/engine/assets src/engine/assets.ts)"
+          if [ -n "$status" ]; then
+            echo "Generated dashboard assets are out of date; run 'bun scripts/embed.ts' and commit:" >&2
+            echo "$status" >&2
+            exit 1
+          fi
       - run: shasum -a 256 dist/crewplane > dist/SHA256SUMS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

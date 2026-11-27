@@ -18,6 +18,7 @@ export const store = {
 export const hooks = {
   render: () => {},
   commitSnapshot: (_firstLoad) => {},
+  afterGraphs: (_firstLoad) => {},
 };
 export const compactLayout = window.matchMedia("(max-width: 860px)");
 export const stackedLayout = window.matchMedia("(max-width: 1100px)");

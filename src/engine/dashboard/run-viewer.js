@@ -48,7 +48,7 @@
     node.href = window.crewplane.hrefFor(view, params);
     return node;
   };
-  // One shared formatter (dashboard.js) so every view prints the same text.
+  // One shared formatter (app/time.js, exposed as window.crewplane.formatTime) so every view prints the same text.
   const stamp = (value) => window.crewplane.formatTime(value);
   const timeNode = (value) => {
     const node = make("time", stamp(value), "time");
