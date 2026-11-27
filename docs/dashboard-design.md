@@ -83,7 +83,7 @@ Artifact bytes sit behind the session header, which an `<img src>` cannot send, 
 
 ## Safe client state
 
-Hash values are parsed with `URLSearchParams`, restricted to a per-view allowlist, checked against enumerations where applicable, and length-limited. Unknown views fall back to Overview. Untrusted text is rendered only through `textContent`; the dashboard does not use `innerHTML`. `localStorage` holds only the board/list preference. `sessionStorage` holds, besides the per-launch session, one small reload record (see Reload persistence). Both are validated on read and optional.
+Hash values are parsed with `URLSearchParams`, restricted to a per-view allowlist, checked against enumerations where applicable, and length-limited. Unknown views fall back to Overview. Untrusted text is rendered only through `textContent`; the dashboard does not use `innerHTML`. `localStorage` holds the board/list preference and the Preferences choices (theme, single-key shortcuts, alert settings). `sessionStorage` holds, besides the per-launch session, one small reload record (see Reload persistence). Both are validated on read and optional.
 
 ## Reload persistence
 
@@ -127,11 +127,39 @@ The controls layer (`app/controls.js`, pure rules in `app/controls-core.js`) exi
 - Browser reload restores the view, filters and open item, plus scroll and the "How to read…" disclosures (see Reload persistence). Other disclosures, such as the task card text, are preserved across polls but start closed after a full page load. The run timeline loads after the first render, so its scroll position after a reload is best effort.
 - Run timelines keep the latest 500 events client-side, and tailing fetches 100 events per poll.
 - The all-messages list renders 100 rows at a time, with a button to show more.
-- The relationship diagram is an aid, bounded by the same 50-node and 100-edge graph limits. Missing references appear only in the table. Keyboard and screen-reader users use the node list and table.
+- The relationship diagram is an aid and never draws more than 50 nodes and 100 edges at once; the server model behind clusters, focus and paging is itself capped at 1,100 nodes and 3,000 edges (the rest is counted as truncated). Missing references appear only in the table. Keyboard and screen-reader users use the node list and table.
 - Evidence is a gallery of captured files, not a capture tool: nothing is recorded, uploaded or deleted from the page. Videos load only on request and play from memory (a 16 MiB bound), so very long recordings are better opened from the evidence store.
 - The Control log shows at most the latest 200 commands the supervisor retains, and the page keeps no more than that. Setup & config reports what is installed and what the file system says about binaries; it cannot tell whether a harness is signed in or works.
 - The usage chart has native per-column tooltips and a data table, not a custom hover layer.
 - Usage figures are retained counters, not billing totals. Coverage stays limited to what the read model supplies; hours the retained history does not cover read "Not recorded".
+
+## Command palette
+
+`app/palette.js` (UI), `app/palette-core.js` (what is searchable) and `app/search-core.js` (pure ranking). Opened by the Search button, `Ctrl`/`Cmd`+`K` or `/`. A modal `<dialog>` (shared `app/dialog-kit.js`: `showModal`, `aria-labelledby`, Tab trap, Escape, focus returned to the opener) holding a `role=combobox` input over a `role=listbox`, with `aria-activedescendant`, Up/Down/Home/End/Enter, a polite result count and 44px rows. It indexes only data already loaded: tasks (id, title, owner, phase), agents, thread roots (first line of the message), runs the Runs view loaded, artifacts the gallery loaded, every view and a few pure-navigation commands (filtered views, shortcuts, preferences). No request is made. Ranking per term: exact > prefix > word prefix > substring > subsequence; every term must match; ties keep kind order then supplied order; case and diacritics fold; the query is cut to 100 characters and 6 terms and is never turned into a pattern. Results are at most 50, the index at most 3,000 tasks, 3,000 threads, 500 runs and 500 artifacts. Results navigate through the hash router; all text is `textContent`. A test indexes and searches 6,000 entries inside a generous budget.
+
+## Keyboard shortcuts
+
+`app/keymap-core.js` is the single table and a pure resolver; `app/shortcuts.js` wires one `keydown` listener and builds the `?` overlay from the same table. Bindings: `Ctrl`/`Cmd`+`K` and `/` (search), `?` (this list) and `g` then one letter (a view). The only modified binding is `Ctrl`/`Cmd`+`K`. Bare keys act only when focus is not in an input, textarea, select, editable region or composite widget (`combobox`, `listbox`, `grid`...), no dialog is open and single-key shortcuts are on; chords time out after 1.5 s; key repeat and IME composition are ignored and cancel a chord. Tests assert no duplicate sequences, that every view has exactly one chord, that modified or shifted keys never trigger and that nothing binds Tab, Enter, Space, Escape or arrows. Turning single keys off (overlay or Preferences) is stored in `localStorage` and leaves `Ctrl`/`Cmd`+`K` and the Search button.
+
+## Themes
+
+`theme.css` defines every colour token once: light (default), dark under `@media (prefers-color-scheme: dark)` with `:root:not([data-theme="light"])`, and an identical dark block under `:root[data-theme="dark"]`. `dashboard.css` and `graph-renderer.css` use only those tokens (the graph file with light fallbacks); no raw colour remains. A choice of System, Light or Dark is saved as `crewplane.theme` (System = no key). `theme-boot.js` is a tiny external blocking classic script in `<head>` (no inline script, CSP unchanged) that sets `html[data-theme]` before first paint; `<meta name="color-scheme">` lets form controls follow. `theme.test.ts` independently computes WCAG ratios for every foreground/background pair in both themes (text 4.5:1, graphics and focus 3:1), checks the two dark blocks are identical, that every `var()` is defined and that no raw colour is left. Known limit: hairline input borders (`--border-strong`) keep the earlier design's lower contrast in both themes; they are not relied on alone (inputs also have a fill and labels). Forced colors are handled with system colours, as before.
+
+## Preferences
+
+One dialog (`app/preferences.js`, opened from the sidebar; the theme switch is also in the sidebar): theme radios, "Single-key shortcuts", alerts and "Reset saved view state" (clears the remembered Tasks layout and the reload memory only; theme, shortcut and alert choices are kept). Every control is a labelled native input, applies at once and degrades without storage.
+
+## Alerts
+
+`app/notify-core.js` (pure) derives events by comparing consecutive snapshots (and the control log, once it has been read): new open question or request, task newly blocked, agent newly paused (an operator hold is not news; the read model cannot tell a failure pause from a decision pause without the controls layer, so both read "paused"), command newly refused, out of date or not applied, supervisor `running` to `stopped` or `stale` (`draining` first is a requested stop and does not alert). The first observation of each category is a baseline and never alerts; an id alerts once and stays remembered (at most 200 per category) after it disappears; categories can be switched off and still learn what exists. `app/notify.js` shows a count in the tab title and, only with permission granted after an explicit click on "Enable desktop alerts", a notification with a fixed tag. Both stay quiet while the tab is visible and focused unless "also alert while this tab is open" is on. Text is counts and fixed phrases; no ids, titles or bodies. Defaults are off. Limit: it only observes while a tab is open; "stopped unexpectedly" cannot distinguish a stop requested from the CLI.
+
+## Relationship graph at scale
+
+The server still sends the capped `graphs`; `graphModels` adds the larger compact model (see docs/CONTRACTS.md). `app/graph-scale.js` (pure) projects it into at most 50 items and 100 edges: **clusters** (collapsed groups are one node and merge their edges; expanded ones show a header plus members; each is a button with `aria-expanded`), **focus** (a node plus 1 to 3 hops, from each node's Focus button or `focus`/`hops` in the URL) and **paging** by priority (blocked or stale or paused work and open questions first), Previous/Next 50 with a polite "Page n of m". Truncation text keeps the same "Truncated: n nodes, m edges" wording and adds what is on this page. The renderer independently cuts its input to 50 nodes and 100 edges, so a hostile snapshot cannot grow the DOM; a test feeds it 2,000 nodes and 5,000 edges. The accessible node list and table stay in sync with the diagram.
+
+## Run timeline extras
+
+`run-viewer.js` is now a module (`/runs.js`) importing the pure `app/run-core.js`. Over the loaded events (at most 500): type chips with counts (`aria-pressed`), text search, "Jump to first error" (clears a hiding filter, stops following, focuses the row), "Copy as JSON" and "Download JSON" (a `Blob`, fixed name `crewplane-run-<id>.json`; the events are rebuilt from the fields the timeline prints, so no session id or storage detail is added, and only the shown events are included), and "Compare with another run" of the same task or agent (the other run is read through the existing run route, at most five requests; totals, counts per type and a side-by-side by position with the first difference marked, in labelled scrollable tables).
 
 ## Verification
 

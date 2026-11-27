@@ -1,10 +1,10 @@
 .relay-graph {
   min-width: 0;
   padding: 14px 16px;
-  border: 1px solid #dfe3e9;
+  border: 1px solid var(--border, #dfe3e9);
   border-radius: 10px;
-  background: #ffffff;
-  color: #1a2230;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1a2230);
   font-size: 14px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -21,7 +21,7 @@
 .relay-graph-detail,
 .relay-graph-summary {
   margin: 4px 0 0;
-  color: #566072;
+  color: var(--muted, #566072);
   font-size: 12px;
 }
 .relay-graph-controls {
@@ -34,7 +34,7 @@
   display: grid;
   flex: 1 1 180px;
   gap: 4px;
-  color: #566072;
+  color: var(--muted, #566072);
   font-size: 12px;
   font-weight: 500;
 }
@@ -43,19 +43,19 @@
   width: 100%;
   min-height: 36px;
   padding: 6px 10px;
-  border: 1px solid #c3cad5;
+  border: 1px solid var(--border-strong, #c3cad5);
   border-radius: 7px;
-  background: #ffffff;
-  color: #1a2230;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1a2230);
   font: inherit;
 }
 .relay-graph-canvas {
   max-height: 480px;
   margin-top: 12px;
   overflow: auto;
-  border: 1px solid #dfe3e9;
+  border: 1px solid var(--border, #dfe3e9);
   border-radius: 7px;
-  background: #f8f9fb;
+  background: var(--surface-2, #f8f9fb);
 }
 .relay-graph-svg {
   display: block;
@@ -64,22 +64,22 @@
 }
 .relay-edge {
   fill: none;
-  stroke: #8290a3;
+  stroke: var(--graph-edge, #8290a3);
   stroke-width: 1.4;
 }
 .relay-edge-open {
-  stroke: #b8821f;
+  stroke: var(--graph-edge-open, #b8821f);
   stroke-width: 1.8;
   stroke-dasharray: 5 3;
 }
 .relay-arrow {
-  fill: #8290a3;
+  fill: var(--graph-edge, #8290a3);
 }
 .relay-arrow-open {
-  fill: #b8821f;
+  fill: var(--graph-edge-open, #b8821f);
 }
 .relay-edge-count {
-  fill: #566072;
+  fill: var(--muted, #566072);
   font-size: 11px;
   text-anchor: middle;
 }
@@ -87,19 +87,23 @@
   cursor: pointer;
 }
 .relay-node rect {
-  fill: #ffffff;
-  stroke: #8290a3;
+  fill: var(--surface, #ffffff);
+  stroke: var(--graph-edge, #8290a3);
   stroke-width: 1.2;
 }
+.relay-node-cluster rect {
+  stroke-dasharray: 5 3;
+  stroke-width: 1.8;
+}
 .relay-node-task rect {
-  fill: #eef3fd;
+  fill: var(--graph-task-fill, #eef3fd);
 }
 .relay-node.is-selected rect {
-  stroke: #2f5bd7;
+  stroke: var(--accent, #2f5bd7);
   stroke-width: 2.4;
 }
 .relay-node text {
-  fill: #1a2230;
+  fill: var(--text, #1a2230);
   font-size: 12px;
   text-anchor: middle;
 }
@@ -113,10 +117,10 @@
   max-width: 100%;
   min-height: 36px;
   padding: 7px 10px;
-  border: 1px solid #c3cad5;
+  border: 1px solid var(--border-strong, #c3cad5);
   border-radius: 7px;
-  background: #ffffff;
-  color: #1a2230;
+  background: var(--surface, #ffffff);
+  color: var(--text, #1a2230);
   font: inherit;
   font-size: 13px;
   text-align: left;
@@ -128,15 +132,29 @@
   gap: 2px;
 }
 .relay-graph button:hover:not(:disabled) {
-  background: #e9effc;
+  background: var(--accent-weak, #e9effc);
 }
 .relay-graph button:disabled {
   cursor: default;
 }
 .relay-graph button[aria-pressed="true"] {
-  border-color: #2f5bd7;
-  box-shadow: inset 0 0 0 1px #2f5bd7;
-  background: #e9effc;
+  border-color: var(--accent, #2f5bd7);
+  box-shadow: inset 0 0 0 1px var(--accent, #2f5bd7);
+  background: var(--accent-weak, #e9effc);
+}
+.relay-node-item {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.relay-graph .relay-node-focus {
+  min-height: 32px;
+  padding: 4px 10px;
+  color: var(--accent-strong, #2348b5);
+  font-size: 12px;
+}
+.relay-graph button[aria-expanded] {
+  border-style: dashed;
 }
 .relay-node-heading {
   display: flex;
@@ -149,14 +167,14 @@
 }
 .relay-node-kind,
 .relay-node-muted {
-  color: #566072;
+  color: var(--muted, #566072);
   font-size: 12px;
 }
 .relay-node-line {
   display: block;
 }
 .relay-graph :focus-visible {
-  outline: 2px solid #2f5bd7;
+  outline: 2px solid var(--focus, #2f5bd7);
   outline-offset: 2px;
 }
 .relay-graph details {
@@ -164,7 +182,7 @@
 }
 .relay-graph summary {
   padding-block: 4px;
-  color: #2348b5;
+  color: var(--accent-strong, #2348b5);
   font-size: 13px;
   cursor: pointer;
 }
@@ -180,20 +198,20 @@
 }
 .relay-graph caption {
   padding-bottom: 4px;
-  color: #566072;
+  color: var(--muted, #566072);
   font-size: 12px;
   text-align: left;
 }
 .relay-graph th,
 .relay-graph td {
   padding: 6px 8px;
-  border-bottom: 1px solid #dfe3e9;
+  border-bottom: 1px solid var(--border, #dfe3e9);
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
 }
 .relay-graph th {
-  color: #566072;
+  color: var(--muted, #566072);
   font-size: 12px;
   font-weight: 600;
 }
@@ -211,6 +229,9 @@
 }
 
 @media (pointer: coarse) {
+  .relay-graph .relay-node-focus {
+    min-height: 44px;
+  }
   .relay-graph button,
   .relay-graph input,
   .relay-graph select {
@@ -244,4 +265,8 @@
     outline: 3px solid Highlight;
     outline-offset: -3px;
   }
+}
+.relay-graph [hidden] {
+  /* biome-ignore lint/complexity/noImportantStyles: hidden must beat any component display rule */
+  display: none !important;
 }

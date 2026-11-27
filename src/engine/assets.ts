@@ -10,44 +10,60 @@ import asset7 from "./assets/app/config.js.txt" with { type: "text" };
 import asset8 from "./assets/app/controls-core.js.txt" with { type: "text" };
 import asset9 from "./assets/app/controls.js.txt" with { type: "text" };
 import asset10 from "./assets/app/copy.js.txt" with { type: "text" };
-import asset11 from "./assets/app/dom.js.txt" with { type: "text" };
-import asset12 from "./assets/app/evidence-core.js.txt" with { type: "text" };
-import asset13 from "./assets/app/evidence-link.js.txt" with { type: "text" };
-import asset14 from "./assets/app/evidence.js.txt" with { type: "text" };
-import asset15 from "./assets/app/filters.js.txt" with { type: "text" };
-import asset16 from "./assets/app/format.js.txt" with { type: "text" };
-import asset17 from "./assets/app/hold-notice.js.txt" with { type: "text" };
-import asset18 from "./assets/app/labels.js.txt" with { type: "text" };
-import asset19 from "./assets/app/links.js.txt" with { type: "text" };
-import asset20 from "./assets/app/live-core.js.txt" with { type: "text" };
-import asset21 from "./assets/app/live.js.txt" with { type: "text" };
-import asset22 from "./assets/app/messages.js.txt" with { type: "text" };
-import asset23 from "./assets/app/overview.js.txt" with { type: "text" };
-import asset24 from "./assets/app/persist.js.txt" with { type: "text" };
-import asset25 from "./assets/app/relationships.js.txt" with { type: "text" };
-import asset26 from "./assets/app/reload-state.js.txt" with { type: "text" };
-import asset27 from "./assets/app/render.js.txt" with { type: "text" };
-import asset28 from "./assets/app/resource.js.txt" with { type: "text" };
-import asset29 from "./assets/app/route.js.txt" with { type: "text" };
-import asset30 from "./assets/app/router.js.txt" with { type: "text" };
-import asset31 from "./assets/app/setup.js.txt" with { type: "text" };
-import asset32 from "./assets/app/shell.js.txt" with { type: "text" };
-import asset33 from "./assets/app/store.js.txt" with { type: "text" };
-import asset34 from "./assets/app/system.js.txt" with { type: "text" };
-import asset35 from "./assets/app/tables.js.txt" with { type: "text" };
-import asset36 from "./assets/app/tasks.js.txt" with { type: "text" };
-import asset37 from "./assets/app/time.js.txt" with { type: "text" };
-import asset38 from "./assets/app/ui-state.js.txt" with { type: "text" };
-import asset39 from "./assets/app/usage-core.js.txt" with { type: "text" };
-import asset40 from "./assets/app/usage.js.txt" with { type: "text" };
-import asset41 from "./assets/app/view-parts.js.txt" with { type: "text" };
-import asset42 from "./assets/dashboard.css.txt" with { type: "text" };
-import asset43 from "./assets/dashboard.js.txt" with { type: "text" };
-import asset44 from "./assets/graph-renderer.css.txt" with { type: "text" };
-import asset45 from "./assets/graph-renderer.js.txt" with { type: "text" };
-import asset46 from "./assets/graph-viewer.js.txt" with { type: "text" };
-import asset47 from "./assets/index.html.txt" with { type: "text" };
-import asset48 from "./assets/run-viewer.js.txt" with { type: "text" };
+import asset11 from "./assets/app/dialog-kit.js.txt" with { type: "text" };
+import asset12 from "./assets/app/dom.js.txt" with { type: "text" };
+import asset13 from "./assets/app/evidence-core.js.txt" with { type: "text" };
+import asset14 from "./assets/app/evidence-link.js.txt" with { type: "text" };
+import asset15 from "./assets/app/evidence.js.txt" with { type: "text" };
+import asset16 from "./assets/app/filters.js.txt" with { type: "text" };
+import asset17 from "./assets/app/format.js.txt" with { type: "text" };
+import asset18 from "./assets/app/graph-scale.js.txt" with { type: "text" };
+import asset19 from "./assets/app/hold-notice.js.txt" with { type: "text" };
+import asset20 from "./assets/app/keymap-core.js.txt" with { type: "text" };
+import asset21 from "./assets/app/labels.js.txt" with { type: "text" };
+import asset22 from "./assets/app/links.js.txt" with { type: "text" };
+import asset23 from "./assets/app/live-core.js.txt" with { type: "text" };
+import asset24 from "./assets/app/live.js.txt" with { type: "text" };
+import asset25 from "./assets/app/messages.js.txt" with { type: "text" };
+import asset26 from "./assets/app/notify-core.js.txt" with { type: "text" };
+import asset27 from "./assets/app/notify.js.txt" with { type: "text" };
+import asset28 from "./assets/app/overview.js.txt" with { type: "text" };
+import asset29 from "./assets/app/palette-core.js.txt" with { type: "text" };
+import asset30 from "./assets/app/palette.js.txt" with { type: "text" };
+import asset31 from "./assets/app/persist.js.txt" with { type: "text" };
+import asset32 from "./assets/app/preferences.js.txt" with { type: "text" };
+import asset33 from "./assets/app/prefs-core.js.txt" with { type: "text" };
+import asset34 from "./assets/app/relationships.js.txt" with { type: "text" };
+import asset35 from "./assets/app/reload-state.js.txt" with { type: "text" };
+import asset36 from "./assets/app/render.js.txt" with { type: "text" };
+import asset37 from "./assets/app/resource.js.txt" with { type: "text" };
+import asset38 from "./assets/app/route.js.txt" with { type: "text" };
+import asset39 from "./assets/app/router.js.txt" with { type: "text" };
+import asset40 from "./assets/app/run-core.js.txt" with { type: "text" };
+import asset41 from "./assets/app/search-core.js.txt" with { type: "text" };
+import asset42 from "./assets/app/setup.js.txt" with { type: "text" };
+import asset43 from "./assets/app/shell.js.txt" with { type: "text" };
+import asset44 from "./assets/app/shortcuts.js.txt" with { type: "text" };
+import asset45 from "./assets/app/store.js.txt" with { type: "text" };
+import asset46 from "./assets/app/system.js.txt" with { type: "text" };
+import asset47 from "./assets/app/tables.js.txt" with { type: "text" };
+import asset48 from "./assets/app/tasks.js.txt" with { type: "text" };
+import asset49 from "./assets/app/theme.js.txt" with { type: "text" };
+import asset50 from "./assets/app/time.js.txt" with { type: "text" };
+import asset51 from "./assets/app/title.js.txt" with { type: "text" };
+import asset52 from "./assets/app/ui-state.js.txt" with { type: "text" };
+import asset53 from "./assets/app/usage-core.js.txt" with { type: "text" };
+import asset54 from "./assets/app/usage.js.txt" with { type: "text" };
+import asset55 from "./assets/app/view-parts.js.txt" with { type: "text" };
+import asset56 from "./assets/dashboard.css.txt" with { type: "text" };
+import asset57 from "./assets/dashboard.js.txt" with { type: "text" };
+import asset58 from "./assets/graph-renderer.css.txt" with { type: "text" };
+import asset59 from "./assets/graph-renderer.js.txt" with { type: "text" };
+import asset60 from "./assets/graph-viewer.js.txt" with { type: "text" };
+import asset61 from "./assets/index.html.txt" with { type: "text" };
+import asset62 from "./assets/run-viewer.js.txt" with { type: "text" };
+import asset63 from "./assets/theme-boot.js.txt" with { type: "text" };
+import asset64 from "./assets/theme.css.txt" with { type: "text" };
 export const embeddedAssets: Record<string, string> = {
   "app/agents.js": asset0,
   "app/api.js": asset1,
@@ -60,42 +76,58 @@ export const embeddedAssets: Record<string, string> = {
   "app/controls-core.js": asset8,
   "app/controls.js": asset9,
   "app/copy.js": asset10,
-  "app/dom.js": asset11,
-  "app/evidence-core.js": asset12,
-  "app/evidence-link.js": asset13,
-  "app/evidence.js": asset14,
-  "app/filters.js": asset15,
-  "app/format.js": asset16,
-  "app/hold-notice.js": asset17,
-  "app/labels.js": asset18,
-  "app/links.js": asset19,
-  "app/live-core.js": asset20,
-  "app/live.js": asset21,
-  "app/messages.js": asset22,
-  "app/overview.js": asset23,
-  "app/persist.js": asset24,
-  "app/relationships.js": asset25,
-  "app/reload-state.js": asset26,
-  "app/render.js": asset27,
-  "app/resource.js": asset28,
-  "app/route.js": asset29,
-  "app/router.js": asset30,
-  "app/setup.js": asset31,
-  "app/shell.js": asset32,
-  "app/store.js": asset33,
-  "app/system.js": asset34,
-  "app/tables.js": asset35,
-  "app/tasks.js": asset36,
-  "app/time.js": asset37,
-  "app/ui-state.js": asset38,
-  "app/usage-core.js": asset39,
-  "app/usage.js": asset40,
-  "app/view-parts.js": asset41,
-  "dashboard.css": asset42,
-  "dashboard.js": asset43,
-  "graph-renderer.css": asset44,
-  "graph-renderer.js": asset45,
-  "graph-viewer.js": asset46,
-  "index.html": asset47,
-  "run-viewer.js": asset48,
+  "app/dialog-kit.js": asset11,
+  "app/dom.js": asset12,
+  "app/evidence-core.js": asset13,
+  "app/evidence-link.js": asset14,
+  "app/evidence.js": asset15,
+  "app/filters.js": asset16,
+  "app/format.js": asset17,
+  "app/graph-scale.js": asset18,
+  "app/hold-notice.js": asset19,
+  "app/keymap-core.js": asset20,
+  "app/labels.js": asset21,
+  "app/links.js": asset22,
+  "app/live-core.js": asset23,
+  "app/live.js": asset24,
+  "app/messages.js": asset25,
+  "app/notify-core.js": asset26,
+  "app/notify.js": asset27,
+  "app/overview.js": asset28,
+  "app/palette-core.js": asset29,
+  "app/palette.js": asset30,
+  "app/persist.js": asset31,
+  "app/preferences.js": asset32,
+  "app/prefs-core.js": asset33,
+  "app/relationships.js": asset34,
+  "app/reload-state.js": asset35,
+  "app/render.js": asset36,
+  "app/resource.js": asset37,
+  "app/route.js": asset38,
+  "app/router.js": asset39,
+  "app/run-core.js": asset40,
+  "app/search-core.js": asset41,
+  "app/setup.js": asset42,
+  "app/shell.js": asset43,
+  "app/shortcuts.js": asset44,
+  "app/store.js": asset45,
+  "app/system.js": asset46,
+  "app/tables.js": asset47,
+  "app/tasks.js": asset48,
+  "app/theme.js": asset49,
+  "app/time.js": asset50,
+  "app/title.js": asset51,
+  "app/ui-state.js": asset52,
+  "app/usage-core.js": asset53,
+  "app/usage.js": asset54,
+  "app/view-parts.js": asset55,
+  "dashboard.css": asset56,
+  "dashboard.js": asset57,
+  "graph-renderer.css": asset58,
+  "graph-renderer.js": asset59,
+  "graph-viewer.js": asset60,
+  "index.html": asset61,
+  "run-viewer.js": asset62,
+  "theme-boot.js": asset63,
+  "theme.css": asset64,
 };

@@ -167,6 +167,7 @@ export function applySnapshot(next, { stream = false } = {}) {
     }
     window.crewplaneGraphSnapshot = {
       graphs: store.data.graphs,
+      models: store.data.graphModels,
       coverage: store.data.graphCoverage,
     };
     window.dispatchEvent(

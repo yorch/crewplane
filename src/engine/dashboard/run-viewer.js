@@ -1,6 +1,17 @@
+import {
+  comparable,
+  compareRuns,
+  downloadName,
+  eventMatches,
+  firstErrorIndex,
+  formatSpan,
+  kindCounts,
+  MAX_EVENTS,
+  toJson,
+} from "./app/run-core.js";
+
 (() => {
   const get = (id) => document.getElementById(id);
-  const MAX_EVENTS = 500;
   const SESSION_MESSAGE =
     "Session missing or expired. Reopen the URL printed by crewplane dashboard.";
   const RUN_ID =
@@ -27,6 +38,14 @@
   let urlRun = null;
   const buttons = new Map();
   const runs = new Map();
+  // Timeline tools: type chips, text search, the run header for exports and
+  // the second run for a comparison. All of it works on loaded events only.
+  const activeKinds = new Set();
+  const chips = new Map();
+  let meta = null;
+  let query = "";
+  let other = null;
+  let otherToken = 0;
 
   const setText = (id, text) => {
     const node = get(id);
@@ -65,6 +84,7 @@
   function eventRow(e) {
     const row = make("li", undefined, `timeline-row kind-${e.kind}`);
     row.dataset.sequence = String(e.sequence);
+    row.dataset.kind = e.kind;
     const head = make("div", undefined, "timeline-head");
     const time = timeNode(e.at);
     head.append(
@@ -136,6 +156,298 @@
     while (list.children.length > MAX_EVENTS) list.firstElementChild.remove();
     list.scrollTop = get("run-follow").checked ? list.scrollHeight : position;
   }
+  const text = (node, value) => {
+    if (node.textContent !== value) node.textContent = value;
+  };
+  // Hide rows that do not pass the chips and the search; the rows themselves
+  // are the loaded events (at most 500), so this stays cheap.
+  function applyFilter() {
+    const list = get("run-events");
+    const bySequence = new Map(events.map((event) => [event.sequence, event]));
+    let shown = 0;
+    for (const row of list.children) {
+      const event = bySequence.get(Number(row.dataset.sequence));
+      if (!event) continue;
+      const visible = eventMatches(event, activeKinds, query);
+      row.hidden = !visible;
+      if (visible) shown++;
+    }
+    const filtering = activeKinds.size > 0 || query.trim() !== "";
+    text(
+      get("run-filter-status"),
+      !events.length
+        ? ""
+        : filtering
+          ? shown
+            ? `Showing ${shown} of ${events.length} loaded events`
+            : "No loaded events match this filter."
+          : `${events.length} loaded events`,
+    );
+  }
+  const visibleEvents = () =>
+    events.filter((event) => eventMatches(event, activeKinds, query));
+  function syncChips() {
+    const container = get("run-kinds");
+    const counts = kindCounts(events);
+    for (const [kind, count] of counts) {
+      let chip = chips.get(kind);
+      if (!chip) {
+        chip = make("button", undefined, "chip");
+        chip.type = "button";
+        chip.dataset.kind = kind;
+        chip.append(make("span", kind), make("span", "", "chip-count"));
+        chip.addEventListener("click", () => {
+          if (activeKinds.has(kind)) activeKinds.delete(kind);
+          else activeKinds.add(kind);
+          chip.setAttribute("aria-pressed", String(activeKinds.has(kind)));
+          applyFilter();
+        });
+        chip.setAttribute("aria-pressed", String(activeKinds.has(kind)));
+        chips.set(kind, chip);
+      }
+      text(chip.lastElementChild, String(count));
+    }
+    // Chips follow the canonical order; add or move only what changed.
+    counts.forEach(([kind], index) => {
+      const chip = chips.get(kind);
+      if (container.children[index] !== chip)
+        container.insertBefore(chip, container.children[index] ?? null);
+    });
+  }
+  function syncTools() {
+    const has = events.length > 0;
+    get("run-search").disabled = !has;
+    get("run-copy-json").disabled = !has;
+    get("run-download-json").disabled = !has;
+    get("run-first-error").disabled = firstErrorIndex(events) === -1;
+    get("run-compare-toggle").disabled = !selected || !meta;
+    syncChips();
+    applyFilter();
+    if (!get("run-compare").hidden) renderCompare();
+  }
+  function jumpToFirstError() {
+    const index = firstErrorIndex(events);
+    if (index === -1) return;
+    const target = events[index];
+    // A filter that hides the error would make the jump land nowhere.
+    if (!eventMatches(target, activeKinds, query)) {
+      activeKinds.clear();
+      for (const chip of chips.values())
+        chip.setAttribute("aria-pressed", "false");
+      get("run-search").value = "";
+      query = "";
+      applyFilter();
+    }
+    get("run-follow").checked = false;
+    const row = get("run-events").querySelector(
+      `[data-sequence="${target.sequence}"]`,
+    );
+    if (!row) return;
+    for (const old of get("run-events").querySelectorAll(".is-target"))
+      old.classList.remove("is-target");
+    row.classList.add("is-target");
+    row.tabIndex = -1;
+    row.scrollIntoView({ block: "center" });
+    row.focus({ preventScroll: true });
+    text(get("run-filter-status"), `Jumped to event #${target.sequence}`);
+  }
+  async function copyJson() {
+    const shown = visibleEvents();
+    const filter =
+      activeKinds.size || query.trim() ? { kinds: activeKinds, query } : null;
+    try {
+      await navigator.clipboard.writeText(toJson(meta, shown, filter));
+      text(get("run-filter-status"), `Copied ${shown.length} events as JSON`);
+    } catch {
+      text(get("run-filter-status"), "Copy unavailable; use Download JSON");
+    }
+  }
+  function downloadJson() {
+    const shown = visibleEvents();
+    const filter =
+      activeKinds.size || query.trim() ? { kinds: activeKinds, query } : null;
+    const blob = new Blob([toJson(meta, shown, filter)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = make("a");
+    anchor.href = url;
+    anchor.download = downloadName(meta?.runId);
+    anchor.hidden = true;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    text(get("run-filter-status"), `Downloaded ${shown.length} events as JSON`);
+  }
+
+  // Comparison of the selected run with another one of the same task or agent.
+  function closeCompare(restoreFocus) {
+    other = null;
+    otherToken++;
+    get("run-compare").hidden = true;
+    get("run-compare-toggle").setAttribute("aria-expanded", "false");
+    get("run-compare-body").replaceChildren();
+    text(get("run-compare-status"), "");
+    if (restoreFocus) get("run-compare-toggle").focus();
+  }
+  function fillCompareChoices() {
+    const select = get("run-compare-select");
+    const current = runs.get(selected) ?? meta;
+    const choices = comparable(current, [...runs.values()]);
+    select.replaceChildren(new Option("Choose a run…", ""));
+    for (const run of choices)
+      select.add(
+        new Option(
+          `${run.lane} · ${run.task ?? "coordination"} · ${run.status} · ${stamp(run.startedAt)}`,
+          run.runId,
+        ),
+      );
+    text(
+      get("run-compare-status"),
+      choices.length
+        ? "Choose another run. Only events the page can load are compared (at most 500 per run)."
+        : "No other loaded run shares this task or agent. Use Older runs to load more.",
+    );
+  }
+  async function loadOther(id) {
+    const token = ++otherToken;
+    other = null;
+    get("run-compare-body").replaceChildren();
+    if (!RUN_ID.test(id)) return;
+    text(get("run-compare-status"), "Loading the other run…");
+    const loaded = [];
+    let after = 0;
+    try {
+      for (let page = 0; page < MAX_EVENTS / 100; page++) {
+        const response = await window.crewplaneFetch(
+          `/api/runs/${encodeURIComponent(id)}?after=${after}&limit=100`,
+          { cache: "no-store", signal: AbortSignal.timeout(10000) },
+        );
+        if (!response.ok) throw Error("The other run is not available.");
+        const value = await response.json();
+        if (token !== otherToken) return;
+        loaded.push(...value.events);
+        if (!value.events.length || value.nextCursor === after) break;
+        after = value.nextCursor;
+      }
+    } catch (error) {
+      if (token === otherToken) text(get("run-compare-status"), error.message);
+      return;
+    }
+    other = { id, events: loaded.slice(-MAX_EVENTS) };
+    renderCompare();
+  }
+  const cell = (tag, value, className) => make(tag, String(value), className);
+  function table(caption, heads, rows) {
+    const node = make("table", undefined, "compare-table");
+    node.append(make("caption", caption));
+    const head = make("tr");
+    for (const title of heads) {
+      const th = make("th", title, "compare-cell");
+      th.scope = "col";
+      head.append(th);
+    }
+    const thead = make("thead");
+    thead.append(head);
+    node.append(thead);
+    const body = make("tbody");
+    for (const row of rows) {
+      const tr = make("tr");
+      if (!Array.isArray(row) && row.className) tr.className = row.className;
+      (Array.isArray(row) ? row : row.cells).forEach((value, index) => {
+        const td =
+          index === 0
+            ? make("th", String(value), "compare-cell")
+            : cell("td", value, "compare-cell");
+        if (index === 0) td.scope = "row";
+        tr.append(td);
+      });
+      body.append(tr);
+    }
+    node.append(body);
+    const scroller = make("div", undefined, "compare-scroll");
+    scroller.tabIndex = 0;
+    scroller.setAttribute("role", "region");
+    scroller.setAttribute("aria-label", caption);
+    scroller.append(node);
+    return scroller;
+  }
+  function renderCompare() {
+    if (!other) return;
+    const result = compareRuns(events, other.events);
+    const { a, b } = result.total;
+    const sign = (value) => (value > 0 ? `+${value}` : String(value));
+    const body = get("run-compare-body");
+    const thisId = meta?.runId ?? "selected run";
+    const summary = table(
+      "Totals",
+      ["Measure", "This run", "Other run", "Difference"],
+      [
+        ["Events", a.events, b.events, sign(b.events - a.events)],
+        ["Errors", a.errors, b.errors, sign(b.errors - a.errors)],
+        [
+          "Time from first to last event",
+          formatSpan(a.spanMs),
+          formatSpan(b.spanMs),
+          a.spanMs === null || b.spanMs === null
+            ? "not recorded"
+            : formatSpan(b.spanMs - a.spanMs),
+        ],
+        [
+          "Tool time reported",
+          formatSpan(a.toolMs),
+          formatSpan(b.toolMs),
+          formatSpan(b.toolMs - a.toolMs),
+        ],
+        [
+          "Input tokens",
+          a.inputTokens,
+          b.inputTokens,
+          sign(b.inputTokens - a.inputTokens),
+        ],
+        [
+          "Output tokens",
+          a.outputTokens,
+          b.outputTokens,
+          sign(b.outputTokens - a.outputTokens),
+        ],
+      ],
+    );
+    const kinds = table(
+      "Events by type",
+      ["Type", "This run", "Other run", "Difference"],
+      result.byKind.map((row) => ({
+        cells: [row.kind, row.a, row.b, sign(row.diff)],
+        className: row.diff ? "is-different" : "",
+      })),
+    );
+    const aligned = table(
+      "Events side by side, by position",
+      ["Position", "This run", "Other run", "Same type"],
+      result.rows.map((row) => ({
+        cells: [
+          row.index + 1,
+          row.a || "(none)",
+          row.b || "(none)",
+          row.same ? "yes" : "no",
+        ],
+        className: row.same ? "" : "is-different",
+      })),
+    );
+    const first = make(
+      "p",
+      result.firstDifference === -1
+        ? "The two runs have the same event types in the same order."
+        : `The runs first differ at position ${result.firstDifference + 1}.`,
+      "note",
+    );
+    body.replaceChildren(first, summary, kinds, aligned);
+    text(
+      get("run-compare-status"),
+      `Comparing ${thisId} with ${other.id}: ${a.events} and ${b.events} loaded events.`,
+    );
+  }
   async function tail() {
     if (!selected || tailing === generation) return;
     const run = generation;
@@ -155,7 +467,9 @@
       events = events.slice(-MAX_EVENTS);
       cursor = value.nextCursor;
       appendEvents(value.events);
+      meta = value.meta;
       renderSummary(value.meta, value.incomplete);
+      syncTools();
       if (!events.length)
         timelinePlaceholder("No events retained for this run.");
     } catch (error) {
@@ -230,7 +544,15 @@
     generation++;
     cursor = 0;
     events = [];
+    meta = null;
     tailing = -1;
+    activeKinds.clear();
+    chips.clear();
+    get("run-kinds").replaceChildren();
+    get("run-search").value = "";
+    query = "";
+    closeCompare(false);
+    syncTools();
     get("run-summary").replaceChildren();
     get("run-summary").removeAttribute("data-signature");
     window.dispatchEvent(
@@ -392,6 +714,35 @@
         setText("run-copy-status", "Copy unavailable; select timeline text");
       });
   });
+  get("run-search").addEventListener("input", () => {
+    query = get("run-search").value;
+    applyFilter();
+  });
+  get("run-first-error").addEventListener("click", jumpToFirstError);
+  get("run-copy-json").addEventListener("click", copyJson);
+  get("run-download-json").addEventListener("click", downloadJson);
+  get("run-compare-toggle").addEventListener("click", () => {
+    const section = get("run-compare");
+    if (!section.hidden) {
+      closeCompare(true);
+      return;
+    }
+    section.hidden = false;
+    get("run-compare-toggle").setAttribute("aria-expanded", "true");
+    fillCompareChoices();
+    get("run-compare-heading").focus();
+  });
+  get("run-compare-select").addEventListener("change", () => {
+    const id = get("run-compare-select").value;
+    if (id) loadOther(id);
+    else {
+      other = null;
+      otherToken++;
+      get("run-compare-body").replaceChildren();
+    }
+  });
+  // The page-wide helper other views use to find loaded runs (palette).
+  window.crewplane.loadedRuns = () => [...runs.values()];
   window.addEventListener("crewplane-route", (event) =>
     syncRoute(event.detail),
   );

@@ -13,7 +13,11 @@ import {
   reviewersOf,
 } from "../project.ts";
 import { main as coordination } from "./agents.mjs";
-import { buildGraph, type GraphInput } from "./dashboard/graph-builder.ts";
+import {
+  buildGraph,
+  buildGraphModel,
+  type GraphInput,
+} from "./dashboard/graph-builder.ts";
 import {
   normalizeConfig,
   normalizeState,
@@ -309,6 +313,8 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
           ? "accepted"
           : (t.live?.status?.state ?? "assigned"),
         accepted: Boolean(t.live?.accepted),
+        phase: t.phase ? String(t.phase).slice(0, 64) : null,
+        owner: t.owner && t.owner !== "—" ? String(t.owner).slice(0, 64) : null,
         dependsOn:
           t.live?.scheduling?.dependsOn.map((dep) => ({
             taskId: dep.taskId,
@@ -362,10 +368,22 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
     dependencies: ReturnType<typeof buildGraph>;
     communication: ReturnType<typeof buildGraph>;
   };
+  // The larger model behind the 50 node display cap, for clusters, focus and
+  // paging in the page. Absent when the graph is unavailable.
+  let graphModels:
+    | {
+        dependencies: ReturnType<typeof buildGraphModel>;
+        communication: ReturnType<typeof buildGraphModel>;
+      }
+    | undefined;
   try {
     graphs = {
       dependencies: buildGraph(graphInput, "dependencies"),
       communication: buildGraph(graphInput, "communication"),
+    };
+    graphModels = {
+      dependencies: buildGraphModel(graphInput, "dependencies"),
+      communication: buildGraphModel(graphInput, "communication"),
     };
   } catch {
     graphState = "unavailable";
@@ -382,6 +400,7 @@ export async function snapshot(root: string, options: SnapshotOptions = {}) {
   }
   return {
     graphs,
+    ...(graphModels ? { graphModels } : {}),
     graphCoverage: {
       state: graphState,
       lanesTotal: agents.length,

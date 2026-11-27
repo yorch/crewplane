@@ -50,7 +50,7 @@ export const ROUTE_PARAMS = {
   agents: ["q", "status", "agent"],
   messages: ["filter", "q", "agent", "phase", "thread"],
   runs: ["lane", "harness", "task", "run"],
-  relationships: ["graph"],
+  relationships: ["graph", "focus", "hops", "group"],
   system: [],
   setup: [],
   usage: ["lane"],
@@ -73,6 +73,8 @@ export const ENUM_PARAMS = {
   status: ["running", "stale", "paused", "idle", "standby", "unknown"],
   harness: ["codex", "pi", "claude", "opencode"],
   graph: ["communication", "dependencies"],
+  hops: ["1", "2", "3"],
+  group: ["none", "owner", "phase", "role", "harness"],
   outcome: ["applied", "noop", "refused", "stale", "invalid"],
 };
 // Shapes for parameters whose values are identifiers, per view (the key `run`
@@ -90,6 +92,7 @@ export const PARAM_PATTERNS = {
   },
 };
 PARAM_PATTERNS.usage = { lane: /^[A-Za-z0-9._:-]{1,64}$/ };
+PARAM_PATTERNS.relationships = { focus: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/ };
 // Evidence opens artifacts in a modal; its selection never scrolls or focuses a pane.
 export const MODAL_VIEWS = ["evidence"];
 export const SELECTION_PARAM = {

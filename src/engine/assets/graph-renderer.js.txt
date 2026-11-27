@@ -1,4 +1,4 @@
-const selectableKinds = new Set(["task", "lane"]);
+const selectableKinds = new Set(["task", "lane", "cluster"]);
 const svgNamespace = "http://www.w3.org/2000/svg";
 let detailCounter = 0;
 const pill = { width: 128, height: 34 };
@@ -134,6 +134,10 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
   host.append(root);
   const nodeElements = new Map();
   const nodeParts = new Map();
+  // With a focus action each node is a wrapper holding its button and a
+  // second "Focus" button; without one the button itself is the list item.
+  const nodeItems = new Map();
+  const focusButtons = new Map();
   const edgeElements = new Map();
   let snapshot;
   let selected = null;
@@ -249,16 +253,25 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
         "text",
         { x: position.x, y: position.y + 4 },
         group,
-      ).textContent = shorten(node.label);
+      ).textContent =
+        node.kind === "cluster"
+          ? shorten(`${node.clusterOpen ? "▾" : "▸"} ${node.label}`)
+          : shorten(node.label);
     }
   };
   const choose = (value) => {
+    // A cluster is not a destination: it expands or collapses in place.
+    if (value.kind === "cluster") {
+      options.onToggleCluster?.(value.id);
+      return;
+    }
     selected = value;
     for (const [id, button] of nodeElements)
-      button.setAttribute(
-        "aria-pressed",
-        String(selected.kind === button.dataset.kind && selected.id === id),
-      );
+      if (button.dataset.kind !== "cluster")
+        button.setAttribute(
+          "aria-pressed",
+          String(selected.kind === button.dataset.kind && selected.id === id),
+        );
     for (const row of edgeElements.values()) {
       const button = row.querySelector("button");
       if (button)
@@ -302,6 +315,13 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
     nodeParts.set(id, { label, nodeKind, primary, secondary });
     return button;
   };
+  const createFocusButton = (id) => {
+    const focus = document.createElement("button");
+    focus.type = "button";
+    focus.className = "relay-node-focus";
+    focus.addEventListener("click", () => options.focusAction.onFocus(id));
+    return focus;
+  };
   function update(next) {
     snapshot = next;
     const activeControl = root.contains(document.activeElement)
@@ -341,30 +361,68 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
       if (!button) {
         button = createNodeButton(node.id);
         nodeElements.set(node.id, button);
+        if (options.focusAction) {
+          const item = document.createElement("div");
+          item.className = "relay-node-item";
+          const focus = createFocusButton(node.id);
+          item.append(button, focus);
+          nodeItems.set(node.id, item);
+          focusButtons.set(node.id, focus);
+        }
       }
       button.dataset.kind = node.kind;
       button.disabled = !selectableKinds.has(node.kind);
       const parts = nodeParts.get(node.id);
       parts.label.textContent = node.label;
-      parts.nodeKind.textContent = node.kind === "lane" ? "Agent" : node.kind;
-      if (node.kind === "task") {
+      parts.nodeKind.textContent =
+        node.kind === "lane"
+          ? "Agent"
+          : node.kind === "cluster"
+            ? "Group"
+            : node.kind;
+      const focusButton = focusButtons.get(node.id);
+      if (focusButton) {
+        const focused = next.scale?.focus?.id === node.id;
+        focusButton.hidden = node.kind === "cluster";
+        focusButton.textContent = focused ? "Clear focus" : "Focus";
+        focusButton.setAttribute(
+          "aria-label",
+          `${focused ? "Clear focus on" : "Focus on"} ${node.label}`,
+        );
+        focusButton.setAttribute("aria-pressed", String(focused));
+      }
+      if (node.kind === "cluster") {
+        const trouble = node.clusterTrouble ?? 0;
+        parts.primary.textContent = `${node.clusterCount ?? 0} ${node.clusterNoun ?? "nodes"}${trouble ? ` · ${trouble} blocked, paused or stale` : ""}`;
+        parts.secondary.textContent = node.clusterOpen
+          ? "Expanded. Choose to collapse this group."
+          : "Collapsed. Choose to show its members.";
+        button.setAttribute("aria-expanded", String(Boolean(node.clusterOpen)));
+        button.removeAttribute("aria-pressed");
+      } else button.removeAttribute("aria-expanded");
+      if (node.kind === "cluster") {
+        // handled above
+      } else if (node.kind === "task") {
         parts.primary.textContent = `Task status: ${node.taskStatus ?? "unknown"}`;
         parts.secondary.textContent = `Accepted: ${node.accepted ? "yes" : "no"}`;
       } else {
         parts.primary.textContent = `Process: ${node.processStatus ?? "unknown"} · Task status: ${node.taskStatus ?? "unknown"}`;
         parts.secondary.textContent = `Role: ${node.role ?? "unknown"} · Harness: ${node.harness ?? "unknown"} · Observed model: ${node.observedModel ?? "unknown"} · Task: ${node.taskId ?? "unknown"} · Accepted: ${node.accepted ? "yes" : "no"}`;
       }
-      button.setAttribute(
-        "aria-pressed",
-        String(selected?.kind === node.kind && selected?.id === node.id),
-      );
-      nodeOrder.push(button);
+      if (node.kind !== "cluster")
+        button.setAttribute(
+          "aria-pressed",
+          String(selected?.kind === node.kind && selected?.id === node.id),
+        );
+      nodeOrder.push(nodeItems.get(node.id) ?? button);
     }
     for (const [id, element] of nodeElements)
       if (!ids.has(id)) {
-        element.remove();
+        (nodeItems.get(id) ?? element).remove();
         nodeElements.delete(id);
         nodeParts.delete(id);
+        nodeItems.delete(id);
+        focusButtons.delete(id);
       }
     syncOrder(nodesHost, nodeOrder);
     const edges = suppliedEdges.filter(
@@ -442,6 +500,8 @@ export function renderGraph(document, host, initialSnapshot, options = {}) {
       root.remove();
       nodeElements.clear();
       nodeParts.clear();
+      nodeItems.clear();
+      focusButtons.clear();
       edgeElements.clear();
     },
   };

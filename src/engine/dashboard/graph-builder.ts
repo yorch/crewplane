@@ -6,6 +6,9 @@ export type Task = {
   status: string | null;
   accepted: boolean;
   dependsOn: { taskId: string; require: "accepted" | "ready" }[];
+  /** Display grouping only (clusters in the dashboard); never authority. */
+  phase?: string | null;
+  owner?: string | null;
 };
 export type Lane = {
   id: string;
@@ -99,6 +102,8 @@ function validate(v: unknown): asserts v is GraphInput {
     (r) =>
       text(r.label) &&
       nullable(r.status) &&
+      (r.phase === undefined || nullable(r.phase)) &&
+      (r.owner === undefined || nullable(r.owner)) &&
       typeof r.accepted === "boolean" &&
       array(r.dependsOn, 1000) &&
       r.dependsOn.every(
@@ -136,7 +141,15 @@ function validate(v: unknown): asserts v is GraphInput {
 }
 const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const id = (...parts: string[]) => JSON.stringify(parts);
-export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
+type Projection = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  omitted: number;
+  omittedEdges: number;
+  /** Task grouping hints for clusters; only the model carries them. */
+  groups: Map<string, { phase: string | null; owner: string | null }>;
+};
+function project(input: GraphInput, view: View): Projection {
   try {
     validate(input);
     if (view !== "dependencies" && view !== "communication") fail();
@@ -147,6 +160,7 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
   let edges: GraphEdge[] = [];
   let omitted = 0;
   let omittedEdges = 0;
+  const groups: Projection["groups"] = new Map();
   if (view === "dependencies") {
     const active = input.tasks.filter((t) => !t.accepted);
     const included = new Set(active.map((t) => t.id));
@@ -168,6 +182,10 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
         ).size;
         continue;
       }
+      groups.set(task.id, {
+        phase: task.phase ?? null,
+        owner: task.owner ?? null,
+      });
       nodes.push({
         id: task.id,
         kind: "task",
@@ -262,6 +280,10 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
       }
   }
   nodes.sort((a, b) => compare(a.id, b.id));
+  return { nodes, edges, omitted, omittedEdges, groups };
+}
+export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
+  const { nodes, edges, omitted, omittedEdges } = project(input, view);
   const displayedNodes = nodes.slice(0, 50);
   const truncatedIds = new Set(nodes.slice(50).map((node) => node.id));
   // Missing references remain visible; references to intentionally clipped nodes do not.
@@ -277,6 +299,98 @@ export function buildGraph(input: GraphInput, view: View): GraphSnapshot {
     truncated: {
       nodes: Math.max(0, nodes.length - 50),
       edges: edges.length - Math.min(100, eligibleEdges.length),
+    },
+  };
+}
+
+/** Ceilings for the full model the dashboard clusters, focuses and pages. */
+export const MODEL_MAX_NODES = 1100;
+export const MODEL_MAX_EDGES = 3000;
+export const EDGE_KINDS = [
+  "dependency",
+  "awaiting-answer",
+  "review-handoff",
+  "message",
+] as const;
+export type ModelNode = Partial<Omit<GraphNode, "id" | "kind" | "label">> & {
+  id: string;
+  kind: GraphNode["kind"];
+  label: string;
+  phase?: string;
+  owner?: string;
+};
+/** from, to, EDGE_KINDS index, label, thread id, time, unanswered (0 or 1). */
+export type ModelEdge = [
+  string,
+  string,
+  number,
+  string,
+  string | null,
+  string | null,
+  0 | 1,
+];
+export type GraphModel = {
+  version: 1;
+  view: View;
+  nodes: ModelNode[];
+  edges: ModelEdge[];
+  hidden: { nodes: number; edges: number };
+  /** Left out of the model itself because of the ceilings above. */
+  truncated: { nodes: number; edges: number };
+};
+/**
+ * The same explicit relationships as buildGraph, without the 50 node and 100
+ * edge display cap: up to MODEL_MAX_NODES nodes and MODEL_MAX_EDGES edges, in a
+ * compact form (null fields omitted, edges as tuples). The page still draws at
+ * most 50 nodes and 100 edges at a time; the model only lets it cluster, focus
+ * and page through the rest. Edges to nodes the model dropped are dropped too,
+ * and the counts say how much was left out.
+ */
+export function buildGraphModel(input: GraphInput, view: View): GraphModel {
+  const { nodes, edges, omitted, omittedEdges, groups } = project(input, view);
+  const kept = nodes.slice(0, MODEL_MAX_NODES);
+  const dropped = new Set(nodes.slice(MODEL_MAX_NODES).map((node) => node.id));
+  const eligible = edges.filter(
+    (edge) => !dropped.has(edge.from) && !dropped.has(edge.to),
+  );
+  const modelNodes: ModelNode[] = kept.map((node) => {
+    const out: ModelNode = { id: node.id, kind: node.kind, label: node.label };
+    for (const key of [
+      "role",
+      "harness",
+      "observedModel",
+      "taskId",
+      "processStatus",
+      "taskStatus",
+    ] as const) {
+      const value = node[key];
+      if (value !== null) out[key] = value;
+    }
+    if (node.accepted) out.accepted = true;
+    const group = groups.get(node.id);
+    if (group?.phase) out.phase = group.phase;
+    if (group?.owner) out.owner = group.owner;
+    return out;
+  });
+  return {
+    version: 1,
+    view,
+    nodes: modelNodes,
+    edges: eligible
+      .slice(0, MODEL_MAX_EDGES)
+      .map((edge) => [
+        edge.from,
+        edge.to,
+        EDGE_KINDS.indexOf(edge.kind),
+        edge.label,
+        edge.threadId,
+        edge.at,
+        edge.unanswered ? 1 : 0,
+      ]),
+    hidden: { nodes: omitted, edges: omittedEdges },
+    truncated: {
+      nodes: Math.max(0, nodes.length - MODEL_MAX_NODES),
+      edges: edges.length - Math.min(MODEL_MAX_EDGES, eligible.length),
     },
   };
 }

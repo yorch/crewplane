@@ -127,7 +127,11 @@ The dashboard serves public embedded assets and a set of data routes under `/api
 - **Errors.** `400` for unknown, repeated, malformed or out-of-range parameters (the body never echoes the offending value), `503 {"error": ...}` when the board cannot be read, `404` for unknown paths. Every response sends `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and the strict CSP.
 - **Data.** Responses are explicit allowlisted projections. They never contain environment values, tokens, file contents, raw provider payloads or private reasoning. Persisted strings are stripped of control characters and length-bounded; clients still render them with `textContent` only. `null` means unknown or not applicable and is never `0`.
 
-Existing routes are unchanged: `GET /api/snapshot`, `GET /api/runs[?task&lane&harness&before&limit]`, `GET /api/runs/:runId[?after&limit]`.
+Existing routes are unchanged (the snapshot gained one additive field, `graphModels`, below): `GET /api/snapshot`, `GET /api/runs[?task&lane&harness&before&limit]`, `GET /api/runs/:runId[?after&limit]`.
+
+### Snapshot `graphModels` (additive)
+
+`graphs.{dependencies,communication}` keep their shape and the 50 node and 100 edge display cap. Beside them the snapshot carries `graphModels.{dependencies,communication}`, the same explicit relationships without that cap, in a compact form for the page's clusters, focus and paging: `nodes` (up to 1,100; null fields omitted; tasks add `phase` and `owner` grouping hints), `edges` (up to 3,000 tuples `[from, to, kindIndex, label, threadId, at, unanswered]`, `kindIndex` into `dependency`, `awaiting-answer`, `review-handoff`, `message`), `hidden` and `truncated` (what the model itself left out). It is absent when the graph is unavailable. It grants no authority and the page still draws at most 50 nodes and 100 edges at a time.
 
 ### `GET /api/events` (server-sent events)
 

@@ -18,6 +18,9 @@ import {
   wireFilters,
 } from "./app/filters.js";
 import { startLive } from "./app/live.js";
+import { checkAlerts, initNotify } from "./app/notify.js";
+import { initPalette } from "./app/palette.js";
+import { initPreferences, openPreferences } from "./app/preferences.js";
 import {
   restoreAfterFirstRender,
   startReloadPersistence,
@@ -32,8 +35,10 @@ import {
   updateNavLinks,
 } from "./app/router.js";
 import { showActiveView, wireShell } from "./app/shell.js";
+import { initShortcuts, openHelp } from "./app/shortcuts.js";
 import { $, compactLayout, hooks, stackedLayout, store } from "./app/store.js";
 import { storeLayout } from "./app/tasks.js";
+import { initTheme } from "./app/theme.js";
 import { date } from "./app/time.js";
 
 // The fragment token is adopted when ./app/api.js loads (before this body runs).
@@ -46,6 +51,7 @@ hooks.commitSnapshot = (firstLoad) => {
     showActiveView();
   }
   render();
+  checkAlerts();
   refreshControls();
   // Setup, Usage and the Control log read their own routes; the snapshot
   // changing is the cue to look again (debounced and throttled).
@@ -67,8 +73,13 @@ window.crewplane = {
     return { view: store.route.view, params: { ...store.route.params } };
   },
 };
+initTheme();
 wireFilters();
 wireShell();
+initShortcuts();
+initPalette({ help: openHelp, preferences: openPreferences });
+initPreferences();
+initNotify();
 for (const [id, layout] of [
   ["layout-board", "board"],
   ["layout-list", "list"],
@@ -93,6 +104,7 @@ for (const [resource, views] of [
 ])
   resource.onChange((state) => {
     if (state.status === "loading" || !store.data) return;
+    if (resource === logResource) checkAlerts();
     if (views === null || views.includes(store.route.view)) render();
   });
 for (const query of [compactLayout, stackedLayout])

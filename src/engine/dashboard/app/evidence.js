@@ -99,6 +99,8 @@ const cache = createObjectUrlCache({
 });
 
 const stateOf = (id) => blobs.get(id) ?? { status: "idle", message: "" };
+/** The artifacts the gallery has already loaded (read only, for the palette). */
+export const loadedArtifacts = () => gallery.artifacts;
 const find = (id) => gallery.artifacts.find((item) => item.id === id) ?? null;
 const routeQuery = () => ({
   task: store.route.params.task,
