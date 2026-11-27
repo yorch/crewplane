@@ -476,7 +476,11 @@ describe("GET /api/control-log", () => {
     expect((await json("/api/control-log?after=7")).body).toMatchObject({
       entries: [],
       nextAfter: 7,
+      retainedFromId: "00000000-0000-4000-8000-000000000001",
+      // The id of the entry at the cursor lets a client notice a reset log.
+      afterId: "00000000-0000-4000-8000-000000000007",
     });
+    expect((await json("/api/control-log?after=99")).body.afterId).toBeNull();
     expect((await json("/api/control-log")).body.entries).toHaveLength(7);
     expect((await json("/api/control-log")).body.entries[0]).toEqual({
       id: "00000000-0000-4000-8000-000000000001",

@@ -15,21 +15,42 @@ async function copyText(text) {
 }
 
 /** The notice for an active instance hold, or null when none is on. */
+// The copy result outlives the node that was clicked: snapshots re-render the
+// notice while the clipboard call is still pending, so the result is kept here,
+// painted into every notice now on the page and into any built within 4 s.
+let copyResult = "";
+let copyResultTimer;
+function showCopyResult(text) {
+  copyResult = text;
+  clearTimeout(copyResultTimer);
+  copyResultTimer = setTimeout(() => {
+    copyResult = "";
+    paintCopyResult();
+  }, 4000);
+  paintCopyResult();
+}
+function paintCopyResult() {
+  for (const node of document.querySelectorAll(".instance-hold-status"))
+    node.textContent = copyResult;
+}
+
 export function instanceHoldNotice(headless) {
   if (headless?.instanceHeld !== true) return null;
   const box = el("div", undefined, "instance-hold");
   box.dataset.hold = "instance";
   box.setAttribute("role", "note");
   const code = el("code", RESUME_ALL_COMMAND, "instance-hold-command");
-  const status = el("span", undefined, "instance-hold-status");
+  const status = el("span", copyResult || undefined, "instance-hold-status");
   status.setAttribute("role", "status");
   const copy = el("button", "Copy command", "text-button");
   copy.type = "button";
   copy.dataset.focusKey = "instance-hold:copy";
   copy.addEventListener("click", async () => {
-    status.textContent = (await copyText(RESUME_ALL_COMMAND))
-      ? "Copied"
-      : "Select the command and copy it";
+    showCopyResult(
+      (await copyText(RESUME_ALL_COMMAND))
+        ? "Copied"
+        : "Select the command and copy it",
+    );
   });
   box.append(
     el(

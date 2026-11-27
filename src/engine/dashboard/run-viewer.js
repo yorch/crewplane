@@ -106,6 +106,11 @@
         badge(meta.status, statusTones[meta.status] ?? "unknown"),
         make("span", `final ${meta.finalState ?? "not recorded"}`, "count"),
       );
+      // Evidence captured for this run's task (filtered gallery, with a count).
+      const evidence = meta.task
+        ? window.crewplane.evidenceLink?.(meta.task, "Task evidence")
+        : null;
+      if (evidence) tags.append(evidence);
       summary.replaceChildren(tags);
       summary.dataset.signature = signature;
       // The operator-controls layer (when enabled) offers actions per run.

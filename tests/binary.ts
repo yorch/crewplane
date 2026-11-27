@@ -594,7 +594,37 @@ try {
     "default-src 'none'; sandbox",
   );
   assert.equal(image.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(
+    image.headers.get("cross-origin-resource-policy"),
+    "same-origin",
+  );
+  assert.equal(
+    image.headers.get("content-disposition"),
+    `inline; filename="${artifact.artifactId}.png"`,
+  );
+  assert.equal(image.headers.get("content-length"), String(png.length));
   assert.equal((await dget("/api/evidence/artifacts/not-an-id")).status, 404);
+  // The gallery shows artifacts from blob: URLs; the page policy admits blob:
+  // for images and media only, and the artifact answer keeps its own sandbox.
+  const pagePolicy = (await dget("/")).headers.get("content-security-policy");
+  assert.equal(
+    pagePolicy,
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; media-src 'self' blob:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  );
+  for (const directive of pagePolicy?.split("; ") ?? [])
+    assert.equal(
+      directive.includes("blob:"),
+      directive.startsWith("img-src") || directive.startsWith("media-src"),
+      directive,
+    );
+  assert.equal(
+    (
+      await fetch(
+        `http://127.0.0.1:${port}/api/evidence/artifacts/${artifact.artifactId}`,
+      )
+    ).status,
+    401,
+  );
   // Read-only phase-2 routes: session-gated, bounded and answered by the
   // compiled executable with no access to source.
   for (const path of [
@@ -633,9 +663,59 @@ try {
   assert.equal(usage.window.bucketStarts.length, 24);
   assert.equal(usage.coverage.ledger.connected, false);
   const gallery = (await (await dget("/api/evidence/artifacts")).json()) as {
-    artifacts: Array<{ id: string; sha256: string }>;
+    artifacts: Array<{
+      id: string;
+      sha256: string;
+      mime: string;
+      size: number;
+      task: string;
+      url: string;
+    }>;
   };
   assert(gallery.artifacts.some((item) => item.id === artifact.artifactId));
+  const listed = gallery.artifacts.find(
+    (item) => item.id === artifact.artifactId,
+  ) as {
+    mime: string;
+    size: number;
+    sha256: string;
+    task: string;
+    url: string;
+  };
+  assert.equal(listed.mime, "image/png");
+  assert.equal(listed.size, png.length);
+  assert.equal(listed.task, "CP-101");
+  assert.match(listed.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(listed.url, `/api/evidence/artifacts/${artifact.artifactId}`);
+  // Filtered by task and run, and a bad filter is refused (the gallery's paths).
+  const filtered = (await (
+    await dget(
+      `/api/evidence/artifacts?task=CP-101&run=${evidenceRun.runId}&limit=5`,
+    )
+  ).json()) as { artifacts: unknown[] };
+  assert.equal(filtered.artifacts.length, 1);
+  assert.equal(
+    (await dget("/api/evidence/artifacts?task=nope%20id")).status,
+    400,
+  );
+  assert.equal(
+    (await dget(`/api/evidence/artifacts?cursor=${evidenceRun.runId}`)).status,
+    400,
+  );
+  // Every new view module is served by the executable.
+  for (const module of [
+    "setup",
+    "usage",
+    "evidence",
+    "audit",
+    "evidence-core",
+    "audit-core",
+    "usage-core",
+    "config-core",
+    "format",
+    "resource",
+  ])
+    assert(served.has(`/app/${module}.js`), `module served: ${module}`);
   const abort = new AbortController();
   const live = await fetch(`http://127.0.0.1:${port}/api/events`, {
     headers: { "x-crewplane-session": token },

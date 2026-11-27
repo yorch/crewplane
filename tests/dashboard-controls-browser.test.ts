@@ -27,6 +27,13 @@ import { createTraceStore } from "../src/engine/operational-traces.ts";
 // supervisor is exercised by src/engine/dashboard-controls-verbs.test.ts and
 // src/engine/supervisor-revision.test.ts, and the real CLI by
 // tests/dashboard-controls-cli-parity.test.ts.
+declare global {
+  interface Window {
+    crewplane: {
+      route: { view: string; params: Record<string, string> };
+    };
+  }
+}
 const previousState = process.env.CREWPLANE_STATE_DIR;
 const stateBase = mkdtempSync(join(tmpdir(), "crewplane-controls-ui-state-"));
 process.env.CREWPLANE_STATE_DIR = stateBase;
@@ -101,7 +108,19 @@ const save = (value: unknown) =>
   writeFileSync(stateFile(), JSON.stringify(value), { mode: 0o600 });
 
 /** Records one outcome per queued command, like the supervisor does. */
+let heartbeat = true;
 function fakeSupervisor() {
+  if (heartbeat) {
+    // A live supervisor refreshes checkedAt every interval. The server treats
+    // a state older than 2 * intervalSeconds + 5 s as stale and then offers no
+    // Stop; a fixture stamped once in beforeAll goes stale 25 s into the file,
+    // which a loaded machine reaches before the later tests run.
+    const current = load();
+    if (Date.now() - Date.parse(current.checkedAt) > 1000) {
+      current.checkedAt = new Date().toISOString();
+      save(current);
+    }
+  }
   const commands = join(dir, "commands");
   for (const name of readdirSync(commands)) {
     if (!name.endsWith(".json")) continue;
@@ -208,10 +227,29 @@ async function open(base: string, fragment: string, view?: string) {
   if (view) await go(page, view);
   return { page, errors, posts };
 }
+const KNOWN_VIEWS = [
+  "overview",
+  "tasks",
+  "agents",
+  "messages",
+  "runs",
+  "system",
+  "setup",
+  "usage",
+  "evidence",
+  "audit",
+];
+/** Writes the hash and waits until the app has applied that route. */
 async function go(page: Page, hash: string) {
+  const name = /^#?\/([a-z]+)/.exec(hash)?.[1] ?? "";
+  const view = KNOWN_VIEWS.includes(name) ? name : "overview";
   await page.evaluate((h) => {
     window.location.hash = h;
   }, hash);
+  await page.waitForFunction(
+    (expected) => window.crewplane.route.view === expected,
+    view,
+  );
 }
 const agentHash = (lane: string) => `/agents?agent=${lane}`;
 const button = (page: Page, name: string | RegExp) =>
@@ -329,6 +367,59 @@ it("says on Overview, Agents and System that an instance hold is lifted from the
   }
 });
 
+it("keeps the copy result visible when the page re-renders before the copy settles", async () => {
+  const before = load();
+  save({ ...before, instanceHeld: true });
+  try {
+    const { page } = await open(off, `token=${session}`, "/system");
+    // A slow clipboard: the result arrives after several live re-renders (the
+    // live interval is 200 ms), which replace the node the click handler saw.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: () => new Promise((done) => setTimeout(done, 900)),
+        },
+      });
+    });
+    const hint = page.locator("#view-system .instance-hold");
+    await hint.getByRole("button", { name: "Copy command" }).click();
+    await hint.locator("[role=status]").getByText("Copied").waitFor({
+      timeout: 5000,
+    });
+    await page.close();
+  } finally {
+    save(before);
+  }
+});
+
+it("offers no Stop while the supervisor heartbeat is stale", async () => {
+  heartbeat = false;
+  const before = load();
+  save({
+    ...before,
+    checkedAt: new Date(Date.now() - 120_000).toISOString(),
+  });
+  try {
+    const { page } = await open(
+      on,
+      `token=${session}&controls=${controls.token}`,
+      "/system",
+    );
+    await page
+      .locator(".sidebar-foot")
+      .getByText("Operator controls on")
+      .waitFor();
+    expect(
+      await page.getByRole("button", { name: "Stop supervisor" }).count(),
+    ).toBe(0);
+    await page.close();
+  } finally {
+    heartbeat = true;
+    save({ ...load(), checkedAt: new Date().toISOString() });
+  }
+});
+
 it("shows decisions on Overview and Messages", async () => {
   const { page } = await open(
     on,
@@ -390,6 +481,11 @@ it("confirms in an accessible dialog, requires the note and returns focus", asyn
   expect(posts).toEqual([]);
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
+  // The dialog's close event, which returns focus, is dispatched in a task of
+  // its own after the dialog is already hidden; wait for it, then assert.
+  await page.waitForFunction(
+    () => document.activeElement?.textContent === "Approve",
+  );
   expect(await page.evaluate(() => document.activeElement?.textContent)).toBe(
     "Approve",
   );

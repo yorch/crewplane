@@ -122,13 +122,26 @@ export function setMode(mode) {
 // A stream heartbeat proves the retained snapshot is still current.
 export function markFresh(at) {
   if (!store.data) return;
+  const ms = Date.parse(at);
+  if (Number.isFinite(ms)) {
+    if (ms < store.appliedAt) return;
+    store.appliedAt = ms;
+  }
   store.lastSuccess = Date.now();
   setConnection("live", "Live");
   checkedAt = date(at);
   paintChecked();
   $("error").hidden = true;
 }
-export function applySnapshot(next) {
+/**
+ * Applies a snapshot. A pushed one (`stream`) older than what the page already
+ * shows (a newer poll answered first) is dropped, so "Checked" never goes back
+ * in time. Returns false when it was dropped.
+ */
+export function applySnapshot(next, { stream = false } = {}) {
+  const at = Date.parse(next?.updatedAt);
+  if (stream && store.data && Number.isFinite(at) && at < store.appliedAt)
+    return false;
   store.applied += 1;
   const { updatedAt, ...content } = next;
   const signature = JSON.stringify(content);
@@ -166,12 +179,14 @@ export function applySnapshot(next) {
     // above, so anything that depends on final page height belongs here.
     hooks.afterGraphs?.(firstLoad);
   }
+  if (Number.isFinite(at)) store.appliedAt = Math.max(store.appliedAt, at);
   store.lastSuccess = Date.now();
   refreshRelativeTimes();
   setConnection("live", "Live");
   checkedAt = date(updatedAt);
   paintChecked();
   $("error").hidden = true;
+  return true;
 }
 export function showDisconnected(message, retry = "every 5s") {
   setConnection("disconnected", "Disconnected");

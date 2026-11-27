@@ -79,6 +79,13 @@ export function controlLogView(state: State | null, query: ControlLogQuery) {
     entries: page,
     latestSeq: count(state?.controlSeq) ?? entries.at(-1)?.seq ?? null,
     retainedFrom: entries[0]?.seq ?? null,
+    /** Id of the oldest retained entry, so a client can tell a reset log from a pruned one. */
+    retainedFromId: entries[0]?.id ?? null,
+    /** Id of the entry at `after` when it is still retained (a restarted log has other ids). */
+    afterId:
+      query.after === null
+        ? null
+        : (entries.find((entry) => entry.seq === query.after)?.id ?? null),
     retained: entries.length,
     hasMore: query.after === null ? false : newer.length > page.length,
     nextAfter: last ?? null,

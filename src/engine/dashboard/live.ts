@@ -251,7 +251,13 @@ export function createLiveHub(options: LiveOptions) {
           data: result.data,
           at: finishedAt,
         };
-      else latest.at = finishedAt;
+      else {
+        // Same content under the same id, but the snapshot's own `updatedAt`
+        // moves with every read: replaying an older body would show a client
+        // that already holds a newer polled snapshot an earlier time.
+        latest.at = finishedAt;
+        latest.data = result.data;
+      }
     }
     fresh = clients.size > 0;
     reapSlow();

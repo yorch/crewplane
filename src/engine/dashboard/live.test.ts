@@ -396,6 +396,23 @@ describe("live hub: stale cache after idle", () => {
   });
 });
 
+describe("live hub: replayed snapshot body", () => {
+  it("replays the newest body for unchanged content, so a joiner never gets an earlier read time", async () => {
+    const h = manual();
+    const first = new FakeSink();
+    h.hub.add(first);
+    await h.resolve("same", JSON.stringify({ updatedAt: "T1" }));
+    h.clock.fireTimeouts();
+    await h.resolve("same", JSON.stringify({ updatedAt: "T2" }));
+    // Same content: no second event for the connected client.
+    expect(first.events("snapshot")).toHaveLength(1);
+    const joined = new FakeSink();
+    h.hub.add(joined);
+    expect(joined.events("snapshot")).toHaveLength(1);
+    expect(joined.events("snapshot")[0]).toContain('"updatedAt":"T2"');
+  });
+});
+
 describe("live hub: heartbeat semantics", () => {
   it("reports the time of the last successful read, not the time of the ping", async () => {
     const h = manual();

@@ -12,6 +12,7 @@ import {
   link,
   section,
 } from "./dom.js";
+import { evidenceLink } from "./evidence-link.js";
 import { clearButton, syncClear } from "./filters.js";
 import { BOARD_COLUMNS, STATE_GROUPS } from "./labels.js";
 import { agentLink, taskLink, taskTitle } from "./links.js";
@@ -269,6 +270,7 @@ function renderTaskDetail() {
       `All messages (${messages.length})`,
     ),
     link(hrefFor("runs", { task: task.id }), "Runs for this task"),
+    ...[evidenceLink(task.id)].filter(Boolean),
   );
   conversations.append(actions);
   nodes.push(section("Conversations & runs", conversations));
