@@ -267,6 +267,11 @@ it("a board too large to push keeps one stream and bounded polling, truthfully l
     });
     await page.goto(dashboard.url);
     await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+    // "Live" comes from the first poll; the mode is only settled once the
+    // stream's resync has been read, which on a loaded machine (a snapshot of
+    // over 16 MiB is built first) can be well after. Sample the window from
+    // there, so only a later claim of live updates counts as a failure.
+    await modeIs(page, "polling", 60000);
     // Over 20 seconds the page never claims live updates, and neither the
     // stream nor the snapshot is requested in a loop.
     const seen = new Set<string | null>();

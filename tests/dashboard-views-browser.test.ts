@@ -127,11 +127,7 @@ async function open(
   await options.prepare?.(page);
   await page.goto(`${target.base}#token=${target.session}`);
   await page.locator("#loading").waitFor({ state: "hidden", timeout: 15000 });
-  if (hash) {
-    await page.evaluate((value) => {
-      window.location.hash = value;
-    }, hash);
-  }
+  if (hash) await go(page, hash);
   return { page, errors, context };
 }
 const close = (opened: Opened) => opened.context.close();
