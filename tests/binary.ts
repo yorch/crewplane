@@ -6,12 +6,13 @@ import {
   spawn,
   spawnSync,
 } from "node:child_process";
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -654,6 +655,106 @@ try {
   dashboard.kill("SIGTERM");
   await closed(dashboard);
   abort.abort();
+  // Operator controls through the compiled executable: opt-in, token and
+  // Origin guarded, queued (never applied synchronously) in the private
+  // control directory, and replay-safe.
+  {
+    const logsBefore = nativeLogs.length;
+    const controlPort = await new Promise<number>((resolve) => {
+      const s = createServer();
+      s.listen(0, "127.0.0.1", () => {
+        const a = s.address();
+        s.close(() => resolve(typeof a === "object" && a ? a.port : 0));
+      });
+    });
+    const controlled = start(
+      "dashboard",
+      "--port",
+      String(controlPort),
+      "--controls",
+      "true",
+    );
+    await until(
+      async () => nativeLogs.slice(logsBefore).includes("Controls URL"),
+      "controls dashboard URL",
+    );
+    const fresh = nativeLogs.slice(logsBefore);
+    const match = new RegExp(
+      `http://127.0.0.1:${controlPort}/#token=([A-Za-z0-9_-]+)&controls=([A-Za-z0-9_-]+)`,
+    ).exec(fresh);
+    assert(match, "controls URL printed");
+    const [, readToken = "", controlsToken = ""] = match;
+    assert.notEqual(readToken, controlsToken);
+    const origin = `http://127.0.0.1:${controlPort}`;
+    const capability = (await (
+      await fetch(`${origin}/api/controls`, {
+        headers: { "x-crewplane-session": readToken },
+      })
+    ).json()) as { enabled: boolean; verbs: string[] };
+    assert.equal(capability.enabled, true);
+    assert(capability.verbs.includes("resolve"));
+    assert(!JSON.stringify(capability).includes(controlsToken));
+    const post = (
+      body: unknown,
+      token = controlsToken,
+      session: string | null = readToken,
+    ) =>
+      fetch(`${origin}/api/control`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+          "x-crewplane-token": token,
+          ...(session ? { "x-crewplane-session": session } : {}),
+        },
+        body: JSON.stringify(body),
+      });
+    assert.equal(
+      (await post({ action: "pause", lane: "builder" }, readToken)).status,
+      403,
+    );
+    // The read session is required as well as the controls token.
+    assert.equal(
+      (await post({ action: "pause", lane: "builder" }, controlsToken, null))
+        .status,
+      403,
+    );
+    // cancel --all stays CLI-only.
+    assert.equal((await post({ action: "cancel", all: true })).status, 400);
+    assert.equal(
+      (
+        await post({
+          action: "resume",
+          lane: "builder",
+          requestId: randomUUID(),
+        })
+      ).status,
+      400,
+    );
+    const requestId = randomUUID();
+    const queued = (await (
+      await post({ action: "nudge", lane: "builder", text: "hi", requestId })
+    ).json()) as { id: string; status: string; outcome: unknown };
+    assert.equal(queued.id, requestId);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.outcome, null);
+    const again = (await (
+      await post({ action: "nudge", lane: "builder", text: "hi", requestId })
+    ).json()) as { replay?: boolean };
+    assert.equal(again.replay, true);
+    const commandsDirectory = join(controlOf(root), "commands");
+    const file = join(commandsDirectory, `${requestId}.json`);
+    const command_ = JSON.parse(readFileSync(file, "utf8")) as {
+      action: string;
+      issuer: string;
+    };
+    assert.equal(command_.action, "nudge");
+    assert.equal(command_.issuer, "dashboard");
+    // The fixture has no supervisor: leave nothing for a later start to find.
+    rmSync(file);
+    controlled.kill("SIGTERM");
+    await closed(controlled);
+  }
   command("watchdog", "once");
   assert.equal(JSON.parse(command("watchdog", "status")).recovery, "none");
   // Simulate a dead supervisor's persisted running-without-child state and lease.
@@ -1158,6 +1259,38 @@ try {
       timeout: 15000,
     });
   assert.equal(legacyRun("init").status, 0);
+  // The dashboard is started while the project is still clean (the CLI would
+  // refuse to start it under a legacy layout); the layout appears under it.
+  const legacyPort = await new Promise<number>((resolve) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const a = s.address();
+      s.close(() => resolve(typeof a === "object" && a ? a.port : 0));
+    });
+  });
+  let output = "";
+  const legacyDashboard = spawn(
+    bin,
+    [
+      "--project",
+      legacyProject,
+      "dashboard",
+      "--port",
+      String(legacyPort),
+      "--controls",
+      "true",
+    ],
+    { env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  children.push(legacyDashboard);
+  legacyDashboard.stdout?.on("data", (b) => (output += b.toString()));
+  legacyDashboard.stderr?.on("data", (b) => (output += b.toString()));
+  await until(async () => output.includes("Controls URL"), "legacy dashboard");
+  const urls = new RegExp(
+    `http://127.0.0.1:${legacyPort}/#token=([A-Za-z0-9_-]+)&controls=([A-Za-z0-9_-]+)`,
+  ).exec(output);
+  assert(urls, "legacy controls URL printed");
+  const [, legacyRead = "", legacyControls = ""] = urls;
   const legacyDirectory = join(legacyProject, ".crewplane-state/supervisor");
   mkdirSync(legacyDirectory, { recursive: true, mode: 0o700 });
   writeFileSync(
@@ -1179,6 +1312,58 @@ try {
   assert.equal(refusedLegacy.stdout, "");
   assert.match(refusedLegacy.stderr, /run `crewplane migrate`/);
   assert.equal(legacyRun("--version").status, 0);
+  // The compiled dashboard makes the same decisions as the compiled CLI on a
+  // legacy layout: widening refused (409), narrowing queued where the CLI does.
+  {
+    const legacyOrigin = `http://127.0.0.1:${legacyPort}`;
+    const legacyPost = (body: unknown) =>
+      fetch(`${legacyOrigin}/api/control`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: legacyOrigin,
+          "x-crewplane-token": legacyControls,
+          "x-crewplane-session": legacyRead,
+        },
+        body: JSON.stringify(body),
+      });
+    const refusedByDashboard = await legacyPost({
+      action: "resume",
+      lane: "builder",
+      expectRev: 0,
+      requestId: randomUUID(),
+    });
+    assert.equal(refusedByDashboard.status, 409);
+    assert.equal(
+      ((await refusedByDashboard.json()) as { code: string }).code,
+      "LEGACY_LAYOUT",
+    );
+    const queuedCommands = () => {
+      const commands = join(controlOf(legacyProject), "commands");
+      return existsSync(commands)
+        ? readdirSync(commands).filter((n) => n.endsWith(".json"))
+        : [];
+    };
+    assert.deepEqual(queuedCommands(), []);
+    const accepted = await legacyPost({ action: "pause", lane: "builder" });
+    assert.equal(accepted.status, 200);
+    const [viaDashboard = ""] = queuedCommands();
+    const meaning = (name: string) => {
+      const { at, v, issuer, id, ...rest } = JSON.parse(
+        readFileSync(join(controlOf(legacyProject), "commands", name), "utf8"),
+      );
+      return JSON.stringify(rest);
+    };
+    const fromDashboard = meaning(viaDashboard);
+    rmSync(join(controlOf(legacyProject), "commands", viaDashboard));
+    assert.equal(legacyRun("pause", "--lane", "builder").status, 0);
+    const [viaCli = ""] = queuedCommands();
+    assert.equal(meaning(viaCli), fromDashboard);
+    // Leave nothing for the migration below to trip over.
+    rmSync(controlOf(legacyProject), { recursive: true, force: true });
+    legacyDashboard.kill("SIGTERM");
+    await closed(legacyDashboard);
+  }
   const dry = JSON.parse(legacyRun("migrate", "--dry-run").stdout);
   assert.equal(dry.status, "dry-run");
   assert(existsSync(join(legacyDirectory, "state.json")));

@@ -1535,3 +1535,222 @@ details.info p {
 [hidden] {
   display: none;
 }
+
+/* Operator controls (rendered only when the server enables them). */
+.control-button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-weight: 600;
+}
+.control-button.primary {
+  border-color: var(--accent-strong);
+  background: var(--accent);
+  color: #ffffff;
+}
+.control-button.primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+.control-button.danger {
+  border-color: #a1281d;
+  color: #a1281d;
+}
+.control-button.danger:hover:not(:disabled) {
+  background: #fde6e3;
+}
+.control-dialog-actions .control-button.danger {
+  background: #a1281d;
+  color: #ffffff;
+}
+.instance-hold {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.instance-hold-text {
+  flex: 1 1 100%;
+  margin: 0;
+}
+.instance-hold-command {
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.control-tasks {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.control-tasks li.control-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.control-task {
+  overflow-wrap: anywhere;
+}
+.decision-block {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.decision-block h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.run-actions:not(:empty) {
+  margin: 8px 0;
+}
+.control-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  overflow: auto;
+}
+.control-dialog::backdrop {
+  background: rgb(18 23 31 / 60%);
+}
+.control-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+.control-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 12px 0;
+}
+.control-facts dt {
+  color: var(--muted);
+}
+.control-facts dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.control-field {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+}
+.control-field textarea {
+  width: 100%;
+  min-height: 88px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+.control-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0;
+}
+.control-check input {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+}
+.control-dialog [aria-invalid="true"] {
+  border-color: #a1281d;
+  outline: 2px solid #a1281d;
+}
+.control-error {
+  margin: 8px 0;
+  color: #a1281d;
+  font-weight: 600;
+}
+.control-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.control-feedback {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 20;
+  display: grid;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+}
+.control-feedback:empty {
+  display: none;
+}
+.control-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: 0 4px 16px rgb(18 23 31 / 18%);
+}
+.control-item[data-outcome="applied"] {
+  border-left: 6px solid #1e7b46;
+}
+.control-item[data-outcome="stale"],
+.control-item[data-outcome="refused"],
+.control-item[data-outcome="invalid"] {
+  border-left: 6px solid #a1281d;
+}
+.control-item-text {
+  flex: 1 1 200px;
+  overflow-wrap: anywhere;
+}
+@media (forced-colors: active) {
+  .control-dialog,
+  .control-item,
+  .decision-block {
+    border: 2px solid CanvasText;
+  }
+  .control-button {
+    border: 2px solid ButtonText;
+  }
+  .control-button.primary,
+  .control-dialog-actions .control-button.danger {
+    background: ButtonFace;
+    color: ButtonText;
+    forced-color-adjust: auto;
+  }
+  .control-item[data-outcome] {
+    border-left: 8px solid CanvasText;
+  }
+  .control-dialog [aria-invalid="true"] {
+    outline: 3px solid Highlight;
+  }
+}

@@ -322,3 +322,14 @@ export function validState(value: unknown): value is State {
       notes.every((n) => typeof n === "string" && n.length <= 32768),
   );
 }
+
+/** The scope and target a control is recorded under in the control log. */
+export function controlSubject(c: Control): {
+  scope: "instance" | "lane" | "task" | "run";
+  target: string | null;
+} {
+  return {
+    scope: c.all ? "instance" : c.run ? "run" : c.task ? "task" : "lane",
+    target: c.all ? "all" : (c.run ?? c.task ?? c.lane ?? null),
+  };
+}

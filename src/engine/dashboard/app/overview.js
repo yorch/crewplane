@@ -1,6 +1,8 @@
 import { agentRecords } from "./agents.js";
 import { badge, healthBadge, processBadge, taskBadge } from "./badges.js";
+import { decisionBlock } from "./controls.js";
 import { el, emptyState, firstLine, link } from "./dom.js";
+import { instanceHoldNotice } from "./hold-notice.js";
 import { stateLabels, stateTones } from "./labels.js";
 import { agentLink, taskLink, taskTitle } from "./links.js";
 import { hrefFor } from "./route.js";
@@ -154,8 +156,10 @@ function renderAttention() {
   const items = attentionItems();
   $("attention-count").textContent = items.length ? String(items.length) : "";
   const host = $("attention");
+  const decisions = decisionBlock();
   if (!items.length) {
     host.replaceChildren(
+      ...(decisions ? [decisions] : []),
       emptyState(
         "Nothing needs attention in this snapshot.",
         "No blocked tasks, open questions, submissions or health alerts were reported.",
@@ -165,7 +169,7 @@ function renderAttention() {
   }
   const list = el("ol", undefined, "attention-list");
   list.append(...items.slice(0, 8).map(attentionRow));
-  const nodes = [list];
+  const nodes = [...(decisions ? [decisions] : []), list];
   if (items.length > 8) {
     const more = el("details", undefined, "disclosure");
     more.dataset.key = "attention-more";
@@ -230,6 +234,8 @@ function renderHealthSummary() {
     : (headless?.held ?? []);
   const nodes = [list];
   if (held.length) nodes.push(el("p", `Held: ${held.join(", ")}`, "note"));
+  const notice = instanceHoldNotice(headless);
+  if (notice) nodes.push(notice);
   $("health-summary").replaceChildren(...nodes);
 }
 function renderTaskSummary() {

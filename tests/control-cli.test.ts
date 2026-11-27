@@ -12,6 +12,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -452,6 +453,54 @@ describe.each(runners)("%s CLI", (_name, runner) => {
     expect(existsSync(p.legacy)).toBe(false);
     // The directory is private to the user and not inside the project.
     expect(p.control.startsWith(p.root)).toBe(false);
+  });
+
+  it("tells the operator which headers controls need and where the controls URL is", async () => {
+    const p = project();
+    p.run(runner, "init");
+    const port = await new Promise<number>((done) => {
+      const probe = createServer();
+      probe.listen(0, "127.0.0.1", () => {
+        const { port: free } = probe.address() as { port: number };
+        probe.close(() => done(free));
+      });
+    });
+    const child = spawn(
+      runner[0] as string,
+      [
+        ...runner.slice(1),
+        "--project",
+        p.root,
+        "dashboard",
+        "--controls",
+        "true",
+        "--port",
+        String(port),
+      ],
+      { env: p.env, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let out = "";
+    child.stdout.on("data", (chunk) => {
+      out += String(chunk);
+    });
+    try {
+      const deadline = Date.now() + 15000;
+      while (!/&controls=[0-9a-f-]{36}/.test(out) && Date.now() < deadline)
+        await new Promise((r) => setTimeout(r, 50));
+      expect(out).toContain("x-crewplane-token:");
+      expect(out).toContain("x-crewplane-session:");
+      expect(out).toContain("both are required");
+      const session = /#token=([\w-]+)/.exec(out)?.[1] ?? "";
+      const token = /x-crewplane-token: ([\w-]+)/.exec(out)?.[1] ?? "";
+      expect(session).not.toBe("");
+      expect(token).not.toBe("");
+      expect(out).toContain(`x-crewplane-session: ${session}`);
+      expect(out).toContain(
+        `Controls URL (operator access; treat like a password): http://127.0.0.1:${port}/#token=${session}&controls=${token}`,
+      );
+    } finally {
+      child.kill("SIGKILL");
+    }
   });
 
   it("refuses every verb a supervised child must not run", () => {

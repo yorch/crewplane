@@ -4,39 +4,88 @@ import { date, refreshRelativeTimes } from "./time.js";
 // Per-launch session: the printed URL carries `#token=…` (a fragment, so no
 // server, log or Referer ever sees it). Keep it in sessionStorage (scoped to
 // this origin, unlike a cookie), strip it from the URL and send it as a header.
+// The optional operator-controls URL also carries `controls=…`; it is handled
+// the same way, kept apart from the read session, and only ever sent to
+// POST /api/control.
 const SESSION_KEY = "crewplane-session";
+const CONTROLS_KEY = "crewplane-controls";
 let sessionToken = null;
+let controlsToken = null;
 try {
   sessionToken = window.sessionStorage.getItem(SESSION_KEY);
+  controlsToken = window.sessionStorage.getItem(CONTROLS_KEY);
 } catch {
-  // Storage may be blocked; the in-memory token below still works for this tab.
+  // Storage may be blocked; the in-memory tokens below still work for this tab.
 }
-// Adopts a `token=` fragment parameter (`#token=T`, `#token=T&/tasks`,
-// `#/tasks&token=T`, `#/tasks?q=x&token=T`), removes it from the URL and keeps
-// the rest of the route. Returns true when a token was adopted.
+const paramPattern = (name) =>
+  new RegExp(`(^#|[?&])${name}=([A-Za-z0-9_-]{16,128})(?=&|$)`);
+// Removes `name=value` from a fragment, keeping the rest of the route.
+function stripParam(hash, name) {
+  return hash
+    .slice(1)
+    .replace(
+      new RegExp(`(^|[?&])${name}=[A-Za-z0-9_-]{16,128}(&|$)`),
+      (_all, pre, post) =>
+        pre === "" ? "" : pre === "?" ? (post ? "?" : "") : post ? "&" : "",
+    );
+}
+// Adopts `token=` and `controls=` fragment parameters (`#token=T`,
+// `#token=T&controls=C`, `#token=T&/tasks`, `#/tasks&token=T`,
+// `#/tasks?q=x&token=T`), removes them from the URL and keeps the rest of the
+// route. Returns true when a session token was adopted.
 export function adoptFragmentToken() {
   const hash = window.location.hash;
-  const match = /(^#|[?&])token=([A-Za-z0-9_-]{16,128})(?=&|$)/.exec(hash);
-  if (!match) return false;
-  sessionToken = match[2];
-  try {
-    window.sessionStorage.setItem(SESSION_KEY, sessionToken);
-  } catch {
-    // Memory only.
+  const match = paramPattern("token").exec(hash);
+  const controls = paramPattern("controls").exec(hash);
+  if (!match && !controls) return false;
+  if (match) {
+    sessionToken = match[2];
+    try {
+      window.sessionStorage.setItem(SESSION_KEY, sessionToken);
+    } catch {
+      // Memory only.
+    }
   }
-  const rest = hash
-    .slice(1)
-    .replace(/(^|[?&])token=[A-Za-z0-9_-]{16,128}(&|$)/, (_all, pre, post) =>
-      pre === "" ? "" : pre === "?" ? (post ? "?" : "") : post ? "&" : "",
-    );
+  if (controls) {
+    controlsToken = controls[2];
+    try {
+      window.sessionStorage.setItem(CONTROLS_KEY, controlsToken);
+    } catch {
+      // Memory only.
+    }
+  }
+  let rest = hash;
+  if (match) rest = `#${stripParam(rest, "token")}`;
+  if (controls) rest = `#${stripParam(rest, "controls")}`;
+  rest = rest.slice(1);
   window.history.replaceState(
     null,
     "",
     `${window.location.pathname}${window.location.search}${rest ? `#${rest}` : ""}`,
   );
-  return true;
+  if (controls) window.dispatchEvent(new Event("crewplane-controls-token"));
+  return Boolean(match);
 }
 adoptFragmentToken();
+export const hasControlsToken = () => controlsToken !== null;
+// The controls token leaves this module only inside the header of a request to
+// the control endpoint; it is never written to the DOM, URL or the log.
+export function controlFetch(body, options = {}) {
+  const headers = new Headers({
+    "content-type": "application/json",
+    "x-crewplane-token": controlsToken ?? "",
+  });
+  if (sessionToken) headers.set("x-crewplane-session", sessionToken);
+  return fetch("/api/control", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    cache: "no-store",
+    credentials: "omit",
+    redirect: "error",
+    ...options,
+  });
+}
 window.crewplaneFetch = (url, options = {}) => {
   const headers = new Headers(options.headers);
   if (sessionToken) headers.set("x-crewplane-session", sessionToken);

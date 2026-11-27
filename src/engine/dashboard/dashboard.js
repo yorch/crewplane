@@ -2,6 +2,7 @@
 // content security policy is unchanged). It wires the modules in ./app/ and
 // starts polling; the views live in their own modules.
 import { refresh } from "./app/api.js";
+import { refreshControls, startControls } from "./app/controls.js";
 import {
   applyControls,
   fillFilterOptions,
@@ -36,6 +37,7 @@ hooks.commitSnapshot = (firstLoad) => {
     showActiveView();
   }
   render();
+  refreshControls();
 };
 // Runs after the crewplane-graphs event, so the graph viewer has drawn and the
 // page has its final height before the saved scroll position is applied.
@@ -76,6 +78,12 @@ showActiveView();
 announceRoute();
 refresh();
 startLive();
+startControls();
+// Revisions move without the board changing; keep the pins fresh (a server
+// without controls is asked once and never again).
+setInterval(() => {
+  if (!document.hidden) refreshControls();
+}, 10000);
 // Polling is the fallback transport: it pauses only while the event stream is
 // delivering (see app/live.js).
 setInterval(() => {

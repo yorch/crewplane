@@ -108,6 +108,12 @@
       );
       summary.replaceChildren(tags);
       summary.dataset.signature = signature;
+      // The operator-controls layer (when enabled) offers actions per run.
+      window.dispatchEvent(
+        new CustomEvent("crewplane-run-selected", {
+          detail: { lane: meta.lane, runId: meta.runId },
+        }),
+      );
     }
     let text = `${meta.runId} · ${meta.events} retained events`;
     if (meta.truncated) text += " · TRUNCATED at storage cap";
@@ -222,6 +228,9 @@
     tailing = -1;
     get("run-summary").replaceChildren();
     get("run-summary").removeAttribute("data-signature");
+    window.dispatchEvent(
+      new CustomEvent("crewplane-run-selected", { detail: null }),
+    );
     setText("run-note", "");
     timelinePlaceholder("Select a run to see its timeline.");
   }

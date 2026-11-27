@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstatSync } from "node:fs";
 import {
   appendFile,
   mkdir,
@@ -25,6 +24,7 @@ import { type DoctorProblem, failureMessage } from "./doctor.ts";
 import { inspectConfiguration } from "./doctor-config.ts";
 import { main as agents } from "./engine/agents.mjs";
 import { control } from "./engine/control-policy.ts";
+import { queueControl } from "./engine/control-queue.ts";
 import { createDashboard, newSessionToken } from "./engine/dashboard.ts";
 import type {
   EvidenceCaptureInput,
@@ -36,7 +36,6 @@ import { monitorMain } from "./engine/watch.ts";
 import { watchdogMain } from "./engine/watchdog/runner.ts";
 import { standaloneBinary } from "./environment.ts";
 import { help } from "./help.ts";
-import { publishJson } from "./io.ts";
 import { isProcessAlive } from "./liveness.ts";
 import {
   describeAdoption,
@@ -1039,63 +1038,15 @@ async function main() {
     }
     const id = randomUUID();
     // Narrowing verbs are safe to apply late, so ambiguous legacy liveness
-    // queues them in every candidate directory. Each copy is bound to THAT
-    // directory's own supervisor generation, never the primary's.
-    let anyRunning = state?.running === true;
-    // The control copy is queued FIRST and unconditionally; legacy copies are
-    // best effort and never read or written unsafely.
-    const targets = [
-      directory,
-      ...(["pause", "stop", "cancel"].includes(command) ? also : []),
-    ].sort((a, b) => Number(b === controlDir) - Number(a === controlDir));
-    for (const target of targets) {
-      let queued = value;
-      if (target !== directory) {
-        const own = readBoundedJson(join(target, "state.json")) as {
-          generation?: string;
-          running?: boolean;
-        } | null;
-        anyRunning ||= own?.running === true;
-        queued = control({
-          ...value,
-          generation:
-            typeof own?.generation === "string" ? own.generation : undefined,
-        });
-      }
-      if (target === controlDir) {
-        await ensureControlDirectory(target);
-        await mkdir(join(target, "commands"), { recursive: true, mode: 0o700 });
-      } else {
-        // Never follow a symlinked legacy directory or commands/ into somewhere
-        // else, and never fail the halt because of it.
-        try {
-          if (!lstatSync(target).isDirectory())
-            throw new Error("not a directory");
-          const commands = join(target, "commands");
-          try {
-            if (!lstatSync(commands).isDirectory())
-              throw new Error("not a directory");
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            await mkdir(commands, { mode: 0o700 });
-          }
-        } catch {
-          console.error(
-            `crewplane: ${printablePath(target)} is not a plain directory; not queued there`,
-          );
-          continue;
-        }
-      }
-      await publishJson(join(target, "commands", `${id}.json`), queued).catch(
-        (error) => {
-          if (target === controlDir) throw error;
-          console.error(
-            `crewplane: could not queue in ${printablePath(target)}; continuing`,
-          );
-        },
-      );
-    }
-    anyRunning ||= isLive(supervisorLiveness(directory));
+    // queues them in every candidate directory (shared with the dashboard).
+    const { running: anyRunning } = await queueControl({
+      id,
+      value,
+      controlDir,
+      target: { directory, also },
+      knownRunning: state?.running === true,
+      warn: (message) => console.error(message),
+    });
     if (!anyRunning)
       console.error(
         command === "pause"
@@ -1204,7 +1155,7 @@ async function main() {
     output(
       `Crewplane dashboard: http://127.0.0.1:${port}/#token=${session.token}${
         controls
-          ? `\nControls enabled: send x-crewplane-token: ${controls.token} from an exact Origin`
+          ? `\nControls enabled: POST /api/control from an exact Origin with both headers (both are required):\n  x-crewplane-token: ${controls.token}\n  x-crewplane-session: ${session.token}\nControls URL (operator access; treat like a password): http://127.0.0.1:${port}/#token=${session.token}&controls=${controls.token}`
           : ""
       }`,
     );
