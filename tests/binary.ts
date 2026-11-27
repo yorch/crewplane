@@ -548,7 +548,31 @@ try {
   assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200);
   const html = await (await dget("/")).text();
   assert(html.includes("Crewplane"));
-  assert((await (await dget("/dashboard.js")).text()).includes("fetch"));
+  // The entry is an ES module; the compiled executable must serve its whole
+  // import graph (nested app/ modules included) with no access to source.
+  const served = new Map<string, string>();
+  const queue = ["/dashboard.js"];
+  while (queue.length) {
+    const path = queue.pop() as string;
+    if (served.has(path)) continue;
+    const response = await dget(path);
+    assert.equal(response.status, 200, path);
+    assert.match(
+      response.headers.get("content-type") ?? "",
+      /^text\/javascript/,
+      path,
+    );
+    const code = await response.text();
+    served.set(path, code);
+    for (const match of code.matchAll(/\bfrom\s*"(\.[^"]+)"/g))
+      queue.push(new URL(match[1] ?? "", `http://x${path}`).pathname);
+  }
+  assert(served.size > 20, `module graph served: ${served.size}`);
+  assert([...served.values()].some((code) => code.includes("fetch")));
+  assert.equal(
+    (await fetch(`http://127.0.0.1:${port}/app/nope.js`)).status,
+    404,
+  );
   const snap = (await (await dget("/api/snapshot")).json()) as {
     headless: { state: string };
     tasks: unknown[];

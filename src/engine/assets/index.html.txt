@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="/dashboard.css" />
     <link rel="stylesheet" href="/graph-renderer.css" />
     <script type="module" src="/graph-viewer.js"></script>
-    <script src="/dashboard.js" defer></script>
+    <script type="module" src="/dashboard.js"></script>
     <script src="/runs.js" defer></script>
   </head>
   <body>
@@ -122,7 +122,7 @@
             </fieldset>
             <div class="view-meta">
               <span id="task-count" class="count" role="status"></span>
-              <details class="info">
+              <details class="info" data-key="info-tasks">
                 <summary>How to read task status</summary>
                 <p>Acceptance can cover a bounded slice. Task notes and milestone gates retain the remaining scope. Updates reflect reported progress; they do not prove a harness is running.</p>
               </details>
@@ -156,7 +156,7 @@
             <div class="view-meta">
               <span id="agent-count" class="count" role="status"></span>
               <span id="agents-supervisor" class="inline-note"></span>
-              <details class="info">
+              <details class="info" data-key="info-agents">
                 <summary>How to read agent status</summary>
                 <p>Process liveness is a point-in-time observation, not model activity. Heartbeats belong to the supervisor. Usage covers retained records, not billing. Task reports and verified acceptance are separate.</p>
               </details>

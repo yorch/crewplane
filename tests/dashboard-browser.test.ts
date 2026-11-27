@@ -898,3 +898,207 @@ it("does not rewrite the URL back to Runs when another view was already navigate
   expect(errors).toEqual([]);
   await page.close();
 }, 30000);
+
+it("marks #refresh aria-busy only while a refresh is in flight", async () => {
+  const { page, errors } = await open("#/overview");
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/snapshot", async (route) => {
+    await gate;
+    await route.continue();
+  });
+  const refresh = page.locator("#refresh");
+  await refresh.click();
+  await until(
+    async () => (await refresh.getAttribute("aria-busy")) === "true",
+    "aria-busy set while in flight",
+  );
+  expect(await refresh.getAttribute("aria-store.busy")).toBeNull();
+  release();
+  await until(
+    async () => (await refresh.getAttribute("aria-busy")) === null,
+    "aria-busy removed afterwards",
+  );
+  expect(errors).toEqual([]);
+  await page.close();
+}, 30000);
+
+for (const graph of ["communication", "dependencies"]) {
+  it(`restores scroll on the Relationships view after a reload (${graph} graph)`, async () => {
+    const { page, errors } = await open(`#/relationships?graph=${graph}`, 700);
+    await page.setViewportSize({ width: 700, height: 200 });
+    await page.locator("#graph-host .relay-graph").waitFor();
+    const max = await page.evaluate(
+      () => document.documentElement.scrollHeight - window.innerHeight,
+    );
+    expect(max).toBeGreaterThan(150);
+    // Scroll to a point only reachable once the graph has been drawn.
+    const target = max - 10;
+    await page.evaluate((y) => window.scrollTo(0, y), target);
+    expect(await page.evaluate(() => window.scrollY)).toBe(target);
+    await page.reload();
+    await page.locator("#graph-host .relay-graph").waitFor();
+    await until(
+      async () => (await page.evaluate(() => window.scrollY)) === target,
+      "relationships scroll restored",
+    );
+    expect(await page.locator("#graph-view").inputValue()).toBe(graph);
+    expect(errors).toEqual([]);
+    await page.close();
+  }, 30000);
+}
+
+it("restores scroll and 'How to read' disclosures after a full reload, but not after a fresh navigation", async () => {
+  const { page, errors } = await open("#/tasks?layout=board", 700);
+  await page.setViewportSize({ width: 700, height: 260 });
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  const tall = await page.evaluate(
+    () => document.documentElement.scrollHeight - window.innerHeight,
+  );
+  expect(tall).toBeGreaterThan(60);
+  const info = page.locator('details[data-key="info-tasks"]');
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+  await info.locator("summary").click();
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+  await page.evaluate(() => window.scrollTo(0, 80));
+  const scrolled = await page.evaluate(() => window.scrollY);
+  expect(scrolled).toBeGreaterThan(0);
+  const board = page.locator("#tasks");
+  const overflowing = await board.evaluate(
+    (node) => node.scrollWidth > node.clientWidth,
+  );
+  expect(overflowing).toBe(true);
+  await board.evaluate((node) => {
+    node.scrollLeft = 40;
+  });
+  const boardLeft = await board.evaluate((node) => node.scrollLeft);
+  expect(boardLeft).toBeGreaterThan(0);
+
+  await page.reload();
+  await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+  await until(
+    async () => (await page.evaluate(() => window.scrollY)) === scrolled,
+    "window scroll restored",
+  );
+  expect(await board.evaluate((node) => node.scrollLeft)).toBe(boardLeft);
+  // Polls keep the restored state.
+  await page.waitForTimeout(5500);
+  expect(await page.evaluate(() => window.scrollY)).toBe(scrolled);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    true,
+  );
+
+  // The agents disclosure is remembered independently, and closing is remembered too.
+  await info.locator("summary").click();
+  await page.goto(`${base}#/agents`);
+  await page.locator("#view-agents:not([hidden])").waitFor();
+  const agentsInfo = page.locator('details[data-key="info-agents"]');
+  await agentsInfo.locator("summary").click();
+  await page.reload();
+  await page.locator("#view-agents:not([hidden])").waitFor();
+  expect(
+    await agentsInfo.evaluate((node: HTMLDetailsElement) => node.open),
+  ).toBe(true);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+
+  // A fresh navigation in the same tab starts at the top with disclosures closed.
+  await page.goto("about:blank");
+  await page.goto(`${base}#/tasks`);
+  await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(await info.evaluate((node: HTMLDetailsElement) => node.open)).toBe(
+    false,
+  );
+  expect(
+    await agentsInfo.evaluate((node: HTMLDetailsElement) => node.open),
+  ).toBe(false);
+
+  // Stored values are planted BEFORE the next document loads (an init script
+  // rewrites them after the old page's pagehide save), then the tab reloads.
+  // The valid record must restore, so the sanitizer is demonstrably in the
+  // path; the hostile one must be ignored field by field without page errors.
+  await page.addInitScript(() => {
+    if (!window.name.startsWith("plant:")) return;
+    window.sessionStorage.setItem("crewplane-ui-state", window.name.slice(6));
+  });
+  const plant = (value: string) =>
+    page.evaluate((text) => {
+      window.name = `plant:${text}`;
+    }, value);
+  const stored = () =>
+    page.evaluate(() => window.sessionStorage.getItem("crewplane-ui-state"));
+  const reloadTasks = async () => {
+    await page.reload();
+    await page.locator("#connection").filter({ hasText: "Live" }).waitFor();
+    await page.locator('#tasks .card[data-task-id="WEB-1"]').waitFor();
+  };
+  const disclosure = () =>
+    info.evaluate((node: HTMLDetailsElement) => node.open);
+
+  await page.evaluate(() => {
+    window.location.hash = "#/tasks?layout=board";
+  });
+  await page.locator('#tasks[data-scroll-key="task-board"]').waitFor();
+  await plant(
+    JSON.stringify({
+      v: 1,
+      view: "tasks",
+      scroll: { tasks: 70 },
+      panes: { "task-board": [30, 0] },
+      open: ["info-tasks"],
+    }),
+  );
+  await reloadTasks();
+  expect(await disclosure()).toBe(true);
+  await until(
+    async () => (await page.evaluate(() => window.scrollY)) === 70,
+    "planted valid scroll restored",
+  );
+  expect(await board.evaluate((node) => node.scrollLeft)).toBe(30);
+
+  for (const hostile of [
+    "{not json",
+    '"a string"',
+    JSON.stringify({ v: 2, view: "tasks", scroll: { tasks: 70 } }),
+    JSON.stringify({ v: 1, view: "constructor", scroll: { tasks: 70 } }),
+  ]) {
+    await plant(hostile);
+    await reloadTasks();
+    expect(await page.evaluate(() => window.scrollY), hostile).toBe(0);
+    expect(await disclosure(), hostile).toBe(false);
+  }
+
+  // A record that is valid in parts: only the valid parts apply.
+  await plant(
+    JSON.stringify({
+      v: 1,
+      view: "tasks",
+      scroll: { tasks: "70", "x y": 5, __proto__x: 9 },
+      panes: { "task-board": ["a", {}], "bad key!": [1, 1] },
+      open: ["info-tasks", "<script>", 7, "info-nope-"],
+    }),
+  );
+  await reloadTasks();
+  expect(await disclosure()).toBe(true);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(await board.evaluate((node) => node.scrollLeft)).toBe(0);
+  // The next save rewrites the hostile record from live state only.
+  await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
+  const rewritten = JSON.parse((await stored()) ?? "null");
+  expect(rewritten.open).toEqual(["info-tasks"]);
+  expect(rewritten.scroll).not.toHaveProperty("x y");
+  expect(errors).toEqual([]);
+  await page.close();
+}, 60000);
