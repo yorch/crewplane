@@ -274,3 +274,18 @@ it("validates a Pi model through the engine and rejects what it would reject", (
   for (const bad of ["nomodel", "/m", "p/", "p/has space", "p/$(x)"])
     expect(() => acceptPiModel(bad), bad).toThrow();
 });
+
+it("notes a maxParallel above the enabled lanes and omits the note otherwise", () => {
+  const over = buildConfig(
+    answers("codex", { limits: { ...defaultLimits(), maxParallel: 4 } }),
+    policy,
+  );
+  expect(over.notes).toContain(
+    "maxParallel 4 exceeds the 3 enabled lanes; each lane runs one task at a time, so at most 3 runs happen at once",
+  );
+  const ok = buildConfig(
+    answers("codex", { limits: { ...defaultLimits(), maxParallel: 3 } }),
+    policy,
+  );
+  expect(ok.notes.some((n) => n.startsWith("maxParallel"))).toBe(false);
+});

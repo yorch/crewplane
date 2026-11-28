@@ -260,6 +260,19 @@ export interface BuiltSetup {
  * structural preconditions and every lane through the engine's validateHarness
  * so the generated file cannot drift from what `configure` accepts.
  */
+/** A lane runs one task at a time, so more parallel runs than enabled lanes cannot happen. */
+export const maxParallelNote = (maxParallel: number, enabledLanes: number) =>
+  `maxParallel ${maxParallel} exceeds the ${enabledLanes} enabled lane${enabledLanes === 1 ? "" : "s"}; each lane runs one task at a time, so at most ${enabledLanes} run${enabledLanes === 1 ? "" : "s"} happen${enabledLanes === 1 ? "s" : ""} at once`;
+
+/** How many lanes a setup would write enabled (visual reviewers start disabled). */
+export const enabledLaneCount = (
+  policy: SetupPolicy,
+  implementers: readonly string[],
+): number =>
+  1 +
+  implementers.length +
+  policy.reviewers.filter((id) => policy.reviewerRoles[id] !== "visual").length;
+
 /** Lane id -> harness for every lane a setup would write, in config order. */
 export function laneHarnesses(
   answers: Pick<SetupAnswers, "roles" | "implementers">,
@@ -370,20 +383,21 @@ export function buildConfig(
   const visual = entries.filter(([id, role]) => !laneEnabled(policy, id, role));
   if (visual.length)
     notes.push(
-      `visual reviewer lane(s) ${visual.map(([id]) => id).join(", ")} are disabled; set enabled to true to use them`,
+      `visual reviewer lane(s) ${visual.map(([id]) => id).join(", ")} start disabled; set "enabled": true on the lane to use visual validation`,
     );
   if (answers.roles.reviewer === "pi")
     notes.push(
-      "Pi reviewers run no-tools; their turns end as paused advisory decisions for operator relay",
+      "Pi reviewers run no-tools: each review ends as a paused advisory decision that you answer with `crewplane resolve` (or the dashboard's Approve/Deny)",
     );
   if (harnessesUsed(answers.roles).includes("opencode"))
     notes.push(
       "OpenCode lanes use the harness's own permission configuration (opencodeAuto is not set)",
     );
-  if (primary !== "codex")
-    notes.push(
-      `top-level binary is the ${primary} executable because the engine requires one; only Codex lanes fall back to it`,
-    );
+  const enabledLanes = entries.filter(([id, role]) =>
+    laneEnabled(policy, id, role),
+  ).length;
+  if (answers.limits.maxParallel > enabledLanes)
+    notes.push(maxParallelNote(answers.limits.maxParallel, enabledLanes));
   return { config, notes };
 }
 

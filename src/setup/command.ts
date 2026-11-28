@@ -30,6 +30,7 @@ import {
 import { noPrior, type Prior, planEpochs } from "./epochs.ts";
 import { decodeConfig } from "./install.ts";
 import { checkOut, prepareOut, type SweepOptions } from "./out.ts";
+import { plainStyle, type Style, wrap } from "./style.ts";
 import {
   acceptModel,
   acceptPiModel,
@@ -56,7 +57,12 @@ import {
   type Template,
   templates,
 } from "./templates.ts";
-import { runWizard, SetupAborted, type WizardIO } from "./wizard.ts";
+import {
+  reviewSummary,
+  runWizard,
+  SetupAborted,
+  type WizardIO,
+} from "./wizard.ts";
 
 export const setupOptions = [
   "--non-interactive",
@@ -124,6 +130,10 @@ export interface SetupDeps {
   /** Directories `--out` may never point into (control directory, stores). */
   protectedPaths?: string[];
   makeIO: () => WizardIO;
+  /** Terminal styling for the interactive transcript (stderr); plain when absent. */
+  style?: Style;
+  /** Directory the configuration is installed into, named in the closing summary. */
+  installDirectory?: string;
   /** Where one-line notes about side effects go; stderr by default (never stdout). */
   warn?: (message: string) => void;
   /** Stale temporary file sweep settings for `--out` (clock and age, for tests). */
@@ -428,6 +438,10 @@ export async function runSetup(
   let template: Template | "custom";
   let install = false;
   let out: string | undefined;
+  let io: WizardIO | undefined;
+  let discoveredTasks: string[] = [];
+  /** Notes the interactive transcript has already displayed. */
+  const shown = new Set<string>();
   if (nonInteractive) {
     const confirmed = bool(opts, "--confirm-stopped");
     install = bool(opts, "--install");
@@ -455,116 +469,202 @@ export async function runSetup(
       deps.policy.tasksPath,
       reserved,
     );
-    const io = deps.makeIO();
-    try {
-      const result = await runWizard(io, {
-        policy: setup,
-        detection,
-        rejected,
-        prior,
-        discoveredTasks: discovered.tasks,
-        discoveredImplementers: discovered.implementers,
-        check,
-        safety,
-        verifyStopped: async () => (await deps.stopped?.()) ?? null,
-        checkOut: (path) => checkOut(outPathOf(path), protectedPaths),
-        now,
-        epoch,
-        review: (a) => {
-          const built = buildConfig(a, setup);
-          return `${JSON.stringify(built.config, null, 2)}\n${built.notes.map((n) => `note: ${n}`).join("\n")}`;
-        },
-      });
-      answers = result.answers;
-      template = result.template;
-      install = result.install;
-      out = result.out;
-      // The wizard already showed the epoch notes (once, before the review
-      // prompt); repeating them in the report would print them again.
-    } finally {
-      io.close?.();
-    }
+    io = deps.makeIO();
+    const style = deps.style ?? plainStyle;
+    for (const note of notes) shown.add(note);
+    const result = await runWizard(io, {
+      policy: setup,
+      detection,
+      rejected,
+      prior,
+      discoveredTasks: discovered.tasks,
+      discoveredImplementers: discovered.implementers,
+      check,
+      safety,
+      style,
+      tasksPath: deps.policy.tasksPath,
+      verifyStopped: async () => (await deps.stopped?.()) ?? null,
+      checkOut: (path) => checkOut(outPathOf(path), protectedPaths),
+      now,
+      epoch,
+      review: (a) => {
+        const built = buildConfig(a, setup);
+        for (const note of built.notes) shown.add(note);
+        return reviewSummary(style, a, setup, built);
+      },
+    }).catch((error) => {
+      io?.close?.();
+      throw error;
+    });
+    answers = result.answers;
+    template = result.template;
+    install = result.install;
+    out = result.out;
+    discoveredTasks = discovered.tasks;
+    // The wizard already showed the epoch notes (once, before the review
+    // prompt); repeating them in the report would print them again.
   }
 
-  const built = buildConfig(answers, setup);
-  notes.push(...built.notes);
-  // Validate exactly as `configure` will; the stop confirmation is only a
-  // placeholder here so every other field is still checked when it is absent.
-  const decoded = decodeConfig(
-    {
-      ...built.config,
-      confirmedStoppedAt: answers.confirmedStoppedAt ?? now().toISOString(),
-    },
-    { root: deps.root, policy: deps.policy },
-    // The binary is checked below by the same probe doctor uses, so a missing or
-    // unusable one becomes a BINARY_* problem (exit 2), not a thrown error.
-    { checkBinary: false },
-  );
-  const problems = await checkGenerated(decoded, safety);
-  const text = `${JSON.stringify(built.config, null, 2)}\n`;
-  const outPath = out === undefined ? null : outPathOf(out);
-  let written: string | null = null;
-  let installed = false;
-  if (problems.length) {
-    if (install || outPath)
-      notes.push("nothing was written because verification found problems");
-  } else {
-    // Prepare the file first (all refusals, content fsynced under a temporary
-    // name) but publish it only after the install succeeded: a refused install
-    // must not leave behind a file that carries a stop confirmation.
-    const plan = outPath
-      ? await prepareOut(outPath, text, protectedPaths, {
-          ...deps.sweep,
-          onRemoved: (removed) =>
-            (deps.warn ?? ((m) => console.error(m)))(
-              `crewplane: removed stale temporary file ${printablePath(removed)}`,
-            ),
-        })
-      : null;
-    try {
-      if (install) {
-        await deps.install(built.config);
-        installed = true;
-      }
-      if (plan) {
-        try {
-          await plan.commit();
-        } catch (error) {
-          throw new Error(
-            `${installed ? "The configuration WAS installed, but " : ""}--out was not written: ${error instanceof Error ? error.message : "write failed"}`,
-          );
-        }
-        written = plan.path;
-      }
-    } catch (error) {
-      await plan?.discard();
-      throw error;
-    }
-  }
-  const next: string[] = [];
-  if (installed) next.push("crewplane doctor");
-  else {
-    if (!answers.confirmedStoppedAt)
-      next.push(
-        "verify the supervisor is stopped, then record confirmedStoppedAt",
-      );
-    next.push(
-      `crewplane configure --file ${written ? shellQuote(written) : "PATH"}`,
-      "crewplane doctor",
+  try {
+    const built = buildConfig(answers, setup);
+    notes.push(...built.notes);
+    // Validate exactly as `configure` will; the stop confirmation is only a
+    // placeholder here so every other field is still checked when it is absent.
+    const decoded = decodeConfig(
+      {
+        ...built.config,
+        confirmedStoppedAt: answers.confirmedStoppedAt ?? now().toISOString(),
+      },
+      { root: deps.root, policy: deps.policy },
+      // The binary is checked below by the same probe doctor uses, so a missing or
+      // unusable one becomes a BINARY_* problem (exit 2), not a thrown error.
+      { checkBinary: false },
     );
+    const problems = await checkGenerated(decoded, safety);
+    const text = `${JSON.stringify(built.config, null, 2)}\n`;
+    const outPath = out === undefined ? null : outPathOf(out);
+    let written: string | null = null;
+    let installed = false;
+    if (problems.length) {
+      if (install || outPath)
+        notes.push("nothing was written because verification found problems");
+    } else {
+      // Prepare the file first (all refusals, content fsynced under a temporary
+      // name) but publish it only after the install succeeded: a refused install
+      // must not leave behind a file that carries a stop confirmation.
+      const plan = outPath
+        ? await prepareOut(outPath, text, protectedPaths, {
+            ...deps.sweep,
+            onRemoved: (removed) =>
+              (deps.warn ?? ((m) => console.error(m)))(
+                `crewplane: removed stale temporary file ${printablePath(removed)}`,
+              ),
+          })
+        : null;
+      try {
+        if (install) {
+          await deps.install(built.config);
+          installed = true;
+        }
+        if (plan) {
+          try {
+            await plan.commit();
+          } catch (error) {
+            throw new Error(
+              `${installed ? "The configuration WAS installed, but " : ""}--out was not written: ${error instanceof Error ? error.message : "write failed"}`,
+            );
+          }
+          written = plan.path;
+        }
+      } catch (error) {
+        await plan?.discard();
+        throw error;
+      }
+    }
+    const next: string[] = [];
+    if (installed) next.push("crewplane doctor");
+    else {
+      if (!answers.confirmedStoppedAt)
+        next.push(
+          "verify the supervisor is stopped, then record confirmedStoppedAt",
+        );
+      next.push(
+        `crewplane configure --file ${written ? shellQuote(written) : "PATH"}`,
+        "crewplane doctor",
+      );
+    }
+    const report: SetupReport = {
+      version: 1,
+      mode: nonInteractive ? "non-interactive" : "interactive",
+      template,
+      config: built.config,
+      confirmedStopped: answers.confirmedStoppedAt !== undefined,
+      written,
+      installed,
+      problems,
+      notes,
+      next,
+    };
+    if (io)
+      io.write(
+        doneBlock(
+          deps,
+          report,
+          answers,
+          discoveredTasks,
+          shown,
+          deps.style ?? plainStyle,
+        ),
+      );
+    return report;
+  } finally {
+    io?.close?.();
   }
-  return {
-    version: 1,
-    mode: nonInteractive ? "non-interactive" : "interactive",
-    template,
-    config: built.config,
-    confirmedStopped: answers.confirmedStoppedAt !== undefined,
-    written,
-    installed,
-    problems,
-    notes,
-    next,
-  };
+}
+
+/** Closing summary for the interactive transcript (stderr only). */
+function doneBlock(
+  deps: SetupDeps,
+  report: SetupReport,
+  answers: SetupAnswers,
+  discoveredTasks: string[],
+  shown: ReadonlySet<string>,
+  style: Style,
+): string {
+  const tasksPath = deps.policy.tasksPath;
+  const instructionsPath = deps.policy.instructionsPath;
+  let text = `\n${style.bold("Done")}\n${style.dim("----")}\n`;
+  const lines: string[] = [];
+  if (report.problems.length)
+    lines.push(
+      style.error(
+        "Verification found problems (listed below); nothing was written.",
+      ),
+    );
+  else if (report.installed)
+    lines.push(
+      `Installed the configuration${deps.installDirectory ? ` into ${printablePath(deps.installDirectory)}` : ""}.`,
+    );
+  if (report.written)
+    lines.push(`Wrote the JSON to ${printablePath(report.written)}.`);
+  if (!report.installed && !report.written && !report.problems.length)
+    lines.push("Nothing was written.");
+  text += wrap(lines.join(" "));
+  const extra = report.notes.filter((n) => !shown.has(n));
+  for (const note of extra) text += `  ${style.warn(`! ${note}`)}\n`;
+  if (!report.problems.length) {
+    const steps: string[] = [];
+    const missing = answers.allowedTasks.filter(
+      (id) => !discoveredTasks.includes(id),
+    );
+    if (missing.length)
+      steps.push(
+        `Write task cards for ${missing.slice(0, 5).join(", ")}${missing.length > 5 ? ", ..." : ""} in ${tasksPath}/ (for example ${tasksPath}/${missing[0]}.md), each with a line \`Owner: ${answers.implementers[0]}.\``,
+      );
+    if (instructionFileProblem(deps.root, instructionsPath))
+      steps.push(
+        `Create ${instructionsPath}: the instructions every agent reads (see crewplane.json instructionsPath)`,
+      );
+    if (!report.installed) {
+      const file = report.written ? shellQuote(report.written) : null;
+      steps.push(
+        file
+          ? `${report.confirmedStopped ? "Install it" : "Stop every old harness and supervisor, add confirmedStoppedAt, then install"}: crewplane configure --file ${file}`
+          : "Nothing is installed yet: rerun `crewplane setup` and answer yes to install, or give an --out path and use `crewplane configure --file PATH`",
+      );
+    }
+    steps.push(
+      `Commit crewplane.json and ${tasksPath}/`,
+      "Run `crewplane doctor` to check the setup",
+      "Run `crewplane start` to start the supervisor",
+    );
+    text += `\n${style.bold("Next steps")}\n`;
+    steps.forEach((step, i) => {
+      text += `  ${i + 1}. ${step}\n`;
+    });
+  }
+  text += `\n${style.dim("The JSON report is printed on stdout for scripts.")}\n`;
+  return text;
 }
 
 /** Prompts and echo go to stderr so stdout stays a single JSON document. */

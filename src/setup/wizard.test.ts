@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { makeStyle } from "./style.ts";
 import { buildConfig, type SetupPolicy } from "./templates.ts";
 import { runWizard, SetupAborted, type WizardIO } from "./wizard.ts";
 
@@ -368,6 +369,103 @@ it("emits a fresh epoch for a lane whose harness changed since the installed con
     captain: "setup-epoch1",
     builder: "setup-epoch1",
   });
-  expect(text.join("")).toContain("note: lane captain switches harness");
-  expect(text.join("")).toContain("note: lane builder switches harness");
+  expect(text.join("")).toContain("! lane captain switches harness");
+  expect(text.join("")).toContain("! lane builder switches harness");
+});
+
+const walk = ["codex", "", "", "", "", "", "", "", "", "no", "yes", ""];
+
+it("numbers steps with a total that drops the Claude safety step when unused", async () => {
+  const plain = scripted(walk);
+  await runWizard(plain.io, context());
+  const shown = plain.text.join("");
+  expect(shown).toContain("[1/5] Executables");
+  expect(shown).toContain("[5/5] Confirm");
+  expect(shown).not.toContain("Claude Code safety");
+  const claude = scripted([
+    "claude",
+    "",
+    "opus",
+    ...Array(10).fill(""),
+    "no",
+    "yes",
+    "",
+  ]);
+  await runWizard(claude.io, context());
+  const withClaude = claude.text.join("");
+  expect(withClaude).toContain("[3/6] Claude Code safety");
+  expect(withClaude).toContain("[6/6] Confirm");
+});
+
+it("defaults maxParallel to at most 2 and explains the lane ceiling", async () => {
+  const { io, prompts, text } = scripted(walk);
+  await runWizard(io, context());
+  expect(prompts.find((p) => p.startsWith("maxParallel"))).toBe(
+    "maxParallel (1-4) [2]: ",
+  );
+  expect(text.join("")).toContain("more than 3 (your enabled lanes)");
+});
+
+it("explains the allowlist and shows an example when no task cards exist", async () => {
+  const { io, text } = scripted([
+    "codex",
+    "",
+    "",
+    "",
+    "t1,t2",
+    "",
+    "",
+    "",
+    "",
+    "no",
+    "yes",
+    "",
+  ]);
+  const result = await runWizard(io, {
+    ...context(),
+    discoveredTasks: [],
+    discoveredImplementers: [],
+  });
+  const shown = text.join("");
+  expect(shown).toContain("No task cards were found in tasks/");
+  expect(shown).toContain("Owner: implementer.");
+  expect(shown).toContain("Example: t1,t2");
+  expect(result.answers.allowedTasks).toEqual(["t1", "t2"]);
+});
+
+it("renders invalid answers with the error style and uses color only when asked", async () => {
+  const colored = scripted([
+    "nope",
+    "codex",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "no",
+    "yes",
+    "",
+  ]);
+  await runWizard(colored.io, { ...context(), style: makeStyle(true) });
+  expect(colored.text.join("")).toContain("\u001b[31minvalid:\u001b[39m");
+  const plain = scripted([
+    "nope",
+    "codex",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "no",
+    "yes",
+    "",
+  ]);
+  await runWizard(plain.io, context());
+  expect(plain.text.join("")).not.toContain("\u001b");
 });

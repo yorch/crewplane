@@ -58,6 +58,7 @@ import {
 import { runSetup, terminalIO } from "./setup/command.ts";
 import { loadPrior } from "./setup/epochs.ts";
 import { installConfig, stoppedProblem } from "./setup/install.ts";
+import { makeStyle, shouldColor } from "./setup/style.ts";
 import {
   compareVersions,
   dispatchTarget,
@@ -669,12 +670,17 @@ async function main() {
         join(root, ".crewplane-local"),
       ],
       makeIO: () => terminalIO(process.stdin, process.stderr),
+      style: makeStyle(shouldColor(process.stderr, process.env)),
+      installDirectory: directory,
     });
     for (const problem of report.problems)
       console.error(
         `crewplane: ${problem.code}${problem.lane ? ` (${problem.lane})` : ""}: ${problem.message}`,
       );
-    for (const note of report.notes) console.error(`crewplane: note: ${note}`);
+    // Interactive runs already showed every note in the transcript.
+    if (report.mode === "non-interactive")
+      for (const note of report.notes)
+        console.error(`crewplane: note: ${note}`);
     if (report.problems.length) process.exitCode = 2;
     return output(report);
   }
