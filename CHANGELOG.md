@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/yorch/crewplane/compare/v0.9.0...v0.10.0) (2026-11-28)
+
+
+### Features
+
+* **setup:** clearer guided wizard, deduplicated notes and maxParallel warning ([#37](https://github.com/yorch/crewplane/issues/37)) ([45bfb00](https://github.com/yorch/crewplane/commit/45bfb00246190982180b671deca4eb359fad5022))
+
 ## [0.9.0](https://github.com/yorch/crewplane/compare/v0.8.0...v0.9.0) (2026-11-27)
 
 
