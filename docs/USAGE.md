@@ -158,12 +158,15 @@ By default it writes no configuration. See [Default runs and files](#default-run
 
 Run `crewplane --project /path/to/repo setup` in a terminal. Both stdin and stdout must be terminals; otherwise setup fails with exit 1 and suggests `--non-interactive true`.
 
-- Prompts and echoed text go to stderr. The final JSON report goes to stdout, so it appears on the terminal too.
-- The wizard lists the executables it found on PATH (and any candidates it rejected, with the reason), then asks for a template, binaries, models, Claude safety fields, implementer lane IDs, allowed task IDs and the four limits.
+- Prompts and echoed text go to stderr. The final JSON report goes to stdout, so it appears on the terminal too. Colour is used on stderr only when it is a terminal; `NO_COLOR` (non-empty) or `TERM=dumb` turns it off, and `FORCE_COLOR` (set, not `0`) turns it on.
+- The intro explains the roles, the lane IDs from `crewplane.json` and the executables found on PATH (and any candidates rejected, with the reason). The harness choice comes first (a template, or `custom`), then numbered steps: Executables, Models, Claude Code safety (only when a Claude lane is used), Lanes & tasks, Limits and Confirm. Each prompt has a one-line explanation.
+- The Limits step defaults `maxParallel` to the smaller of 2 and the enabled lanes.
 - `custom` (wizard only) chooses a harness for the coordinator, the implementers and the reviewers separately. Pi is offered only for reviewers.
 - An invalid answer is re-asked up to three times, then setup stops with exit 1.
 - Ctrl+C or end of input aborts with `Setup cancelled; nothing was written`.
+- The review is a summary (lanes, limits, allowed tasks, executables, stop state, and notes as `! ...` lines), not the JSON; the full JSON is in the stdout report and the `--out` file. Each note is shown once on stderr: in the review, or in the Done block if the review did not show it.
 - The review asks `yes` or `no`. Answering `no` aborts with nothing written. Anything else is re-asked, up to the same three attempts.
+- After the run, a Done block on stderr says what was installed or written. When verification passed, it also lists next steps: task cards for allowed IDs without one, the instructions file if it is missing, install (or `configure --file`), committing `crewplane.json` and the tasks directory, `crewplane doctor` and `crewplane start`.
 - Installing is offered only if you answer `yes` to "Is the supervisor stopped?". A `yes` is refused with exit 1 (nothing is written) when the control state says a supervisor is running or supervisor liveness evidence says one is live. An optional `--out` path is offered last; a path that would be refused (see [Default runs and files](#default-runs-and-files)) is re-asked.
 - Task cards on disk only seed the defaults for implementer lane IDs (from `Owner:` lines) and allowed task IDs. Cards whose `Status:` says done, complete(d), closed, cancelled, abandoned, accepted or merged are skipped, at most 200 cards are read, and every ID is validated. You must confirm or edit the defaults; nothing is authorized without your answer.
 - A bad Pi model is re-asked, because it is checked by the same engine validator as every other lane field.
@@ -268,7 +271,7 @@ PATH candidates that fail are skipped and listed as `rejected /full/path/to/bina
 
 ### Report and exit codes
 
-Stdout is one JSON report on success. Notes and problems go to stderr as `crewplane: note: ...` and `crewplane: CODE (lane): message`.
+Stdout is one JSON report on success. Problems go to stderr as `crewplane: CODE (lane): message`. Notes go to stderr as `crewplane: note: ...` in non-interactive runs; interactive runs show them once in the wizard instead (see [Interactive wizard](#interactive-wizard)).
 
 The report has these fields:
 
@@ -280,7 +283,7 @@ The report has these fields:
 - `written`: the absolute `--out` path, or `null`.
 - `installed`: whether the configuration was installed.
 - `problems`: verification findings as `{code, lane?, message}`. Empty when valid.
-- `notes`: advice, such as disabled reviewers or the Pi no-tools reminder. Harness-switch epoch notes appear here in non-interactive runs; the wizard prints them once before the review prompt and does not repeat them.
+- `notes`: advice, such as disabled reviewers, the Pi no-tools reminder or a `maxParallel` above the enabled lanes. Harness-switch epoch notes appear here in non-interactive runs; the wizard prints them once before the review prompt and does not repeat them.
 - `next`: the suggested next commands.
 
 Exit codes:
