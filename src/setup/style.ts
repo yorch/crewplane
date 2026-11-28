@@ -62,14 +62,14 @@ export function shouldColor(
   return Boolean(stream.isTTY);
 }
 
-/** Step header: leading newline, dim counter, bold title, dim rule, trailing newline. */
+/** Step header: leading newline, dim counter, bold title, dim rule as wide as the header, trailing newline. */
 export function section(
   style: Style,
   step: number,
   total: number,
   title: string,
 ): string {
-  const rule = "-".repeat(visibleWidth(title));
+  const rule = "-".repeat(`[${step}/${total}] `.length + visibleWidth(title));
   return `\n${style.dim(`[${step}/${total}]`)} ${style.bold(title)}\n${style.dim(rule)}\n`;
 }
 

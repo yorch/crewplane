@@ -862,8 +862,8 @@ describe("interactive gate", () => {
     expect(script.stderr.join("")).toContain("--out names a directory");
     expect(report.config.binary).toBe(join(bin, "codex"));
     expect(installed).toHaveLength(1);
-    expect(script.stderr.join("")).toContain("Review:");
-    expect(JSON.stringify(report)).not.toContain("Review:");
+    expect(script.stderr.join("")).toContain("Review");
+    expect(JSON.stringify(report)).not.toContain("Review");
   });
 
   it("EOF aborts and writes and installs nothing", async () => {
@@ -990,6 +990,48 @@ describe("interactive gate", () => {
     expect(
       report.notes.filter((n) => /lane captain switches harness/.test(n)),
     ).toEqual([]);
+  });
+
+  it("shows each template note exactly once on stderr in an interactive run, and keeps them in the report", async () => {
+    const script = scripted(wizardAnswers("no"));
+    const { deps } = fixture({ tty: true, makeIO: () => script.io });
+    const report = await runSetup([], deps);
+    const shown = script.stderr.join("");
+    const note = "visual reviewer lane(s) visual start disabled";
+    expect(
+      shown.match(new RegExp(note.replace(/[()]/g, "\\$&"), "g")),
+    ).toHaveLength(1);
+    // The JSON contract is unchanged: notes remain in the report on stdout.
+    expect(report.notes.some((n) => n.startsWith(note))).toBe(true);
+    // The review is a summary, not a raw JSON dump.
+    expect(shown).not.toContain('"lanes"');
+    expect(shown).toContain("Next steps");
+    expect(shown).toContain("crewplane start");
+  });
+
+  it("warns when maxParallel exceeds the enabled lanes, interactively and not", async () => {
+    // captain, builder (default implementer) and inspector are enabled; visual is not.
+    const expected =
+      "maxParallel 4 exceeds the 3 enabled lanes; each lane runs one task at a time, so at most 3 runs happen at once";
+    const { deps } = fixture({ tty: false });
+    const report = await runSetup(
+      ni("--template", "codex", "--max-parallel", "4"),
+      deps,
+    );
+    expect(report.notes).toContain(expected);
+    const quiet = await runSetup(
+      ni("--template", "codex", "--max-parallel", "3"),
+      fixture().deps,
+    );
+    expect(quiet.notes.some((n) => n.startsWith("maxParallel"))).toBe(false);
+    const answers = wizardAnswers("no");
+    answers[3] = "builder"; // one implementer: 3 enabled lanes
+    answers[5] = "4"; // maxParallel
+    const script = scripted(answers);
+    const interactive = fixture({ tty: true, makeIO: () => script.io });
+    const result = await runSetup([], interactive.deps);
+    expect(result.config.maxParallel).toBe(4);
+    expect(script.stderr.join("").split(expected)).toHaveLength(2);
   });
 
   it("never prints environment values while prompting either", async () => {

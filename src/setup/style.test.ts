@@ -116,13 +116,13 @@ describe("styled output matches plain output after stripAnsi", () => {
 describe("section", () => {
   it("renders a plain header with a rule of the title's width", () => {
     expect(section(plainStyle, 2, 7, "Models")).toBe(
-      "\n[2/7] Models\n------\n",
+      "\n[2/7] Models\n------------\n",
     );
   });
 
   it("renders dim counter, bold title and dim rule when colored", () => {
     expect(section(color, 2, 7, "Models")).toBe(
-      "\n\x1b[2m[2/7]\x1b[22m \x1b[1mModels\x1b[22m\n\x1b[2m------\x1b[22m\n",
+      "\n\x1b[2m[2/7]\x1b[22m \x1b[1mModels\x1b[22m\n\x1b[2m------------\x1b[22m\n",
     );
   });
 });
